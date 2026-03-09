@@ -5,7 +5,30 @@ repository = "https://github.com/smartcrabai/litelemetry"
 version = "0.1.0"
 
 [dependencies]
-tokio = { version = "1.50.0", features = ["rt", "macros"] }
+axum = { version = "0.8", features = ["macros"] }
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+prost = "0.13"
+redis = { version = "0.27", features = ["tokio-comp", "streams"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", features = [
+  "runtime-tokio-rustls",
+  "postgres",
+  "uuid",
+  "chrono",
+  "json",
+] }
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["redis", "postgres"] }
 
 [profile.release]
 codegen-units = 1
