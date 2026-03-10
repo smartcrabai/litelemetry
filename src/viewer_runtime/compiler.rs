@@ -4,7 +4,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum CompileError {
-    #[error("signal_mask is zero: viewer must watch at least one signal")]
+    #[error("signal_mask has no valid signals: viewer must watch at least one signal")]
     ZeroSignalMask,
     #[error("lookback_ms must be positive, got {0}")]
     NonPositiveLookback(i64),
@@ -25,10 +25,6 @@ impl CompiledViewer {
 
     pub fn lookback_ms(&self) -> i64 {
         self.definition.lookback_ms
-    }
-
-    pub fn definition(&self) -> &ViewerDefinition {
-        &self.definition
     }
 }
 

@@ -1,2 +1,2 @@
 pub mod decode;
-pub mod normalize;
+pub mod otlp_http;

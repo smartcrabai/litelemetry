@@ -19,6 +19,11 @@ impl Signal {
             Signal::Logs => 0b100,
         }
     }
+
+    /// 全 signal の配列を返す
+    pub const fn all() -> [Signal; 3] {
+        [Signal::Traces, Signal::Metrics, Signal::Logs]
+    }
 }
 
 /// Signal のビットマスクを表す型安全なラッパー
@@ -27,13 +32,27 @@ pub struct SignalMask(u32);
 
 impl SignalMask {
     pub const NONE: Self = SignalMask(0);
+    /// 有効なシグナルビット (Traces | Metrics | Logs) のみを残すマスク
+    const VALID_BITS: u32 =
+        Signal::Traces.as_mask() | Signal::Metrics.as_mask() | Signal::Logs.as_mask();
 
     pub fn contains(self, signal: Signal) -> bool {
         self.0 & signal.as_mask() != 0
     }
 
+    /// 生の u32 値から SignalMask を生成する。
+    /// 有効なシグナルビット (bits 0-2) 以外は無視される。
+    pub fn from_raw(v: u32) -> Self {
+        SignalMask(v & Self::VALID_BITS)
+    }
+
+    pub fn raw(self) -> u32 {
+        self.0
+    }
+
+    /// 有効なシグナルビットがひとつも立っていない場合に true を返す。
     pub fn is_empty(self) -> bool {
-        self.0 == 0
+        self.0 & Self::VALID_BITS == 0
     }
 }
 

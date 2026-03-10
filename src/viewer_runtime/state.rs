@@ -1,4 +1,4 @@
-use crate::domain::telemetry::NormalizedEntry;
+use crate::domain::telemetry::{NormalizedEntry, Signal};
 use crate::domain::viewer::ViewerStatus;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -9,6 +9,24 @@ pub struct StreamCursor {
     pub traces: Option<String>,
     pub metrics: Option<String>,
     pub logs: Option<String>,
+}
+
+impl StreamCursor {
+    pub fn get(&self, signal: Signal) -> Option<&str> {
+        match signal {
+            Signal::Traces => self.traces.as_deref(),
+            Signal::Metrics => self.metrics.as_deref(),
+            Signal::Logs => self.logs.as_deref(),
+        }
+    }
+
+    pub fn set(&mut self, signal: Signal, id: String) {
+        match signal {
+            Signal::Traces => self.traces = Some(id),
+            Signal::Metrics => self.metrics = Some(id),
+            Signal::Logs => self.logs = Some(id),
+        }
+    }
 }
 
 /// viewer のインメモリ実行時状態

@@ -26,5 +26,4 @@ pub struct ViewerDefinition {
 pub enum ViewerStatus {
     Ok,
     Degraded { reason: String },
-    DataGap,
 }

@@ -2,10 +2,66 @@
 //!
 //! testcontainers で実際の Redis / PostgreSQL インスタンスを起動して検証する。
 //! 実行には Docker が必要:
-//!   cargo test --test integration
+//!   cargo test --test integration -- --include-ignored
 //!
 //! 通常の CI では `#[ignore]` でスキップされ、
 //! `cargo test --test integration -- --include-ignored` で実行できる。
+
+use axum::http::{Request, StatusCode};
+use bytes::Bytes;
+use chrono::{Duration, Utc};
+use litelemetry::domain::telemetry::{NormalizedEntry, Signal, SignalMask};
+use litelemetry::domain::viewer::ViewerDefinition;
+use litelemetry::server::build_app;
+use litelemetry::storage::postgres::{PostgresStore, ViewerSnapshotRow};
+use litelemetry::storage::redis::RedisStore;
+use litelemetry::viewer_runtime::runtime::ViewerRuntime;
+use litelemetry::viewer_runtime::state::StreamCursor;
+use serde_json::json;
+use testcontainers::runners::AsyncRunner;
+use testcontainers_modules::{postgres::Postgres, redis::Redis};
+use tower::ServiceExt;
+use uuid::Uuid;
+
+// ─── ヘルパー ────────────────────────────────────────────────────────────────
+
+async fn make_redis_store(port: u16) -> RedisStore {
+    let url = format!("redis://127.0.0.1:{port}");
+    RedisStore::new(&url)
+        .await
+        .expect("Redis connection failed")
+}
+
+async fn make_postgres_store(port: u16) -> PostgresStore {
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    PostgresStore::new(&url)
+        .await
+        .expect("PostgreSQL connection failed")
+}
+
+fn make_viewer_def(signal_mask: SignalMask, lookback_ms: i64, revision: i64) -> ViewerDefinition {
+    ViewerDefinition {
+        id: Uuid::new_v4(),
+        slug: format!("viewer-{}", Uuid::new_v4()),
+        name: "Test Viewer".to_string(),
+        refresh_interval_ms: 5_000,
+        lookback_ms,
+        signal_mask,
+        definition_json: json!({}),
+        layout_json: json!({}),
+        revision,
+        enabled: true,
+    }
+}
+
+fn make_traces_entry(age_ms: i64) -> NormalizedEntry {
+    NormalizedEntry {
+        signal: Signal::Traces,
+        observed_at: Utc::now() - Duration::milliseconds(age_ms),
+        service_name: Some("test-svc".to_string()),
+        payload: Bytes::from_static(b"\x0a\x01\x02"),
+    }
+}
 
 // ─── startup resume ─────────────────────────────────────────────────────────
 
@@ -20,7 +76,78 @@
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_startup_resume_from_snapshot_and_redis_diff() {
-    todo!("implement after production code is ready")
+    let redis_container = Redis::default().start().await.unwrap();
+    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
+    let pg_container = Postgres::default().start().await.unwrap();
+    let pg_port = pg_container.get_host_port_ipv4(5432).await.unwrap();
+
+    let pg = make_postgres_store(pg_port).await;
+    pg.create_schema().await.unwrap();
+
+    // 1. viewer 定義を PG に挿入
+    let def = make_viewer_def(Signal::Traces.into(), 300_000, 1);
+    let def_id = def.id;
+    pg.insert_viewer_definition(&def).await.unwrap();
+
+    // 2. Redis に 5 件追加してカーソルを取得
+    let mut redis_write = make_redis_store(redis_port).await;
+    for _ in 0..5 {
+        redis_write
+            .append_entry(&make_traces_entry(10_000))
+            .await
+            .unwrap();
+    }
+    // カーソル: 最初の 5 件目の ID を取得 (XRANGE して最後の ID)
+    let snapshot_entries = redis_write
+        .read_entries_since(Signal::Traces, None, 5)
+        .await
+        .unwrap();
+    let snapshot_cursor_id = snapshot_entries.last().unwrap().0.clone();
+
+    // snapshot (cursor = 最初の 5 件目の ID) を PG に保存
+    let mut cursor = StreamCursor::default();
+    cursor.set(Signal::Traces, snapshot_cursor_id.clone());
+    let snapshot = ViewerSnapshotRow {
+        viewer_id: def_id,
+        revision: 1,
+        last_cursor_json: serde_json::to_value(&cursor).unwrap(),
+        status: litelemetry::domain::viewer::ViewerStatus::Ok,
+        generated_at: Utc::now(),
+    };
+    pg.upsert_snapshot(&snapshot).await.unwrap();
+
+    // 3. Redis にさらに 3 件追加 (snapshot cursor より後)
+    for _ in 0..3 {
+        redis_write
+            .append_entry(&make_traces_entry(5_000))
+            .await
+            .unwrap();
+    }
+
+    // 4. viewer runtime を起動
+    let runtime = ViewerRuntime::build(pg, make_redis_store(redis_port).await)
+        .await
+        .unwrap();
+
+    // 5. state が "snapshot cursor 以降の 3 件" で構築されることを確認
+    let viewers = runtime.viewers();
+    assert_eq!(viewers.len(), 1, "viewer が 1 件あること");
+    let (_, state) = &viewers[0];
+    assert_eq!(
+        state.entries.len(),
+        3,
+        "snapshot cursor 以降の 3 件だけが取り込まれること (got: {})",
+        state.entries.len()
+    );
+    assert!(
+        state.last_cursor.traces.is_some(),
+        "traces カーソルが更新されていること"
+    );
+    assert_ne!(
+        state.last_cursor.traces.as_deref(),
+        Some(snapshot_cursor_id.as_str()),
+        "カーソルが snapshot cursor より先に進んでいること"
+    );
 }
 
 /// 起動時 resume: snapshot なし → Redis 全量 replay にフォールバック
@@ -33,7 +160,41 @@ async fn test_startup_resume_from_snapshot_and_redis_diff() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_startup_resume_no_snapshot_falls_back_to_replay() {
-    todo!("implement after production code is ready")
+    let redis_container = Redis::default().start().await.unwrap();
+    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
+    let pg_container = Postgres::default().start().await.unwrap();
+    let pg_port = pg_container.get_host_port_ipv4(5432).await.unwrap();
+
+    let pg = make_postgres_store(pg_port).await;
+    pg.create_schema().await.unwrap();
+
+    // 1. viewer 定義のみ (snapshot なし)
+    let def = make_viewer_def(Signal::Traces.into(), 300_000, 1);
+    pg.insert_viewer_definition(&def).await.unwrap();
+
+    // 2. Redis に 4 件追加
+    let mut redis_write = make_redis_store(redis_port).await;
+    for _ in 0..4 {
+        redis_write
+            .append_entry(&make_traces_entry(10_000))
+            .await
+            .unwrap();
+    }
+
+    // 3. viewer runtime を起動
+    let runtime = ViewerRuntime::build(pg, make_redis_store(redis_port).await)
+        .await
+        .unwrap();
+
+    // 4. 全量 replay で 4 件の state が構築されることを確認
+    let viewers = runtime.viewers();
+    assert_eq!(viewers.len(), 1);
+    let (_, state) = &viewers[0];
+    assert_eq!(
+        state.entries.len(),
+        4,
+        "スナップショットなし → Redis 全量 4 件が replay されること"
+    );
 }
 
 /// 起動時 resume: revision mismatch → replay にフォールバック
@@ -46,7 +207,54 @@ async fn test_startup_resume_no_snapshot_falls_back_to_replay() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_startup_resume_revision_mismatch_falls_back_to_replay() {
-    todo!("implement after production code is ready")
+    let redis_container = Redis::default().start().await.unwrap();
+    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
+    let pg_container = Postgres::default().start().await.unwrap();
+    let pg_port = pg_container.get_host_port_ipv4(5432).await.unwrap();
+
+    let pg = make_postgres_store(pg_port).await;
+    pg.create_schema().await.unwrap();
+
+    // 1. viewer 定義 revision=2
+    let def = make_viewer_def(Signal::Traces.into(), 300_000, 2);
+    let def_id = def.id;
+    pg.insert_viewer_definition(&def).await.unwrap();
+
+    // 2. revision=1 の snapshot (cursor 付き) を保存
+    let mut cursor = StreamCursor::default();
+    cursor.set(Signal::Traces, "9999999999999-0".to_string()); // 未来の ID → これを使うと 0 件になる
+    let snapshot = ViewerSnapshotRow {
+        viewer_id: def_id,
+        revision: 1, // mismatch!
+        last_cursor_json: serde_json::to_value(&cursor).unwrap(),
+        status: litelemetry::domain::viewer::ViewerStatus::Ok,
+        generated_at: Utc::now(),
+    };
+    pg.upsert_snapshot(&snapshot).await.unwrap();
+
+    // Redis に 3 件追加
+    let mut redis_write = make_redis_store(redis_port).await;
+    for _ in 0..3 {
+        redis_write
+            .append_entry(&make_traces_entry(10_000))
+            .await
+            .unwrap();
+    }
+
+    // 3. viewer runtime を起動
+    let runtime = ViewerRuntime::build(pg, make_redis_store(redis_port).await)
+        .await
+        .unwrap();
+
+    // 4. revision mismatch → cursor をリセットして全量 replay → 3 件
+    let viewers = runtime.viewers();
+    assert_eq!(viewers.len(), 1);
+    let (_, state) = &viewers[0];
+    assert_eq!(
+        state.entries.len(),
+        3,
+        "revision mismatch → カーソルをリセットして Redis 全量 3 件が replay されること"
+    );
 }
 
 // ─── diff update ────────────────────────────────────────────────────────────
@@ -56,12 +264,51 @@ async fn test_startup_resume_revision_mismatch_falls_back_to_replay() {
 /// シナリオ:
 ///   1. traces を対象とする viewer を 2 件登録
 ///   2. Redis に traces telemetry を追加
-///   3. due batch を発火
+///   3. diff batch を発火
 ///   4. Redis から 1 回だけ読み出して 2 viewer の state が更新されることを確認
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_diff_update_one_pass_fan_out_to_multiple_viewers() {
-    todo!("implement after production code is ready")
+    let redis_container = Redis::default().start().await.unwrap();
+    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
+    let pg_container = Postgres::default().start().await.unwrap();
+    let pg_port = pg_container.get_host_port_ipv4(5432).await.unwrap();
+
+    let pg = make_postgres_store(pg_port).await;
+    pg.create_schema().await.unwrap();
+
+    // 1. traces を対象とする viewer を 2 件登録
+    let def1 = make_viewer_def(Signal::Traces.into(), 300_000, 1);
+    let def2 = make_viewer_def(Signal::Traces.into(), 300_000, 1);
+    pg.insert_viewer_definition(&def1).await.unwrap();
+    pg.insert_viewer_definition(&def2).await.unwrap();
+
+    // 空の runtime を起動
+    let mut runtime = ViewerRuntime::build(pg, make_redis_store(redis_port).await)
+        .await
+        .unwrap();
+
+    // 両 viewer の初期 entries が 0 件であることを確認
+    for (_, state) in runtime.viewers() {
+        assert_eq!(state.entries.len(), 0);
+    }
+
+    // 2. Redis に 5 件追加
+    let mut redis_write = make_redis_store(redis_port).await;
+    for _ in 0..5 {
+        redis_write
+            .append_entry(&make_traces_entry(10_000))
+            .await
+            .unwrap();
+    }
+
+    // 3. diff batch を発火
+    runtime.apply_diff_batch().await.unwrap();
+
+    // 4. 両 viewer に 5 件ずつ反映されていることを確認
+    for (_, state) in runtime.viewers() {
+        assert_eq!(state.entries.len(), 5, "両 viewer に 5 件が反映されること");
+    }
 }
 
 /// diff 更新後の snapshot upsert
@@ -73,7 +320,62 @@ async fn test_diff_update_one_pass_fan_out_to_multiple_viewers() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_snapshot_upsert_after_diff_update() {
-    todo!("implement after production code is ready")
+    let redis_container = Redis::default().start().await.unwrap();
+    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
+    let pg_container = Postgres::default().start().await.unwrap();
+    let pg_port = pg_container.get_host_port_ipv4(5432).await.unwrap();
+
+    let pg = make_postgres_store(pg_port).await;
+    pg.create_schema().await.unwrap();
+
+    let def = make_viewer_def(Signal::Traces.into(), 300_000, 1);
+    let def_id = def.id;
+    pg.insert_viewer_definition(&def).await.unwrap();
+
+    let pg2 = make_postgres_store(pg_port).await;
+    let mut runtime = ViewerRuntime::build(pg, make_redis_store(redis_port).await)
+        .await
+        .unwrap();
+
+    // Redis に 3 件追加して diff batch
+    let mut redis_write = make_redis_store(redis_port).await;
+    for _ in 0..3 {
+        redis_write
+            .append_entry(&make_traces_entry(10_000))
+            .await
+            .unwrap();
+    }
+    runtime.apply_diff_batch().await.unwrap();
+
+    // 2. PG の snapshot が upsert されていることを確認
+    let mut snapshots = pg2.load_snapshots(&[def_id]).await.unwrap();
+    assert!(
+        !snapshots.is_empty(),
+        "snapshot が PG に upsert されていること"
+    );
+    let snapshot = snapshots.remove(0);
+    assert_eq!(snapshot.revision, 1);
+    assert!(
+        snapshot.last_cursor_json.get("traces").is_some(),
+        "traces カーソルが snapshot に保存されていること"
+    );
+
+    // 3. 再起動後に snapshot から resume (追加エントリなし → diff 0件)
+    let runtime2 = ViewerRuntime::build(
+        make_postgres_store(pg_port).await,
+        make_redis_store(redis_port).await,
+    )
+    .await
+    .unwrap();
+    let viewers2 = runtime2.viewers();
+    assert_eq!(viewers2.len(), 1);
+    let (_, state2) = &viewers2[0];
+    // snapshot cursor が設定されているので Redis 差分は 0 件
+    assert_eq!(
+        state2.entries.len(),
+        0,
+        "再起動後は snapshot cursor 以降の差分 (0 件) のみ取り込まれること"
+    );
 }
 
 /// viewer の lookback を超えた古いエントリが prune される
@@ -86,7 +388,48 @@ async fn test_snapshot_upsert_after_diff_update() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_diff_update_prunes_entries_outside_lookback() {
-    todo!("implement after production code is ready")
+    let redis_container = Redis::default().start().await.unwrap();
+    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
+    let pg_container = Postgres::default().start().await.unwrap();
+    let pg_port = pg_container.get_host_port_ipv4(5432).await.unwrap();
+
+    let pg = make_postgres_store(pg_port).await;
+    pg.create_schema().await.unwrap();
+
+    // 1. lookback=60s の viewer を登録
+    let def = make_viewer_def(Signal::Traces.into(), 60_000, 1);
+    pg.insert_viewer_definition(&def).await.unwrap();
+
+    let mut runtime = ViewerRuntime::build(pg, make_redis_store(redis_port).await)
+        .await
+        .unwrap();
+
+    // 2. 古いエントリ (90s前) と新しいエントリ (10s前) を Redis に追加
+    let mut redis_write = make_redis_store(redis_port).await;
+    // 古い (90s前 → lookback 60s を超える)
+    redis_write
+        .append_entry(&make_traces_entry(90_000))
+        .await
+        .unwrap();
+    // 新しい (10s前 → lookback 内)
+    redis_write
+        .append_entry(&make_traces_entry(10_000))
+        .await
+        .unwrap();
+
+    // 3. diff 更新を発火
+    runtime.apply_diff_batch().await.unwrap();
+
+    // 4. 古いエントリが prune されて新しい 1 件だけ残ることを確認
+    let viewers = runtime.viewers();
+    assert_eq!(viewers.len(), 1);
+    let (_, state) = &viewers[0];
+    assert_eq!(
+        state.entries.len(),
+        1,
+        "lookback 外の古いエントリが prune されて 1 件だけ残ること (got: {})",
+        state.entries.len()
+    );
 }
 
 // ─── OTLP/HTTP ingest endpoint ───────────────────────────────────────────────
@@ -101,26 +444,128 @@ async fn test_diff_update_prunes_entries_outside_lookback() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_ingest_traces_via_otlp_http() {
-    todo!("implement after production code is ready")
+    let redis_container = Redis::default().start().await.unwrap();
+    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
+
+    let redis = make_redis_store(redis_port).await;
+    let app = build_app(redis);
+
+    // 2. POST /v1/traces
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/traces")
+        .header("content-type", "application/x-protobuf")
+        .body(axum::body::Body::from(Bytes::from_static(b"\x0a\x0b\x0c")))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    // 3. 200 OK
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "traces ingest は 200 OK を返すこと"
+    );
+
+    // 4. Redis に entry が追加されていることを確認
+    let mut redis_check = make_redis_store(redis_port).await;
+    let entries = redis_check
+        .read_entries_since(Signal::Traces, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        entries.len(),
+        1,
+        "Redis の traces stream に 1 件追加されること"
+    );
+    assert_eq!(entries[0].1.signal, Signal::Traces);
 }
 
 /// OTLP/HTTP metrics エンドポイントへの ingest
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_ingest_metrics_via_otlp_http() {
-    todo!("implement after production code is ready")
+    let redis_container = Redis::default().start().await.unwrap();
+    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
+
+    let redis = make_redis_store(redis_port).await;
+    let app = build_app(redis);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/metrics")
+        .header("content-type", "application/x-protobuf")
+        .body(axum::body::Body::from(Bytes::from_static(b"\x0a\x0b")))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut redis_check = make_redis_store(redis_port).await;
+    let entries = redis_check
+        .read_entries_since(Signal::Metrics, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        entries.len(),
+        1,
+        "Redis の metrics stream に 1 件追加されること"
+    );
 }
 
 /// OTLP/HTTP logs エンドポイントへの ingest
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_ingest_logs_via_otlp_http() {
-    todo!("implement after production code is ready")
+    let redis_container = Redis::default().start().await.unwrap();
+    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
+
+    let redis = make_redis_store(redis_port).await;
+    let app = build_app(redis);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/logs")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(Bytes::from_static(b"{}")))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut redis_check = make_redis_store(redis_port).await;
+    let entries = redis_check
+        .read_entries_since(Signal::Logs, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        entries.len(),
+        1,
+        "Redis の logs stream に 1 件追加されること"
+    );
 }
 
 /// 未対応の content-type を送信した場合に 415 Unsupported Media Type が返る
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_ingest_unsupported_content_type_returns_415() {
-    todo!("implement after production code is ready")
+    let redis_container = Redis::default().start().await.unwrap();
+    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
+
+    let redis = make_redis_store(redis_port).await;
+    let app = build_app(redis);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/traces")
+        .header("content-type", "text/plain")
+        .body(axum::body::Body::from(Bytes::from_static(b"hello")))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "text/plain は 415 を返すこと"
+    );
 }

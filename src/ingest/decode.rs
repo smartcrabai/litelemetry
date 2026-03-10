@@ -1,4 +1,3 @@
-use crate::domain::telemetry::Signal;
 use thiserror::Error;
 
 /// OTLP リクエストのエンコーディング種別
@@ -23,20 +22,6 @@ pub fn parse_content_type(content_type: &str) -> Result<ContentType, DecodeError
         "application/x-protobuf" => Ok(ContentType::Protobuf),
         "application/json" => Ok(ContentType::Json),
         other => Err(DecodeError::UnsupportedContentType(other.to_string())),
-    }
-}
-
-/// OTLP/HTTP エンドポイントパスから Signal を判定する。
-/// "/v1/traces" -> Some(Signal::Traces)
-/// "/v1/metrics" -> Some(Signal::Metrics)
-/// "/v1/logs" -> Some(Signal::Logs)
-/// その他 -> None
-pub fn signal_from_path(path: &str) -> Option<Signal> {
-    match path {
-        "/v1/traces" => Some(Signal::Traces),
-        "/v1/metrics" => Some(Signal::Metrics),
-        "/v1/logs" => Some(Signal::Logs),
-        _ => None,
     }
 }
 
@@ -104,63 +89,5 @@ mod tests {
             result,
             Err(DecodeError::UnsupportedContentType(_))
         ));
-    }
-
-    // ─── signal_from_path ────────────────────────────────────────────────────
-
-    #[test]
-    fn test_signal_from_traces_path() {
-        // Given: /v1/traces
-        // When: signal_from_path
-        // Then: Signal::Traces
-        assert_eq!(signal_from_path("/v1/traces"), Some(Signal::Traces));
-    }
-
-    #[test]
-    fn test_signal_from_metrics_path() {
-        // Given: /v1/metrics
-        // When: signal_from_path
-        // Then: Signal::Metrics
-        assert_eq!(signal_from_path("/v1/metrics"), Some(Signal::Metrics));
-    }
-
-    #[test]
-    fn test_signal_from_logs_path() {
-        // Given: /v1/logs
-        // When: signal_from_path
-        // Then: Signal::Logs
-        assert_eq!(signal_from_path("/v1/logs"), Some(Signal::Logs));
-    }
-
-    #[test]
-    fn test_signal_from_unknown_path_returns_none() {
-        // Given: /v1/unknown
-        // When: signal_from_path
-        // Then: None
-        assert_eq!(signal_from_path("/v1/unknown"), None);
-    }
-
-    #[test]
-    fn test_signal_from_root_path_returns_none() {
-        // Given: /
-        // When: signal_from_path
-        // Then: None
-        assert_eq!(signal_from_path("/"), None);
-    }
-
-    #[test]
-    fn test_signal_from_traces_trailing_slash_returns_none() {
-        // Given: /v1/traces/ (末尾スラッシュ付き)
-        // When: signal_from_path
-        // Then: None (厳密マッチ)
-        assert_eq!(signal_from_path("/v1/traces/"), None);
-    }
-
-    #[test]
-    fn test_signal_from_empty_path_returns_none() {
-        // Given: 空文字列
-        // When: signal_from_path
-        // Then: None
-        assert_eq!(signal_from_path(""), None);
     }
 }
