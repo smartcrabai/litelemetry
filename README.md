@@ -39,15 +39,16 @@ OTLP/HTTP Client
 - Rust (edition 2024)
 - Redis
 - PostgreSQL
-- Docker (for integration tests)
+- Docker (for integration tests and Docker Compose startup)
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `REDIS_URL` | `redis://127.0.0.1:6379` | Redis connection URL |
-| `DATABASE_URL` | — | PostgreSQL connection URL |
+| `DATABASE_URL` | — | PostgreSQL connection URL. When set, the app bootstraps the PostgreSQL schema and starts the viewer runtime. |
 | `HTTP_PORT` | `8080` | HTTP server listen port |
+| `VIEWER_RUNTIME_POLL_MS` | `1000` | Poll interval for the background viewer runtime |
 
 ## Build & Run
 
@@ -55,12 +56,14 @@ OTLP/HTTP Client
 # Build
 cargo build --release
 
-# Run
+# Run (full stack: Redis + PostgreSQL)
 REDIS_URL=redis://127.0.0.1:6379 \
 DATABASE_URL=postgres://user:pass@localhost/litelemetry \
 HTTP_PORT=8080 \
 cargo run --release
 ```
+
+If you only want OTLP ingest into Redis, `DATABASE_URL` is optional and the app will start in ingest-only mode.
 
 ## Docker
 
@@ -68,7 +71,7 @@ cargo run --release
 # Build
 docker build -t litelemetry .
 
-# Run
+# Run a single container against existing Redis/PostgreSQL instances
 docker run -p 8080:8080 \
   -e REDIS_URL=redis://redis:6379 \
   -e DATABASE_URL=postgres://user:pass@postgres/litelemetry \
@@ -80,6 +83,33 @@ A pre-built image is available on GHCR:
 ```bash
 docker pull ghcr.io/smartcrabai/litelemetry:latest
 ```
+
+### Docker Compose
+
+The repository now ships with `compose.yml`, which starts Redis, PostgreSQL, and the app together:
+
+```bash
+docker compose up --build
+```
+
+Services exposed locally:
+
+- `http://localhost:8080` — litelemetry OTLP/HTTP ingest
+- `localhost:6379` — Redis
+- `localhost:5432` — PostgreSQL (`postgres/postgres`, DB=`litelemetry`)
+
+If any of those ports are already in use, override them when starting Compose:
+
+```bash
+LITELEMETRY_HTTP_PORT=18080 \
+LITELEMETRY_REDIS_PORT=16379 \
+LITELEMETRY_POSTGRES_PORT=15432 \
+docker compose up --build
+```
+
+When `DATABASE_URL` is set (as it is in `compose.yml`), the app automatically creates the `viewer_definitions` and `viewer_snapshots` tables and starts the background viewer runtime.
+
+Note: viewer definitions are still managed directly in PostgreSQL; there is not yet an HTTP API for creating them.
 
 ## Testing
 

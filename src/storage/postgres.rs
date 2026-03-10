@@ -48,7 +48,7 @@ impl PostgresStore {
         Ok(Self { pool })
     }
 
-    /// テスト用: スキーマを作成する
+    /// 起動時 bootstrap 用: 必要なスキーマを作成する
     pub async fn create_schema(&self) -> Result<(), sqlx::Error> {
         sqlx::query(CREATE_VIEWER_DEFINITIONS_SQL)
             .execute(&self.pool)
