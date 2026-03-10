@@ -1,0 +1,37 @@
+name: "Rust Test"
+description: "Run Rust tests, lints, and formatting checks"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install taplo
+      uses: taiki-e/install-action@a37010ded18ff788be4440302bd6830b1ae50d8b # v2
+      with:
+        tool: taplo-cli
+
+    - name: Lint Cargo.toml
+      shell: bash
+      run: taplo lint Cargo.toml
+
+    - name: Check Cargo.toml formatting
+      shell: bash
+      run: taplo fmt --check --option reorder_keys=true Cargo.toml
+
+    - name: Cache Rust dependencies
+      uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+
+    - name: Run cargo check
+      shell: bash
+      run: cargo check --all-features
+
+    - name: Run tests
+      shell: bash
+      run: cargo test --all-features
+
+    - name: Run clippy
+      shell: bash
+      run: cargo clippy --all-targets --all-features -- -D warnings
+
+    - name: Check formatting
+      shell: bash
+      run: cargo fmt -- --check
