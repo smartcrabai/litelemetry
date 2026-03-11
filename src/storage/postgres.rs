@@ -15,6 +15,7 @@ pub struct ViewerSnapshotRow {
 }
 
 /// PostgreSQL へのアクセスを担うストア
+#[derive(Clone)]
 pub struct PostgresStore {
     pool: PgPool,
 }

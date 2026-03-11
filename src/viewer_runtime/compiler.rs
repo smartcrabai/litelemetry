@@ -23,6 +23,10 @@ impl CompiledViewer {
         self.definition.signal_mask.contains(signal)
     }
 
+    pub fn definition(&self) -> &ViewerDefinition {
+        &self.definition
+    }
+
     pub fn lookback_ms(&self) -> i64 {
         self.definition.lookback_ms
     }

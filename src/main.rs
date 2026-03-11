@@ -1,8 +1,9 @@
-use litelemetry::server::build_app;
+use litelemetry::server::{SharedViewerRuntime, build_app_with_services};
 use litelemetry::storage::postgres::PostgresStore;
 use litelemetry::storage::redis::RedisStore;
 use litelemetry::viewer_runtime::runtime::ViewerRuntime;
 use std::time::Duration;
+use tokio::sync::Mutex;
 
 const DEFAULT_HTTP_PORT: u16 = 8080;
 const DEFAULT_VIEWER_RUNTIME_POLL_MS: u64 = 1_000;
@@ -32,30 +33,35 @@ async fn main() {
     let redis = RedisStore::new(&redis_url)
         .await
         .expect("failed to connect to Redis");
+    let mut postgres = None;
+    let mut viewer_runtime = None;
 
     if let Some(database_url) = database_url.as_deref() {
         tracing::info!("connecting to PostgreSQL");
-        let postgres = PostgresStore::new(database_url)
+        let postgres_store = PostgresStore::new(database_url)
             .await
             .expect("failed to connect to PostgreSQL");
-        postgres
+        postgres_store
             .create_schema()
             .await
             .expect("failed to create PostgreSQL schema");
 
-        let runtime = ViewerRuntime::build(postgres, redis.clone())
+        let runtime = ViewerRuntime::build(postgres_store.clone(), redis.clone())
             .await
             .expect("failed to build viewer runtime");
-        spawn_viewer_runtime(runtime, viewer_runtime_poll_ms);
+        let runtime = std::sync::Arc::new(Mutex::new(runtime));
+        spawn_viewer_runtime(runtime.clone(), viewer_runtime_poll_ms);
         tracing::info!(
             "viewer runtime started with {} ms polling interval",
             viewer_runtime_poll_ms
         );
+        postgres = Some(postgres_store);
+        viewer_runtime = Some(runtime);
     } else {
         tracing::info!("DATABASE_URL is not set; starting in ingest-only mode");
     }
 
-    let app = build_app(redis);
+    let app = build_app_with_services(redis, postgres, viewer_runtime);
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await
         .expect("failed to bind");
@@ -63,14 +69,14 @@ async fn main() {
     axum::serve(listener, app).await.expect("server error");
 }
 
-fn spawn_viewer_runtime(mut runtime: ViewerRuntime, poll_ms: u64) {
+fn spawn_viewer_runtime(runtime: SharedViewerRuntime, poll_ms: u64) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(poll_ms.max(1)));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             interval.tick().await;
-            if let Err(e) = runtime.apply_diff_batch().await {
+            if let Err(e) = runtime.lock().await.apply_diff_batch().await {
                 tracing::error!("viewer runtime diff batch failed: {e}");
             }
         }
