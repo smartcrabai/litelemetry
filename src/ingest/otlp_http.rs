@@ -1,5 +1,5 @@
 use crate::domain::telemetry::{NormalizedEntry, Signal};
-use crate::ingest::decode::{ContentType, DecodeError, parse_content_type};
+use crate::ingest::decode::{parse_content_type, ContentType, DecodeError};
 use bytes::Bytes;
 use chrono::Utc;
 
@@ -52,10 +52,10 @@ fn extract_service_name_from_value(signal: Signal, value: &serde_json::Value) ->
     None
 }
 
-fn resource_blocks_for_signal<'a>(
+fn resource_blocks_for_signal(
     signal: Signal,
-    value: &'a serde_json::Value,
-) -> Option<&'a Vec<serde_json::Value>> {
+    value: &serde_json::Value,
+) -> Option<&Vec<serde_json::Value>> {
     match signal {
         Signal::Traces => value.get("resourceSpans")?.as_array(),
         Signal::Metrics => value.get("resourceMetrics")?.as_array(),
