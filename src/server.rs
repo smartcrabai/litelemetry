@@ -191,6 +191,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       pre,
       textarea,
       input,
+      select,
       button {
         font: inherit;
       }
@@ -247,7 +248,8 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         color: var(--muted);
       }
 
-      input {
+      input,
+      select {
         width: 100%;
         min-height: 48px;
         border: 1px solid var(--line);
@@ -258,6 +260,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       }
 
       input:focus-visible,
+      select:focus-visible,
       button:focus-visible {
         outline: 2px solid rgba(13, 109, 98, 0.4);
         outline-offset: 3px;
@@ -468,14 +471,14 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       <section class="hero">
         <article class="panel panel-strong hero-copy stack">
           <p class="eyebrow">Viewer workspace</p>
-          <h1>UI から viewer を作って traces を流し込む。</h1>
+          <h1>UI から viewer を作って telemetry を流し込む。</h1>
           <p>
-            Compose 起動後、この画面だけで viewer 作成、サンプルトレース送信、反映確認まで進められます。
+            Compose 起動後、この画面だけで traces / metrics / logs の viewer 作成、サンプル送信、反映確認まで進められます。
             反映結果は右側のテーブルでそのまま確認できます。
           </p>
           <div class="pill-row">
             <span class="pill">Create viewer</span>
-            <span class="pill">Send trace sample</span>
+            <span class="pill">Send OTLP sample</span>
             <span class="pill">Table verification</span>
           </div>
         </article>
@@ -484,8 +487,8 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           <p class="eyebrow">Routes</p>
           <h2>Compose の smoke test を UI から完結させる。</h2>
           <ul class="hint-list">
-            <li><code>POST /api/viewers</code> で traces viewer を作成</li>
-            <li><code>POST /v1/traces</code> へ OTLP JSON を送信</li>
+            <li><code>POST /api/viewers</code> で signal ごとの viewer を作成</li>
+            <li><code>POST /v1/{signal}</code> へ OTLP JSON を送信</li>
             <li><code>GET /api/viewers</code> で最新 state を取得</li>
             <li><code>GET /healthz</code> で死活確認</li>
           </ul>
@@ -497,9 +500,17 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           <article class="panel panel-strong stack">
             <p class="eyebrow">1. Create Viewer</p>
             <div class="field">
+              <label for="viewer-signal-select">Signal</label>
+              <select id="viewer-signal-select" data-testid="viewer-signal-select" name="viewer-signal">
+                <option value="traces">traces</option>
+                <option value="metrics">metrics</option>
+                <option value="logs">logs</option>
+              </select>
+            </div>
+            <div class="field">
               <label for="viewer-name-input">Viewer name</label>
               <input id="viewer-name-input" data-testid="viewer-name-input" name="viewer-name" placeholder="checkout traces" maxlength="80" />
-              <small>作成される viewer は traces 専用、lookback は 5 分です。</small>
+              <small id="viewer-name-hint">選んだ signal の viewer を 5 分 lookback で作成します。</small>
             </div>
             <div class="action-row">
               <button id="create-viewer-button" data-testid="create-viewer-button" class="primary" type="button">
@@ -509,17 +520,18 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           </article>
 
           <article class="panel stack">
-            <p class="eyebrow">2. Send Trace</p>
+            <p class="eyebrow">2. Send Sample</p>
             <div class="field">
-              <label for="trace-service-input">Service name</label>
-              <input id="trace-service-input" data-testid="trace-service-input" name="trace-service" value="checkout-ui" maxlength="80" />
+              <label for="sample-service-input">Service name</label>
+              <input id="sample-service-input" data-testid="sample-service-input" name="sample-service" value="checkout-ui" maxlength="80" />
             </div>
             <div class="field">
-              <label for="trace-span-input">Span name</label>
-              <input id="trace-span-input" data-testid="trace-span-input" name="trace-span" value="render-checkout" maxlength="80" />
+              <label id="sample-detail-label" for="sample-detail-input">Span name</label>
+              <input id="sample-detail-input" data-testid="sample-detail-input" name="sample-detail" value="render-checkout" maxlength="120" />
+              <small id="sample-signal-hint">現在選択中の viewer と同じ signal に送信します。</small>
             </div>
             <div class="action-row">
-              <button id="send-trace-button" data-testid="send-trace-button" class="secondary" type="button" disabled>
+              <button id="send-sample-button" data-testid="send-sample-button" class="secondary" type="button" disabled>
                 Send trace sample
               </button>
               <button id="refresh-viewers-button" class="secondary" type="button">
@@ -556,7 +568,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           <div id="viewer-empty" data-testid="viewer-empty" class="empty">
             <div class="stack">
               <strong>viewer 読み込み中</strong>
-              <p>viewer 一覧の取得が完了すると、ここに最新 traces が表示されます。</p>
+              <p>viewer 一覧の取得が完了すると、ここに最新 telemetry が表示されます。</p>
             </div>
           </div>
 
@@ -581,11 +593,15 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
     <script>
       const statusBox = document.getElementById('status-box');
       const viewerList = document.getElementById('viewer-list');
+      const viewerSignalSelect = document.getElementById('viewer-signal-select');
       const viewerNameInput = document.getElementById('viewer-name-input');
-      const traceServiceInput = document.getElementById('trace-service-input');
-      const traceSpanInput = document.getElementById('trace-span-input');
+      const viewerNameHint = document.getElementById('viewer-name-hint');
+      const sampleServiceInput = document.getElementById('sample-service-input');
+      const sampleDetailLabel = document.getElementById('sample-detail-label');
+      const sampleDetailInput = document.getElementById('sample-detail-input');
+      const sampleSignalHint = document.getElementById('sample-signal-hint');
       const createViewerButton = document.getElementById('create-viewer-button');
-      const sendTraceButton = document.getElementById('send-trace-button');
+      const sendSampleButton = document.getElementById('send-sample-button');
       const refreshViewersButton = document.getElementById('refresh-viewers-button');
       const activeViewerEyebrow = document.getElementById('active-viewer-eyebrow');
       const activeViewerTitle = document.getElementById('active-viewer-title');
@@ -596,9 +612,34 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const viewerTableWrap = document.getElementById('viewer-table-wrap');
       const viewerTableBody = document.getElementById('viewer-table-body');
 
+      const SAMPLE_CONFIG = {
+        traces: {
+          viewerPlaceholder: 'checkout traces',
+          detailLabel: 'Span name',
+          defaultService: 'checkout-ui',
+          defaultDetail: 'render-checkout',
+          buttonLabel: 'Send trace sample'
+        },
+        metrics: {
+          viewerPlaceholder: 'orders metrics',
+          detailLabel: 'Metric name',
+          defaultService: 'orders-api',
+          defaultDetail: 'http.server.requests',
+          buttonLabel: 'Send metrics sample'
+        },
+        logs: {
+          viewerPlaceholder: 'billing logs',
+          detailLabel: 'Log message',
+          defaultService: 'worker-billing',
+          defaultDetail: 'payment authorized',
+          buttonLabel: 'Send logs sample'
+        }
+      };
+
       let activeViewerId = null;
       let latestViewers = [];
       let viewerLoadState = 'loading';
+      let sampleSignal = null;
 
       function setStatus(kind, message) {
         statusBox.dataset.state = kind;
@@ -643,6 +684,49 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         row.appendChild(makeTextElement('td', text));
       }
 
+      function signalConfig(signal) {
+        return SAMPLE_CONFIG[signal] || SAMPLE_CONFIG.traces;
+      }
+
+      function titleCaseSignal(signal) {
+        return signal.charAt(0).toUpperCase() + signal.slice(1);
+      }
+
+      function currentActiveViewer() {
+        return latestViewers.find(viewer => viewer.id === activeViewerId) || null;
+      }
+
+      function currentViewerSignal(activeViewer) {
+        return activeViewer && activeViewer.signals.length ? activeViewer.signals[0] : viewerSignalSelect.value;
+      }
+
+      function syncCreateForm() {
+        const signal = viewerSignalSelect.value;
+        const config = signalConfig(signal);
+        viewerNameInput.placeholder = config.viewerPlaceholder;
+        viewerNameHint.textContent = `選んだ ${signal} signal の viewer を 5 分 lookback で作成します。`;
+      }
+
+      function syncSampleForm(signal, options = {}) {
+        const config = signalConfig(signal);
+        const forceDefaults = options.forceDefaults ?? false;
+        const signalChanged = sampleSignal !== signal;
+
+        sampleSignal = signal;
+        sampleDetailLabel.textContent = config.detailLabel;
+        sampleServiceInput.placeholder = config.defaultService;
+        sampleDetailInput.placeholder = config.defaultDetail;
+        sampleSignalHint.textContent = latestViewers.length
+          ? `現在選択中の viewer と同じ ${signal} signal に OTLP JSON を送信します。`
+          : `viewer を作成すると ${signal} sample を送信できます。`;
+        sendSampleButton.textContent = config.buttonLabel;
+
+        if (forceDefaults || signalChanged) {
+          sampleServiceInput.value = config.defaultService;
+          sampleDetailInput.value = config.defaultDetail;
+        }
+      }
+
       function normalizeActiveViewer() {
         if (!latestViewers.length) {
           activeViewerId = null;
@@ -663,23 +747,23 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
         if (viewerLoadState === 'loading') {
           viewerList.appendChild(makeTextElement('p', 'viewer 一覧を読み込んでいます。'));
-          sendTraceButton.disabled = true;
+          sendSampleButton.disabled = true;
           return;
         }
 
         if (viewerLoadState === 'error') {
           viewerList.appendChild(makeTextElement('p', 'viewer 一覧の取得に失敗しました。', 'error-inline'));
-          sendTraceButton.disabled = true;
+          sendSampleButton.disabled = true;
           return;
         }
 
         if (!latestViewers.length) {
           viewerList.appendChild(makeTextElement('p', 'viewer はまだありません。', 'error-inline'));
-          sendTraceButton.disabled = true;
+          sendSampleButton.disabled = true;
           return;
         }
 
-        sendTraceButton.disabled = false;
+        sendSampleButton.disabled = false;
 
         for (const viewer of latestViewers) {
           const button = document.createElement('button');
@@ -721,7 +805,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           activeViewerTitle.textContent = 'Viewer を読み込み中';
           activeViewerSubtitle.textContent = '利用可能な viewer を取得しています。';
           viewerEmptyTitle.textContent = 'viewer 読み込み中';
-          viewerEmptyBody.textContent = 'viewer 一覧の取得が完了すると、ここに最新 traces が表示されます。';
+          viewerEmptyBody.textContent = 'viewer 一覧の取得が完了すると、ここに最新 telemetry が表示されます。';
           viewerEmpty.hidden = false;
           viewerTableWrap.hidden = true;
           viewerTableBody.replaceChildren();
@@ -741,27 +825,29 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
 
         if (!activeViewer) {
+          const signal = viewerSignalSelect.value;
           activeViewerEyebrow.textContent = '3. Viewer';
           activeViewerTitle.textContent = 'Viewer がまだありません';
-          activeViewerSubtitle.textContent = '左側で viewer を作成すると、ここに最新 traces が表示されます。';
+          activeViewerSubtitle.textContent = '左側で viewer を作成するか、seed 済み viewer を選ぶとここに最新 telemetry が表示されます。';
           viewerEmptyTitle.textContent = 'viewer 未作成';
-          viewerEmptyBody.textContent = 'まず viewer を作成し、その後で trace sample を送信してください。';
+          viewerEmptyBody.textContent = `まず ${signal} viewer を作成し、その後で sample を送信してください。`;
           viewerEmpty.hidden = false;
           viewerTableWrap.hidden = true;
           viewerTableBody.replaceChildren();
           return;
         }
 
+        const signal = currentViewerSignal(activeViewer);
         activeViewerEyebrow.textContent = activeViewer.entries.length ? '3. Table' : '3. Viewer';
         activeViewerTitle.textContent = activeViewer.name;
-        activeViewerSubtitle.textContent = `${activeViewer.entry_count} entries captured. Latest ${Math.min(activeViewer.entries.length, activeViewer.entry_count)} rows are shown below.`;
+        activeViewerSubtitle.textContent = `${activeViewer.entry_count} entries captured for ${signal}. Latest ${Math.min(activeViewer.entries.length, activeViewer.entry_count)} rows are shown below.`;
 
         if (!activeViewer.entries.length) {
           viewerEmpty.hidden = false;
           viewerTableWrap.hidden = true;
           viewerTableBody.replaceChildren();
-          viewerEmptyTitle.textContent = 'trace 未反映';
-          viewerEmptyBody.textContent = 'Send trace sample を押すと、この viewer に entries が追加されます。';
+          viewerEmptyTitle.textContent = `${signal} 未反映`;
+          viewerEmptyBody.textContent = `Send sample を押すと、この ${signal} viewer に entries が追加されます。`;
           return;
         }
 
@@ -788,6 +874,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         const activeViewer = normalizeActiveViewer();
         renderViewerList();
         renderTable(activeViewer);
+        syncSampleForm(currentViewerSignal(activeViewer));
       }
 
       async function refreshViewers(options = {}) {
@@ -839,6 +926,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
       async function createViewer() {
         const name = viewerNameInput.value.trim();
+        const signal = viewerSignalSelect.value;
         if (!name) {
           setStatus('error', 'Viewer name is required.');
           viewerNameInput.focus();
@@ -846,7 +934,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
 
         createViewerButton.disabled = true;
-        setStatus('working', `Creating viewer "${name}"...`);
+        setStatus('working', `Creating ${signal} viewer "${name}"...`);
 
         try {
           const response = await fetch('/api/viewers', {
@@ -855,7 +943,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
               'content-type': 'application/json',
               'accept': 'application/json'
             },
-            body: JSON.stringify({ name })
+            body: JSON.stringify({ name, signal })
           });
 
           if (!response.ok) {
@@ -865,7 +953,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           const payload = await response.json();
           activeViewerId = payload.id;
           await refreshViewers({ silent: true });
-          setStatus('ok', `Viewer "${name}" created.`);
+          setStatus('ok', `${titleCaseSignal(signal)} viewer "${name}" created.`);
         } catch (error) {
           setStatus('error', `Viewer creation failed: ${error.message}`);
         } finally {
@@ -873,21 +961,24 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
       }
 
-      function buildTraceBody(serviceName, spanName) {
+      function buildResourceAttributes(activeViewer, serviceName) {
+        return [
+          { key: 'service.name', value: { stringValue: serviceName } },
+          { key: 'viewer.id', value: { stringValue: activeViewerId || '' } },
+          { key: 'viewer.name', value: { stringValue: activeViewer ? activeViewer.name : '' } }
+        ];
+      }
+
+      function buildTraceBody(activeViewer, serviceName, spanName) {
         const now = Date.now();
         const traceIdSuffix = `${now}`.padStart(32, '0').slice(-32);
         const spanIdSuffix = `${now}`.padStart(16, '0').slice(-16);
-        const activeViewer = latestViewers.find(viewer => viewer.id === activeViewerId);
 
         return {
           resourceSpans: [
             {
               resource: {
-                attributes: [
-                  { key: 'service.name', value: { stringValue: serviceName } },
-                  { key: 'viewer.id', value: { stringValue: activeViewerId || '' } },
-                  { key: 'viewer.name', value: { stringValue: activeViewer ? activeViewer.name : '' } }
-                ]
+                attributes: buildResourceAttributes(activeViewer, serviceName)
               },
               scopeSpans: [
                 {
@@ -909,11 +1000,92 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         };
       }
 
+      function buildMetricBody(activeViewer, serviceName, metricName) {
+        const now = Date.now();
+        const metricValue = String((now % 97) + 1);
+
+        return {
+          resourceMetrics: [
+            {
+              resource: {
+                attributes: buildResourceAttributes(activeViewer, serviceName)
+              },
+              scopeMetrics: [
+                {
+                  scope: { name: 'litelemetry.ui' },
+                  metrics: [
+                    {
+                      name: metricName,
+                      description: 'litelemetry workspace sample metric',
+                      unit: '1',
+                      sum: {
+                        aggregationTemporality: 2,
+                        isMonotonic: true,
+                        dataPoints: [
+                          {
+                            attributes: [
+                              { key: 'viewer.id', value: { stringValue: activeViewerId || '' } }
+                            ],
+                            asInt: metricValue,
+                            timeUnixNano: `${now}000000`
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        };
+      }
+
+      function buildLogBody(activeViewer, serviceName, message) {
+        const now = Date.now();
+
+        return {
+          resourceLogs: [
+            {
+              resource: {
+                attributes: buildResourceAttributes(activeViewer, serviceName)
+              },
+              scopeLogs: [
+                {
+                  scope: { name: 'litelemetry.ui' },
+                  logRecords: [
+                    {
+                      timeUnixNano: `${now}000000`,
+                      observedTimeUnixNano: `${now}000000`,
+                      severityNumber: 9,
+                      severityText: 'INFO',
+                      body: { stringValue: message },
+                      attributes: [
+                        { key: 'viewer.id', value: { stringValue: activeViewerId || '' } }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        };
+      }
+
+      function buildSampleBody(signal, activeViewer, serviceName, detailValue) {
+        if (signal === 'metrics') {
+          return buildMetricBody(activeViewer, serviceName, detailValue);
+        }
+        if (signal === 'logs') {
+          return buildLogBody(activeViewer, serviceName, detailValue);
+        }
+        return buildTraceBody(activeViewer, serviceName, detailValue);
+      }
+
       async function waitForEntries(previousCount) {
         for (let attempt = 0; attempt < 10; attempt += 1) {
           await new Promise(resolve => window.setTimeout(resolve, 300));
           await refreshViewers({ silent: true });
-          const activeViewer = latestViewers.find(viewer => viewer.id === activeViewerId);
+          const activeViewer = currentActiveViewer();
           if (activeViewer && activeViewer.entry_count > previousCount) {
             return true;
           }
@@ -921,27 +1093,29 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         return false;
       }
 
-      async function sendTrace() {
+      async function sendSample() {
         if (!latestViewers.length) {
-          setStatus('error', 'Create a viewer before sending traces.');
+          setStatus('error', 'Create or select a viewer before sending a sample.');
           return;
         }
 
-        const serviceName = traceServiceInput.value.trim() || 'checkout-ui';
-        const spanName = traceSpanInput.value.trim() || 'render-checkout';
-        const activeViewer = latestViewers.find(viewer => viewer.id === activeViewerId) || latestViewers[0];
+        const activeViewer = currentActiveViewer() || latestViewers[0];
+        const signal = currentViewerSignal(activeViewer);
+        const config = signalConfig(signal);
+        const serviceName = sampleServiceInput.value.trim() || config.defaultService;
+        const detailValue = sampleDetailInput.value.trim() || config.defaultDetail;
         const beforeCount = activeViewer ? activeViewer.entry_count : 0;
 
-        sendTraceButton.disabled = true;
-        setStatus('working', `Sending trace sample for service "${serviceName}"...`);
+        sendSampleButton.disabled = true;
+        setStatus('working', `Sending ${signal} sample for service "${serviceName}"...`);
 
         try {
-          const response = await fetch('/v1/traces', {
+          const response = await fetch(`/v1/${signal}`, {
             method: 'POST',
             headers: {
               'content-type': 'application/json'
             },
-            body: JSON.stringify(buildTraceBody(serviceName, spanName))
+            body: JSON.stringify(buildSampleBody(signal, activeViewer, serviceName, detailValue))
           });
 
           if (!response.ok) {
@@ -950,33 +1124,41 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
           const reflected = await waitForEntries(beforeCount);
           if (reflected) {
-            setStatus('ok', `Trace sample reflected in "${activeViewer.name}".`);
+            setStatus('ok', `${titleCaseSignal(signal)} sample reflected in "${activeViewer.name}".`);
           } else {
-            setStatus('error', 'Trace accepted, but the viewer table did not update in time.');
+            setStatus('error', `${titleCaseSignal(signal)} sample accepted, but the viewer table did not update in time.`);
           }
         } catch (error) {
-          setStatus('error', `Trace send failed: ${error.message}`);
+          setStatus('error', `${titleCaseSignal(signal)} sample send failed: ${error.message}`);
         } finally {
-          sendTraceButton.disabled = false;
+          sendSampleButton.disabled = !latestViewers.length;
         }
       }
 
       createViewerButton.addEventListener('click', createViewer);
-      sendTraceButton.addEventListener('click', sendTrace);
+      sendSampleButton.addEventListener('click', sendSample);
       refreshViewersButton.addEventListener('click', () => refreshViewers());
+      viewerSignalSelect.addEventListener('change', () => {
+        syncCreateForm();
+        if (!latestViewers.length) {
+          syncSampleForm(viewerSignalSelect.value, { forceDefaults: true });
+        }
+      });
       viewerNameInput.addEventListener('keydown', event => {
         if (event.key === 'Enter') {
           event.preventDefault();
           createViewer();
         }
       });
-      traceSpanInput.addEventListener('keydown', event => {
-        if (event.key === 'Enter' && !sendTraceButton.disabled) {
+      sampleDetailInput.addEventListener('keydown', event => {
+        if (event.key === 'Enter' && !sendSampleButton.disabled) {
           event.preventDefault();
-          sendTrace();
+          sendSample();
         }
       });
 
+      syncCreateForm();
+      syncSampleForm(viewerSignalSelect.value, { forceDefaults: true });
       refreshViewers({ silent: true });
       window.setInterval(() => refreshViewers({ silent: true }), 1500);
     </script>
@@ -1000,6 +1182,7 @@ pub type SharedViewerRuntime = Arc<Mutex<ViewerRuntime>>;
 #[derive(Debug, Deserialize)]
 struct CreateViewerRequest {
     name: String,
+    signal: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1107,6 +1290,11 @@ async fn create_viewer(
         return Err(StatusCode::BAD_REQUEST);
     }
 
+    let signal = match payload.signal.as_deref().map(str::trim) {
+        None | Some("") => Signal::Traces,
+        Some(raw_signal) => parse_signal_name(raw_signal).ok_or(StatusCode::BAD_REQUEST)?,
+    };
+
     let id = Uuid::new_v4();
     let definition = ViewerDefinition {
         id,
@@ -1114,10 +1302,10 @@ async fn create_viewer(
         name: name.to_string(),
         refresh_interval_ms: DEFAULT_VIEWER_REFRESH_MS,
         lookback_ms: DEFAULT_VIEWER_LOOKBACK_MS,
-        signal_mask: Signal::Traces.into(),
+        signal_mask: signal.into(),
         definition_json: json!({
             "kind": "table",
-            "signal": "traces"
+            "signal": signal_name(signal)
         }),
         layout_json: json!({
             "default_view": "table"
@@ -1204,7 +1392,7 @@ fn viewer_summary(viewer: &CompiledViewer, viewer_state: &ViewerState) -> Viewer
             signal: signal_name(entry.signal),
             service_name: entry.service_name.clone(),
             payload_size_bytes: entry.payload.len(),
-            payload_preview: payload_preview(&entry.payload),
+            payload_preview: payload_preview(entry.signal, &entry.payload),
         })
         .collect();
 
@@ -1229,6 +1417,15 @@ fn signal_name(signal: Signal) -> &'static str {
     }
 }
 
+fn parse_signal_name(value: &str) -> Option<Signal> {
+    match value {
+        "traces" => Some(Signal::Traces),
+        "metrics" => Some(Signal::Metrics),
+        "logs" => Some(Signal::Logs),
+        _ => None,
+    }
+}
+
 fn signal_mask_labels(mask: SignalMask) -> Vec<&'static str> {
     Signal::all()
         .into_iter()
@@ -1237,24 +1434,19 @@ fn signal_mask_labels(mask: SignalMask) -> Vec<&'static str> {
         .collect()
 }
 
-fn payload_preview(payload: &Bytes) -> String {
-    if let Some(summary) = structured_trace_preview(payload) {
+fn payload_preview(signal: Signal, payload: &Bytes) -> String {
+    if let Some(summary) = structured_payload_preview(signal, payload) {
         return summary;
     }
 
     match std::str::from_utf8(payload) {
         Ok(text) => {
-            let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let compact = compact_whitespace(text);
             if compact.is_empty() {
                 return "(empty payload)".to_string();
             }
 
-            let preview: String = compact.chars().take(MAX_PAYLOAD_PREVIEW_CHARS).collect();
-            if compact.chars().count() > MAX_PAYLOAD_PREVIEW_CHARS {
-                format!("{preview}...")
-            } else {
-                preview
-            }
+            truncate_preview(&compact)
         }
         Err(_) => {
             let mut preview = String::new();
@@ -1267,6 +1459,262 @@ fn payload_preview(payload: &Bytes) -> String {
             preview
         }
     }
+}
+
+fn structured_payload_preview(signal: Signal, payload: &Bytes) -> Option<String> {
+    let summary = match signal {
+        Signal::Traces => structured_trace_preview(payload),
+        Signal::Metrics => structured_metric_preview(payload),
+        Signal::Logs => structured_log_preview(payload),
+    }?;
+
+    Some(truncate_preview(&summary))
+}
+
+fn compact_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn truncate_preview(text: &str) -> String {
+    let preview: String = text.chars().take(MAX_PAYLOAD_PREVIEW_CHARS).collect();
+    if text.chars().count() > MAX_PAYLOAD_PREVIEW_CHARS {
+        format!("{preview}...")
+    } else {
+        preview
+    }
+}
+
+fn extract_service_name_from_resource_blocks(
+    signal: Signal,
+    value: &serde_json::Value,
+) -> Option<String> {
+    let resource_blocks = match signal {
+        Signal::Traces => value.get("resourceSpans")?.as_array()?,
+        Signal::Metrics => value.get("resourceMetrics")?.as_array()?,
+        Signal::Logs => value.get("resourceLogs")?.as_array()?,
+    };
+
+    for resource_block in resource_blocks {
+        let Some(attributes) = resource_block
+            .get("resource")
+            .and_then(|resource| resource.get("attributes"))
+            .and_then(serde_json::Value::as_array)
+        else {
+            continue;
+        };
+
+        if let Some(service_name) = attribute_string_value(attributes, "service.name") {
+            return Some(service_name);
+        }
+    }
+
+    None
+}
+
+fn attribute_string_value(attributes: &[serde_json::Value], key: &str) -> Option<String> {
+    for attribute in attributes {
+        if attribute.get("key").and_then(serde_json::Value::as_str) != Some(key) {
+            continue;
+        }
+
+        if let Some(value) = attribute
+            .get("value")
+            .and_then(|value| value.get("stringValue"))
+            .and_then(serde_json::Value::as_str)
+        {
+            return Some(value.to_string());
+        }
+    }
+
+    None
+}
+
+fn structured_metric_preview(payload: &Bytes) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    let resource_metrics = value.get("resourceMetrics")?.as_array()?;
+    let service_name = extract_service_name_from_resource_blocks(Signal::Metrics, &value);
+    let mut metric_name = None;
+    let mut metric_value = None;
+
+    for resource_metric in resource_metrics {
+        let Some(scope_metrics) = resource_metric
+            .get("scopeMetrics")
+            .and_then(serde_json::Value::as_array)
+        else {
+            continue;
+        };
+
+        for scope_metric in scope_metrics {
+            let Some(metrics) = scope_metric
+                .get("metrics")
+                .and_then(serde_json::Value::as_array)
+            else {
+                continue;
+            };
+
+            for metric in metrics {
+                if metric_name.is_none() {
+                    metric_name = metric
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string);
+                }
+
+                if metric_value.is_none() {
+                    metric_value = metric_first_value(metric);
+                }
+
+                if metric_name.is_some() && metric_value.is_some() {
+                    break;
+                }
+            }
+
+            if metric_name.is_some() && metric_value.is_some() {
+                break;
+            }
+        }
+
+        if metric_name.is_some() && metric_value.is_some() {
+            break;
+        }
+    }
+
+    match (service_name, metric_name, metric_value) {
+        (Some(service_name), Some(metric_name), Some(metric_value)) => Some(format!(
+            "service={service_name} | metric={metric_name} | value={metric_value} | otlp_json"
+        )),
+        (Some(service_name), Some(metric_name), None) => Some(format!(
+            "service={service_name} | metric={metric_name} | otlp_json"
+        )),
+        (None, Some(metric_name), Some(metric_value)) => Some(format!(
+            "metric={metric_name} | value={metric_value} | otlp_json"
+        )),
+        (None, Some(metric_name), None) => Some(format!("metric={metric_name} | otlp_json")),
+        (Some(service_name), None, _) => Some(format!("service={service_name} | otlp_json")),
+        (None, None, _) => None,
+    }
+}
+
+fn metric_first_value(metric: &serde_json::Value) -> Option<String> {
+    for metric_kind in ["sum", "gauge"] {
+        let Some(points) = metric
+            .get(metric_kind)
+            .and_then(|kind| kind.get("dataPoints"))
+            .and_then(serde_json::Value::as_array)
+        else {
+            continue;
+        };
+
+        for point in points {
+            for field in ["asInt", "asDouble"] {
+                let Some(raw_value) = point.get(field) else {
+                    continue;
+                };
+                if let Some(value) = json_scalar_to_string(raw_value) {
+                    return Some(value);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn json_scalar_to_string(value: &serde_json::Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(text.to_string());
+    }
+    if let Some(number) = value.as_i64() {
+        return Some(number.to_string());
+    }
+    if let Some(number) = value.as_u64() {
+        return Some(number.to_string());
+    }
+    if let Some(number) = value.as_f64() {
+        return Some(number.to_string());
+    }
+    None
+}
+
+fn structured_log_preview(payload: &Bytes) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    let resource_logs = value.get("resourceLogs")?.as_array()?;
+    let service_name = extract_service_name_from_resource_blocks(Signal::Logs, &value);
+    let mut severity_text = None;
+    let mut body_text = None;
+
+    for resource_log in resource_logs {
+        let Some(scope_logs) = resource_log
+            .get("scopeLogs")
+            .and_then(serde_json::Value::as_array)
+        else {
+            continue;
+        };
+
+        for scope_log in scope_logs {
+            let Some(log_records) = scope_log
+                .get("logRecords")
+                .and_then(serde_json::Value::as_array)
+            else {
+                continue;
+            };
+
+            for log_record in log_records {
+                if severity_text.is_none() {
+                    severity_text = log_record
+                        .get("severityText")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string);
+                }
+
+                if body_text.is_none() {
+                    body_text = log_record
+                        .get("body")
+                        .and_then(json_body_text)
+                        .map(|text| compact_whitespace(&text));
+                }
+
+                if severity_text.is_some() && body_text.is_some() {
+                    break;
+                }
+            }
+
+            if severity_text.is_some() && body_text.is_some() {
+                break;
+            }
+        }
+
+        if severity_text.is_some() && body_text.is_some() {
+            break;
+        }
+    }
+
+    match (service_name, severity_text, body_text) {
+        (Some(service_name), Some(severity_text), Some(body_text)) => Some(format!(
+            "service={service_name} | severity={severity_text} | body={body_text} | otlp_json"
+        )),
+        (Some(service_name), None, Some(body_text)) => Some(format!(
+            "service={service_name} | body={body_text} | otlp_json"
+        )),
+        (None, Some(severity_text), Some(body_text)) => Some(format!(
+            "severity={severity_text} | body={body_text} | otlp_json"
+        )),
+        (None, None, Some(body_text)) => Some(format!("body={body_text} | otlp_json")),
+        (Some(service_name), None, None) => Some(format!("service={service_name} | otlp_json")),
+        (None, Some(severity_text), None) => Some(format!("severity={severity_text} | otlp_json")),
+        (None, None, None) => None,
+        (Some(service_name), Some(severity_text), None) => Some(format!(
+            "service={service_name} | severity={severity_text} | otlp_json"
+        )),
+    }
+}
+
+fn json_body_text(value: &serde_json::Value) -> Option<String> {
+    if let Some(string_value) = value.get("stringValue").and_then(serde_json::Value::as_str) {
+        return Some(string_value.to_string());
+    }
+
+    json_scalar_to_string(value)
 }
 
 fn structured_trace_preview(payload: &Bytes) -> Option<String> {
@@ -1372,7 +1820,10 @@ mod tests {
 
         assert!(html.contains("litelemetry viewer"));
         assert!(html.contains("Create viewer"));
-        assert!(html.contains("Send trace sample"));
+        assert!(html.contains("Send OTLP sample"));
+        assert!(html.contains("viewer-signal-select"));
+        assert!(html.contains("Send metrics sample"));
+        assert!(html.contains("Send logs sample"));
         assert!(html.contains("Viewer を読み込み中"));
         assert!(html.contains("viewer 読み込み中"));
         assert!(html.contains("viewer-table"));
@@ -1396,5 +1847,90 @@ mod tests {
 
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         assert_eq!(body.as_ref(), b"ok");
+    }
+
+    #[test]
+    fn test_payload_preview_extracts_metric_summary() {
+        let payload = Bytes::from(
+            serde_json::json!({
+                "resourceMetrics": [
+                    {
+                        "resource": {
+                            "attributes": [
+                                {
+                                    "key": "service.name",
+                                    "value": { "stringValue": "orders-api" }
+                                }
+                            ]
+                        },
+                        "scopeMetrics": [
+                            {
+                                "scope": { "name": "test" },
+                                "metrics": [
+                                    {
+                                        "name": "http.server.requests",
+                                        "sum": {
+                                            "aggregationTemporality": 2,
+                                            "isMonotonic": true,
+                                            "dataPoints": [
+                                                {
+                                                    "asInt": "42",
+                                                    "timeUnixNano": "1"
+                                                }
+                                            ]
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            })
+            .to_string(),
+        );
+
+        let preview = payload_preview(Signal::Metrics, &payload);
+
+        assert!(preview.contains("orders-api"));
+        assert!(preview.contains("http.server.requests"));
+        assert!(preview.contains("42"));
+    }
+
+    #[test]
+    fn test_payload_preview_extracts_log_summary() {
+        let payload = Bytes::from(
+            serde_json::json!({
+                "resourceLogs": [
+                    {
+                        "resource": {
+                            "attributes": [
+                                {
+                                    "key": "service.name",
+                                    "value": { "stringValue": "worker-billing" }
+                                }
+                            ]
+                        },
+                        "scopeLogs": [
+                            {
+                                "scope": { "name": "test" },
+                                "logRecords": [
+                                    {
+                                        "severityText": "INFO",
+                                        "body": { "stringValue": "payment authorized" }
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            })
+            .to_string(),
+        );
+
+        let preview = payload_preview(Signal::Logs, &payload);
+
+        assert!(preview.contains("worker-billing"));
+        assert!(preview.contains("INFO"));
+        assert!(preview.contains("payment authorized"));
     }
 }

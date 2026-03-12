@@ -106,7 +106,7 @@ Services exposed locally:
 - `localhost:6379` — Redis
 - `localhost:5432` — PostgreSQL (`postgres/postgres`, DB=`litelemetry`)
 
-On a fresh `docker compose up -d`, PostgreSQL runs `docker/postgres/initdb/001-init.sql` and seeds a demo traces viewer with a 24-hour lookback, while the `redis-seeder` service pushes a few sample traces into Redis for the locally running app.
+On a fresh `docker compose up -d`, PostgreSQL runs `docker/postgres/initdb/001-init.sql` and seeds demo traces / metrics / logs viewers with a 24-hour lookback, while the `redis-seeder` service pushes sample telemetry for each signal into Redis for the locally running app.
 
 If any of those ports are already in use, override them when starting Compose:
 
@@ -133,9 +133,9 @@ docker compose up -d
 
 Open `http://localhost:8080` to access the built-in viewer workspace. From that page you can:
 
-- inspect the seeded `Compose Seed Viewer` immediately after startup
-- create a traces viewer from the browser
-- send a sample trace to `/v1/traces`
+- inspect the seeded `Compose Seed Traces`, `Compose Seed Metrics`, and `Compose Seed Logs` viewers immediately after startup
+- create a traces / metrics / logs viewer from the browser
+- send a sample OTLP payload to `/v1/traces`, `/v1/metrics`, or `/v1/logs`
 - confirm the reflected entries in a table view backed by the in-memory viewer runtime
 
 ## Testing

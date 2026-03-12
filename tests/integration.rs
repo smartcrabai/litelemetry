@@ -102,6 +102,87 @@ fn make_trace_payload(service_name: &str, span_name: &str) -> Bytes {
     )
 }
 
+fn make_metric_payload(service_name: &str, metric_name: &str, metric_value: u64) -> Bytes {
+    Bytes::from(
+        json!({
+            "resourceMetrics": [
+                {
+                    "resource": {
+                        "attributes": [
+                            {
+                                "key": "service.name",
+                                "value": {
+                                    "stringValue": service_name
+                                }
+                            }
+                        ]
+                    },
+                    "scopeMetrics": [
+                        {
+                            "scope": {
+                                "name": "integration-test"
+                            },
+                            "metrics": [
+                                {
+                                    "name": metric_name,
+                                    "sum": {
+                                        "aggregationTemporality": 2,
+                                        "isMonotonic": true,
+                                        "dataPoints": [
+                                            {
+                                                "asInt": metric_value.to_string(),
+                                                "timeUnixNano": "1"
+                                            }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        })
+        .to_string(),
+    )
+}
+
+fn make_log_payload(service_name: &str, severity_text: &str, message: &str) -> Bytes {
+    Bytes::from(
+        json!({
+            "resourceLogs": [
+                {
+                    "resource": {
+                        "attributes": [
+                            {
+                                "key": "service.name",
+                                "value": {
+                                    "stringValue": service_name
+                                }
+                            }
+                        ]
+                    },
+                    "scopeLogs": [
+                        {
+                            "scope": {
+                                "name": "integration-test"
+                            },
+                            "logRecords": [
+                                {
+                                    "severityText": severity_text,
+                                    "body": {
+                                        "stringValue": message
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        })
+        .to_string(),
+    )
+}
+
 // ─── startup resume ─────────────────────────────────────────────────────────
 
 /// 起動時 resume: PostgreSQL snapshot + Redis 差分から状態を復元する
@@ -544,7 +625,7 @@ async fn test_create_viewer_then_trace_is_reflected_in_viewer_api() {
         .uri("/api/viewers")
         .header("content-type", "application/json")
         .body(axum::body::Body::from(
-            json!({ "name": "Checkout traces" }).to_string(),
+            json!({ "name": "Checkout traces", "signal": "traces" }).to_string(),
         ))
         .unwrap();
 
@@ -590,6 +671,157 @@ async fn test_create_viewer_then_trace_is_reflected_in_viewer_api() {
     assert!(
         preview.contains("render-checkout"),
         "payload preview に span name が含まれること: {preview}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_create_viewer_then_metric_is_reflected_in_viewer_api() {
+    let redis_container = Redis::default().start().await.unwrap();
+    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
+    let pg_container = Postgres::default().start().await.unwrap();
+    let pg_port = pg_container.get_host_port_ipv4(5432).await.unwrap();
+
+    let pg = make_postgres_store(pg_port).await;
+    pg.create_schema().await.unwrap();
+
+    let runtime = ViewerRuntime::build(pg.clone(), make_redis_store(redis_port).await)
+        .await
+        .unwrap();
+    let runtime = Arc::new(Mutex::new(runtime));
+
+    let app = build_app_with_services(make_redis_store(redis_port).await, Some(pg), Some(runtime));
+
+    let create_request = Request::builder()
+        .method("POST")
+        .uri("/api/viewers")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "Orders metrics", "signal": "metrics" }).to_string(),
+        ))
+        .unwrap();
+
+    let create_response = app.clone().oneshot(create_request).await.unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+
+    let metric_request = Request::builder()
+        .method("POST")
+        .uri("/v1/metrics")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(make_metric_payload(
+            "orders-api",
+            "http.server.requests",
+            42,
+        )))
+        .unwrap();
+
+    let metric_response = app.clone().oneshot(metric_request).await.unwrap();
+    assert_eq!(metric_response.status(), StatusCode::OK);
+
+    let list_request = Request::builder()
+        .method("GET")
+        .uri("/api/viewers")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let list_response = app.oneshot(list_request).await.unwrap();
+    assert_eq!(list_response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(list_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let viewers = payload["viewers"].as_array().unwrap();
+
+    assert_eq!(viewers.len(), 1, "viewer が 1 件作成されること");
+    assert_eq!(viewers[0]["signals"][0], "metrics");
+    assert_eq!(
+        viewers[0]["entry_count"], 1,
+        "metrics が 1 件反映されること"
+    );
+    assert_eq!(viewers[0]["entries"][0]["signal"], "metrics");
+    assert_eq!(viewers[0]["entries"][0]["service_name"], "orders-api");
+
+    let preview = viewers[0]["entries"][0]["payload_preview"]
+        .as_str()
+        .unwrap();
+    assert!(
+        preview.contains("http.server.requests"),
+        "payload preview に metric name が含まれること: {preview}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_create_viewer_then_log_is_reflected_in_viewer_api() {
+    let redis_container = Redis::default().start().await.unwrap();
+    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
+    let pg_container = Postgres::default().start().await.unwrap();
+    let pg_port = pg_container.get_host_port_ipv4(5432).await.unwrap();
+
+    let pg = make_postgres_store(pg_port).await;
+    pg.create_schema().await.unwrap();
+
+    let runtime = ViewerRuntime::build(pg.clone(), make_redis_store(redis_port).await)
+        .await
+        .unwrap();
+    let runtime = Arc::new(Mutex::new(runtime));
+
+    let app = build_app_with_services(make_redis_store(redis_port).await, Some(pg), Some(runtime));
+
+    let create_request = Request::builder()
+        .method("POST")
+        .uri("/api/viewers")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "Billing logs", "signal": "logs" }).to_string(),
+        ))
+        .unwrap();
+
+    let create_response = app.clone().oneshot(create_request).await.unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+
+    let log_request = Request::builder()
+        .method("POST")
+        .uri("/v1/logs")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(make_log_payload(
+            "worker-billing",
+            "INFO",
+            "payment authorized",
+        )))
+        .unwrap();
+
+    let log_response = app.clone().oneshot(log_request).await.unwrap();
+    assert_eq!(log_response.status(), StatusCode::OK);
+
+    let list_request = Request::builder()
+        .method("GET")
+        .uri("/api/viewers")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let list_response = app.oneshot(list_request).await.unwrap();
+    assert_eq!(list_response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(list_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let viewers = payload["viewers"].as_array().unwrap();
+
+    assert_eq!(viewers.len(), 1, "viewer が 1 件作成されること");
+    assert_eq!(viewers[0]["signals"][0], "logs");
+    assert_eq!(viewers[0]["entry_count"], 1, "log が 1 件反映されること");
+    assert_eq!(viewers[0]["entries"][0]["signal"], "logs");
+    assert_eq!(viewers[0]["entries"][0]["service_name"], "worker-billing");
+
+    let preview = viewers[0]["entries"][0]["payload_preview"]
+        .as_str()
+        .unwrap();
+    assert!(
+        preview.contains("payment authorized"),
+        "payload preview に log message が含まれること: {preview}"
     );
 }
 

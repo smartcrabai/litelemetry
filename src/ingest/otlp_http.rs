@@ -7,7 +7,7 @@ use chrono::Utc;
 ///
 /// - content-type が未対応の場合は `DecodeError::UnsupportedContentType` を返す。
 /// - 成功した場合はペイロードをそのまま保持する NormalizedEntry を返す。
-///   traces の JSON payload からは `service.name` を抽出する。
+///   JSON payload からは signal に応じて `service.name` を抽出する。
 pub fn parse_ingest_request(
     signal: Signal,
     content_type_header: Option<&str>,
@@ -24,15 +24,19 @@ pub fn parse_ingest_request(
 }
 
 fn extract_service_name(signal: Signal, content_type: ContentType, body: &Bytes) -> Option<String> {
-    if signal != Signal::Traces || content_type != ContentType::Json {
+    if content_type != ContentType::Json {
         return None;
     }
 
     let value: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let resource_spans = value.get("resourceSpans")?.as_array()?;
+    extract_service_name_from_value(signal, &value)
+}
 
-    for resource_span in resource_spans {
-        let Some(attributes) = resource_span
+fn extract_service_name_from_value(signal: Signal, value: &serde_json::Value) -> Option<String> {
+    let resource_blocks = resource_blocks_for_signal(signal, value)?;
+
+    for resource_block in resource_blocks {
+        let Some(attributes) = resource_block
             .get("resource")
             .and_then(|resource| resource.get("attributes"))
             .and_then(serde_json::Value::as_array)
@@ -40,21 +44,37 @@ fn extract_service_name(signal: Signal, content_type: ContentType, body: &Bytes)
             continue;
         };
 
-        for attribute in attributes {
-            let Some(key) = attribute.get("key").and_then(serde_json::Value::as_str) else {
-                continue;
-            };
-            if key != "service.name" {
-                continue;
-            }
+        if let Some(service_name) = attribute_string_value(attributes, "service.name") {
+            return Some(service_name);
+        }
+    }
 
-            if let Some(service_name) = attribute
-                .get("value")
-                .and_then(|value| value.get("stringValue"))
-                .and_then(serde_json::Value::as_str)
-            {
-                return Some(service_name.to_string());
-            }
+    None
+}
+
+fn resource_blocks_for_signal<'a>(
+    signal: Signal,
+    value: &'a serde_json::Value,
+) -> Option<&'a Vec<serde_json::Value>> {
+    match signal {
+        Signal::Traces => value.get("resourceSpans")?.as_array(),
+        Signal::Metrics => value.get("resourceMetrics")?.as_array(),
+        Signal::Logs => value.get("resourceLogs")?.as_array(),
+    }
+}
+
+fn attribute_string_value(attributes: &[serde_json::Value], key: &str) -> Option<String> {
+    for attribute in attributes {
+        if attribute.get("key").and_then(serde_json::Value::as_str) != Some(key) {
+            continue;
+        }
+
+        if let Some(value) = attribute
+            .get("value")
+            .and_then(|value| value.get("stringValue"))
+            .and_then(serde_json::Value::as_str)
+        {
+            return Some(value.to_string());
         }
     }
 
@@ -303,5 +323,53 @@ mod tests {
         let entry = parse_ingest_request(Signal::Traces, Some("application/json"), body).unwrap();
 
         assert_eq!(entry.service_name.as_deref(), Some("payments-api"));
+    }
+
+    #[test]
+    fn test_parse_ingest_request_extracts_service_name_from_metric_json() {
+        let body = Bytes::from_static(
+            br#"{
+                "resourceMetrics": [
+                    {
+                        "resource": {
+                            "attributes": [
+                                {
+                                    "key": "service.name",
+                                    "value": { "stringValue": "orders-api" }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }"#,
+        );
+
+        let entry = parse_ingest_request(Signal::Metrics, Some("application/json"), body).unwrap();
+
+        assert_eq!(entry.service_name.as_deref(), Some("orders-api"));
+    }
+
+    #[test]
+    fn test_parse_ingest_request_extracts_service_name_from_log_json() {
+        let body = Bytes::from_static(
+            br#"{
+                "resourceLogs": [
+                    {
+                        "resource": {
+                            "attributes": [
+                                {
+                                    "key": "service.name",
+                                    "value": { "stringValue": "worker-billing" }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }"#,
+        );
+
+        let entry = parse_ingest_request(Signal::Logs, Some("application/json"), body).unwrap();
+
+        assert_eq!(entry.service_name.as_deref(), Some("worker-billing"));
     }
 }
