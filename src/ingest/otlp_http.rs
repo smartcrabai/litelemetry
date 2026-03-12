@@ -1,5 +1,5 @@
 use crate::domain::telemetry::{NormalizedEntry, Signal};
-use crate::ingest::decode::{parse_content_type, ContentType, DecodeError};
+use crate::ingest::decode::{ContentType, DecodeError, parse_content_type};
 use bytes::Bytes;
 use chrono::Utc;
 
