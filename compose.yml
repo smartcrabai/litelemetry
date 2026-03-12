@@ -1,6 +1,6 @@
 services:
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     command:
       - redis-server
       - --maxmemory
@@ -16,7 +16,7 @@ services:
       retries: 20
 
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -24,12 +24,21 @@ services:
     ports:
       - "${LITELEMETRY_POSTGRES_PORT:-5432}:5432"
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d litelemetry"]
       interval: 5s
       timeout: 5s
       retries: 20
+
+  redis-seeder:
+    image: redis:8-alpine
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./docker/redis:/seed:ro
+    entrypoint: ["sh", "/seed/seed.sh"]
 
   app:
     build:
@@ -39,6 +48,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      redis-seeder:
+        condition: service_completed_successfully
     environment:
       REDIS_URL: redis://redis:6379
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/litelemetry
@@ -47,6 +58,3 @@ services:
       RUST_LOG: litelemetry=info
     ports:
       - "${LITELEMETRY_HTTP_PORT:-8080}:8080"
-
-volumes:
-  postgres-data:

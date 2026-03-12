@@ -86,7 +86,7 @@ docker pull ghcr.io/smartcrabai/litelemetry:latest
 
 ### Docker Compose
 
-The repository now ships with `compose.yml`, which starts Redis, PostgreSQL, and the app together:
+The repository now ships with `compose.yml`, which starts Redis 8, PostgreSQL 18, a one-shot Redis seeder, and the app together:
 
 ```bash
 docker compose up --build
@@ -97,6 +97,8 @@ Services exposed locally:
 - `http://localhost:8080` — litelemetry UI + OTLP/HTTP ingest
 - `localhost:6379` — Redis
 - `localhost:5432` — PostgreSQL (`postgres/postgres`, DB=`litelemetry`)
+
+On a fresh `docker compose up --build`, PostgreSQL runs `docker/postgres/initdb/001-init.sql` and seeds a demo traces viewer, while the `redis-seeder` service pushes a few sample traces into Redis before the app starts.
 
 If any of those ports are already in use, override them when starting Compose:
 
@@ -109,8 +111,16 @@ docker compose up --build
 
 When `DATABASE_URL` is set (as it is in `compose.yml`), the app automatically creates the `viewer_definitions` and `viewer_snapshots` tables and starts the background viewer runtime.
 
+If you want a fresh copy of the seeded demo data, recreate the containers first:
+
+```bash
+docker compose down
+docker compose up --build
+```
+
 Open `http://localhost:8080` to access the built-in viewer workspace. From that page you can:
 
+- inspect the seeded `Compose Seed Viewer` immediately after startup
 - create a traces viewer from the browser
 - send a sample trace to `/v1/traces`
 - confirm the reflected entries in a table view backed by the in-memory viewer runtime
