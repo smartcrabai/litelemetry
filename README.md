@@ -37,6 +37,7 @@ OTLP/HTTP Client
 ## Prerequisites
 
 - Rust (edition 2024)
+- [bacon](https://github.com/Canop/bacon) for local app startup (`cargo install --locked bacon`)
 - Redis
 - PostgreSQL
 - Docker (for integration tests and Docker Compose startup)
@@ -53,15 +54,23 @@ OTLP/HTTP Client
 ## Build & Run
 
 ```bash
-# Build
-cargo build --release
+# Install bacon once
+cargo install --locked bacon
 
-# Run (full stack: Redis + PostgreSQL)
-REDIS_URL=redis://127.0.0.1:6379 \
-DATABASE_URL=postgres://user:pass@localhost/litelemetry \
-HTTP_PORT=8080 \
-cargo run --release
+# Start Redis + PostgreSQL + seeded demo data
+docker compose up -d
+
+# Run the app locally with auto-restart on changes
+bacon serve
 ```
+
+The `serve` job uses `scripts/run-local-with-bacon.sh`, which defaults to:
+
+- `REDIS_URL=redis://127.0.0.1:${LITELEMETRY_REDIS_PORT:-6379}`
+- `DATABASE_URL=postgres://postgres:postgres@127.0.0.1:${LITELEMETRY_POSTGRES_PORT:-5432}/litelemetry`
+- `HTTP_PORT=8080`
+
+If you override Compose ports, export `LITELEMETRY_REDIS_PORT` / `LITELEMETRY_POSTGRES_PORT` before `bacon serve`, or set `REDIS_URL` / `DATABASE_URL` directly.
 
 If you only want OTLP ingest into Redis, `DATABASE_URL` is optional and the app will start in ingest-only mode.
 
@@ -86,36 +95,40 @@ docker pull ghcr.io/smartcrabai/litelemetry:latest
 
 ### Docker Compose
 
-The repository now ships with `compose.yml`, which starts Redis 8, PostgreSQL 18, a one-shot Redis seeder, and the app together:
+The repository now ships with `compose.yml`, which starts Redis 8, PostgreSQL 18, and a one-shot Redis seeder for local app development:
 
 ```bash
-docker compose up --build
+docker compose up -d
 ```
 
 Services exposed locally:
 
-- `http://localhost:8080` — litelemetry UI + OTLP/HTTP ingest
 - `localhost:6379` — Redis
 - `localhost:5432` — PostgreSQL (`postgres/postgres`, DB=`litelemetry`)
 
-On a fresh `docker compose up --build`, PostgreSQL runs `docker/postgres/initdb/001-init.sql` and seeds a demo traces viewer, while the `redis-seeder` service pushes a few sample traces into Redis before the app starts.
+On a fresh `docker compose up -d`, PostgreSQL runs `docker/postgres/initdb/001-init.sql` and seeds a demo traces viewer with a 24-hour lookback, while the `redis-seeder` service pushes a few sample traces into Redis for the locally running app.
 
 If any of those ports are already in use, override them when starting Compose:
 
 ```bash
-LITELEMETRY_HTTP_PORT=18080 \
 LITELEMETRY_REDIS_PORT=16379 \
 LITELEMETRY_POSTGRES_PORT=15432 \
-docker compose up --build
+docker compose up -d
 ```
 
-When `DATABASE_URL` is set (as it is in `compose.yml`), the app automatically creates the `viewer_definitions` and `viewer_snapshots` tables and starts the background viewer runtime.
+After Compose is up, start the app locally:
+
+```bash
+bacon serve
+```
+
+When `DATABASE_URL` is set (as it is by default in `scripts/run-local-with-bacon.sh`), the app automatically creates the `viewer_definitions` and `viewer_snapshots` tables and starts the background viewer runtime.
 
 If you want a fresh copy of the seeded demo data, recreate the containers first:
 
 ```bash
 docker compose down
-docker compose up --build
+docker compose up -d
 ```
 
 Open `http://localhost:8080` to access the built-in viewer workspace. From that page you can:

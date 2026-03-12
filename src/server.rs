@@ -105,6 +105,10 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         gap: 18px;
       }
 
+      [hidden] {
+        display: none !important;
+      }
+
       .hero {
         grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.9fr);
         margin-bottom: 22px;
@@ -618,6 +622,23 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         return makeTextElement('span', text);
       }
 
+      function formatLookbackMs(lookbackMs) {
+        const seconds = Math.round(lookbackMs / 1000);
+        if (seconds % 86400 === 0) {
+          const days = seconds / 86400;
+          return `${days}d`;
+        }
+        if (seconds % 3600 === 0) {
+          const hours = seconds / 3600;
+          return `${hours}h`;
+        }
+        if (seconds % 60 === 0) {
+          const minutes = seconds / 60;
+          return `${minutes}m`;
+        }
+        return `${seconds}s`;
+      }
+
       function appendTableCell(row, text) {
         row.appendChild(makeTextElement('td', text));
       }
@@ -683,7 +704,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           for (const signal of viewer.signals) {
             meta.appendChild(makeViewerMetaPill(signal));
           }
-          meta.appendChild(makeViewerMetaPill(`lookback ${Math.round(viewer.lookback_ms / 1000)}s`));
+          meta.appendChild(makeViewerMetaPill(`lookback ${formatLookbackMs(viewer.lookback_ms)}`));
 
           button.append(titleRow, meta);
           button.addEventListener('click', () => {
@@ -772,6 +793,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       async function refreshViewers(options = {}) {
         const silent = options.silent ?? false;
         const previousLoadState = viewerLoadState;
+        const previousViewers = latestViewers;
 
         try {
           const response = await fetch('/api/viewers', {
@@ -797,10 +819,21 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             }
           }
         } catch (error) {
-          latestViewers = [];
-          viewerLoadState = 'error';
+          if (previousLoadState === 'ready') {
+            latestViewers = previousViewers;
+            viewerLoadState = 'ready';
+          } else {
+            latestViewers = [];
+            viewerLoadState = 'error';
+          }
+
           render();
-          setStatus('error', `Viewer list refresh failed: ${error.message}`);
+
+          if (previousLoadState === 'ready') {
+            setStatus('error', `Viewer list refresh failed: ${error.message}. Showing the latest successful snapshot.`);
+          } else {
+            setStatus('error', `Viewer list refresh failed: ${error.message}`);
+          }
         }
       }
 

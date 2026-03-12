@@ -35,7 +35,7 @@ INSERT INTO viewer_definitions (
     'compose-seed-traces',
     'Compose Seed Viewer',
     1000,
-    300000,
+    86400000,
     1,
     '{"kind":"table","signal":"traces"}'::jsonb,
     '{"default_view":"table"}'::jsonb,
