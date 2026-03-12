@@ -526,8 +526,8 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
           <article class="panel stack">
             <p class="eyebrow">Status</p>
-            <div id="status-box" data-testid="status-box" class="status-box" data-state="idle">
-              Viewer を作成すると traces のテーブル表示が始まります。
+            <div id="status-box" data-testid="status-box" class="status-box" data-state="working">
+              viewer 一覧を読み込んでいます。
             </div>
           </article>
 
@@ -545,14 +545,14 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         <section class="panel panel-strong stack table-wrap">
           <div class="stack">
             <p class="eyebrow">3. Table</p>
-            <h2 id="active-viewer-title" data-testid="active-viewer-title">Viewer がまだありません</h2>
-            <p id="active-viewer-subtitle">左側で viewer を作成すると、ここに最新 traces が表示されます。</p>
+            <h2 id="active-viewer-title" data-testid="active-viewer-title">Viewer を読み込み中</h2>
+            <p id="active-viewer-subtitle">利用可能な viewer を取得しています。</p>
           </div>
 
           <div id="viewer-empty" data-testid="viewer-empty" class="empty">
             <div class="stack">
-              <strong>viewer 未作成</strong>
-              <p>まず viewer を作成し、その後で trace sample を送信してください。</p>
+              <strong>viewer 読み込み中</strong>
+              <p>viewer 一覧の取得が完了すると、ここに最新 traces が表示されます。</p>
             </div>
           </div>
 
@@ -593,6 +593,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
       let activeViewerId = null;
       let latestViewers = [];
+      let viewerLoadState = 'loading';
 
       function setStatus(kind, message) {
         statusBox.dataset.state = kind;
@@ -638,6 +639,18 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       function renderViewerList() {
         viewerList.replaceChildren();
 
+        if (viewerLoadState === 'loading') {
+          viewerList.appendChild(makeTextElement('p', 'viewer 一覧を読み込んでいます。'));
+          sendTraceButton.disabled = true;
+          return;
+        }
+
+        if (viewerLoadState === 'error') {
+          viewerList.appendChild(makeTextElement('p', 'viewer 一覧の取得に失敗しました。', 'error-inline'));
+          sendTraceButton.disabled = true;
+          return;
+        }
+
         if (!latestViewers.length) {
           viewerList.appendChild(makeTextElement('p', 'viewer はまだありません。', 'error-inline'));
           sendTraceButton.disabled = true;
@@ -681,6 +694,28 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       }
 
       function renderTable(activeViewer) {
+        if (viewerLoadState === 'loading') {
+          activeViewerTitle.textContent = 'Viewer を読み込み中';
+          activeViewerSubtitle.textContent = '利用可能な viewer を取得しています。';
+          viewerEmptyTitle.textContent = 'viewer 読み込み中';
+          viewerEmptyBody.textContent = 'viewer 一覧の取得が完了すると、ここに最新 traces が表示されます。';
+          viewerEmpty.hidden = false;
+          viewerTableWrap.hidden = true;
+          viewerTableBody.replaceChildren();
+          return;
+        }
+
+        if (viewerLoadState === 'error') {
+          activeViewerTitle.textContent = 'Viewer の取得に失敗しました';
+          activeViewerSubtitle.textContent = '接続が回復すると自動で再取得します。';
+          viewerEmptyTitle.textContent = 'viewer 取得失敗';
+          viewerEmptyBody.textContent = '少し待つか、Refresh table を押して再取得してください。';
+          viewerEmpty.hidden = false;
+          viewerTableWrap.hidden = true;
+          viewerTableBody.replaceChildren();
+          return;
+        }
+
         if (!activeViewer) {
           activeViewerTitle.textContent = 'Viewer がまだありません';
           activeViewerSubtitle.textContent = '左側で viewer を作成すると、ここに最新 traces が表示されます。';
@@ -731,6 +766,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
       async function refreshViewers(options = {}) {
         const silent = options.silent ?? false;
+        const previousLoadState = viewerLoadState;
 
         try {
           const response = await fetch('/api/viewers', {
@@ -743,13 +779,21 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
           const payload = await response.json();
           latestViewers = payload.viewers;
+          viewerLoadState = 'ready';
           render();
 
           if (!silent) {
             setStatus('ok', `Viewer list refreshed at ${new Date().toLocaleTimeString()}.`);
+          } else if (previousLoadState !== 'ready') {
+            if (latestViewers.length) {
+              setStatus('ok', `${latestViewers.length} viewer loaded.`);
+            } else {
+              setStatus('idle', 'Viewer はまだありません。左側から作成できます。');
+            }
           }
         } catch (error) {
           latestViewers = [];
+          viewerLoadState = 'error';
           render();
           setStatus('error', `Viewer list refresh failed: ${error.message}`);
         }
@@ -1291,6 +1335,8 @@ mod tests {
         assert!(html.contains("litelemetry viewer"));
         assert!(html.contains("Create viewer"));
         assert!(html.contains("Send trace sample"));
+        assert!(html.contains("Viewer を読み込み中"));
+        assert!(html.contains("viewer 読み込み中"));
         assert!(html.contains("viewer-table"));
     }
 
