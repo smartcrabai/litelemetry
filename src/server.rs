@@ -105,6 +105,10 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         gap: 18px;
       }
 
+      [hidden] {
+        display: none !important;
+      }
+
       .hero {
         grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.9fr);
         margin-bottom: 22px;
@@ -526,8 +530,8 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
           <article class="panel stack">
             <p class="eyebrow">Status</p>
-            <div id="status-box" data-testid="status-box" class="status-box" data-state="idle">
-              Viewer を作成すると traces のテーブル表示が始まります。
+            <div id="status-box" data-testid="status-box" class="status-box" data-state="working">
+              viewer 一覧を読み込んでいます。
             </div>
           </article>
 
@@ -544,15 +548,15 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
         <section class="panel panel-strong stack table-wrap">
           <div class="stack">
-            <p class="eyebrow">3. Table</p>
-            <h2 id="active-viewer-title" data-testid="active-viewer-title">Viewer がまだありません</h2>
-            <p id="active-viewer-subtitle">左側で viewer を作成すると、ここに最新 traces が表示されます。</p>
+            <p id="active-viewer-eyebrow" class="eyebrow">3. Viewer</p>
+            <h2 id="active-viewer-title" data-testid="active-viewer-title">Viewer を読み込み中</h2>
+            <p id="active-viewer-subtitle">利用可能な viewer を取得しています。</p>
           </div>
 
           <div id="viewer-empty" data-testid="viewer-empty" class="empty">
             <div class="stack">
-              <strong>viewer 未作成</strong>
-              <p>まず viewer を作成し、その後で trace sample を送信してください。</p>
+              <strong>viewer 読み込み中</strong>
+              <p>viewer 一覧の取得が完了すると、ここに最新 traces が表示されます。</p>
             </div>
           </div>
 
@@ -583,6 +587,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const createViewerButton = document.getElementById('create-viewer-button');
       const sendTraceButton = document.getElementById('send-trace-button');
       const refreshViewersButton = document.getElementById('refresh-viewers-button');
+      const activeViewerEyebrow = document.getElementById('active-viewer-eyebrow');
       const activeViewerTitle = document.getElementById('active-viewer-title');
       const activeViewerSubtitle = document.getElementById('active-viewer-subtitle');
       const viewerEmpty = document.getElementById('viewer-empty');
@@ -593,6 +598,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
       let activeViewerId = null;
       let latestViewers = [];
+      let viewerLoadState = 'loading';
 
       function setStatus(kind, message) {
         statusBox.dataset.state = kind;
@@ -616,6 +622,23 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         return makeTextElement('span', text);
       }
 
+      function formatLookbackMs(lookbackMs) {
+        const seconds = Math.round(lookbackMs / 1000);
+        if (seconds % 86400 === 0) {
+          const days = seconds / 86400;
+          return `${days}d`;
+        }
+        if (seconds % 3600 === 0) {
+          const hours = seconds / 3600;
+          return `${hours}h`;
+        }
+        if (seconds % 60 === 0) {
+          const minutes = seconds / 60;
+          return `${minutes}m`;
+        }
+        return `${seconds}s`;
+      }
+
       function appendTableCell(row, text) {
         row.appendChild(makeTextElement('td', text));
       }
@@ -637,6 +660,18 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
       function renderViewerList() {
         viewerList.replaceChildren();
+
+        if (viewerLoadState === 'loading') {
+          viewerList.appendChild(makeTextElement('p', 'viewer 一覧を読み込んでいます。'));
+          sendTraceButton.disabled = true;
+          return;
+        }
+
+        if (viewerLoadState === 'error') {
+          viewerList.appendChild(makeTextElement('p', 'viewer 一覧の取得に失敗しました。', 'error-inline'));
+          sendTraceButton.disabled = true;
+          return;
+        }
 
         if (!latestViewers.length) {
           viewerList.appendChild(makeTextElement('p', 'viewer はまだありません。', 'error-inline'));
@@ -669,7 +704,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           for (const signal of viewer.signals) {
             meta.appendChild(makeViewerMetaPill(signal));
           }
-          meta.appendChild(makeViewerMetaPill(`lookback ${Math.round(viewer.lookback_ms / 1000)}s`));
+          meta.appendChild(makeViewerMetaPill(`lookback ${formatLookbackMs(viewer.lookback_ms)}`));
 
           button.append(titleRow, meta);
           button.addEventListener('click', () => {
@@ -681,7 +716,32 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       }
 
       function renderTable(activeViewer) {
+        if (viewerLoadState === 'loading') {
+          activeViewerEyebrow.textContent = '3. Viewer';
+          activeViewerTitle.textContent = 'Viewer を読み込み中';
+          activeViewerSubtitle.textContent = '利用可能な viewer を取得しています。';
+          viewerEmptyTitle.textContent = 'viewer 読み込み中';
+          viewerEmptyBody.textContent = 'viewer 一覧の取得が完了すると、ここに最新 traces が表示されます。';
+          viewerEmpty.hidden = false;
+          viewerTableWrap.hidden = true;
+          viewerTableBody.replaceChildren();
+          return;
+        }
+
+        if (viewerLoadState === 'error') {
+          activeViewerEyebrow.textContent = '3. Viewer';
+          activeViewerTitle.textContent = 'Viewer の取得に失敗しました';
+          activeViewerSubtitle.textContent = '接続が回復すると自動で再取得します。';
+          viewerEmptyTitle.textContent = 'viewer 取得失敗';
+          viewerEmptyBody.textContent = '少し待つか、Refresh table を押して再取得してください。';
+          viewerEmpty.hidden = false;
+          viewerTableWrap.hidden = true;
+          viewerTableBody.replaceChildren();
+          return;
+        }
+
         if (!activeViewer) {
+          activeViewerEyebrow.textContent = '3. Viewer';
           activeViewerTitle.textContent = 'Viewer がまだありません';
           activeViewerSubtitle.textContent = '左側で viewer を作成すると、ここに最新 traces が表示されます。';
           viewerEmptyTitle.textContent = 'viewer 未作成';
@@ -692,6 +752,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           return;
         }
 
+        activeViewerEyebrow.textContent = activeViewer.entries.length ? '3. Table' : '3. Viewer';
         activeViewerTitle.textContent = activeViewer.name;
         activeViewerSubtitle.textContent = `${activeViewer.entry_count} entries captured. Latest ${Math.min(activeViewer.entries.length, activeViewer.entry_count)} rows are shown below.`;
 
@@ -731,6 +792,8 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
       async function refreshViewers(options = {}) {
         const silent = options.silent ?? false;
+        const previousLoadState = viewerLoadState;
+        const previousViewers = latestViewers;
 
         try {
           const response = await fetch('/api/viewers', {
@@ -743,15 +806,34 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
           const payload = await response.json();
           latestViewers = payload.viewers;
+          viewerLoadState = 'ready';
           render();
 
           if (!silent) {
             setStatus('ok', `Viewer list refreshed at ${new Date().toLocaleTimeString()}.`);
+          } else if (previousLoadState !== 'ready') {
+            if (latestViewers.length) {
+              setStatus('ok', `${latestViewers.length} viewer loaded.`);
+            } else {
+              setStatus('idle', 'Viewer はまだありません。左側から作成できます。');
+            }
           }
         } catch (error) {
-          latestViewers = [];
+          if (previousLoadState === 'ready') {
+            latestViewers = previousViewers;
+            viewerLoadState = 'ready';
+          } else {
+            latestViewers = [];
+            viewerLoadState = 'error';
+          }
+
           render();
-          setStatus('error', `Viewer list refresh failed: ${error.message}`);
+
+          if (previousLoadState === 'ready') {
+            setStatus('error', `Viewer list refresh failed: ${error.message}. Showing the latest successful snapshot.`);
+          } else {
+            setStatus('error', `Viewer list refresh failed: ${error.message}`);
+          }
         }
       }
 
@@ -1291,6 +1373,8 @@ mod tests {
         assert!(html.contains("litelemetry viewer"));
         assert!(html.contains("Create viewer"));
         assert!(html.contains("Send trace sample"));
+        assert!(html.contains("Viewer を読み込み中"));
+        assert!(html.contains("viewer 読み込み中"));
         assert!(html.contains("viewer-table"));
     }
 
