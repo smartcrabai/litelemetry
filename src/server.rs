@@ -544,7 +544,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
         <section class="panel panel-strong stack table-wrap">
           <div class="stack">
-            <p class="eyebrow">3. Table</p>
+            <p id="active-viewer-eyebrow" class="eyebrow">3. Viewer</p>
             <h2 id="active-viewer-title" data-testid="active-viewer-title">Viewer を読み込み中</h2>
             <p id="active-viewer-subtitle">利用可能な viewer を取得しています。</p>
           </div>
@@ -583,6 +583,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const createViewerButton = document.getElementById('create-viewer-button');
       const sendTraceButton = document.getElementById('send-trace-button');
       const refreshViewersButton = document.getElementById('refresh-viewers-button');
+      const activeViewerEyebrow = document.getElementById('active-viewer-eyebrow');
       const activeViewerTitle = document.getElementById('active-viewer-title');
       const activeViewerSubtitle = document.getElementById('active-viewer-subtitle');
       const viewerEmpty = document.getElementById('viewer-empty');
@@ -695,6 +696,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
       function renderTable(activeViewer) {
         if (viewerLoadState === 'loading') {
+          activeViewerEyebrow.textContent = '3. Viewer';
           activeViewerTitle.textContent = 'Viewer を読み込み中';
           activeViewerSubtitle.textContent = '利用可能な viewer を取得しています。';
           viewerEmptyTitle.textContent = 'viewer 読み込み中';
@@ -706,6 +708,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
 
         if (viewerLoadState === 'error') {
+          activeViewerEyebrow.textContent = '3. Viewer';
           activeViewerTitle.textContent = 'Viewer の取得に失敗しました';
           activeViewerSubtitle.textContent = '接続が回復すると自動で再取得します。';
           viewerEmptyTitle.textContent = 'viewer 取得失敗';
@@ -717,6 +720,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
 
         if (!activeViewer) {
+          activeViewerEyebrow.textContent = '3. Viewer';
           activeViewerTitle.textContent = 'Viewer がまだありません';
           activeViewerSubtitle.textContent = '左側で viewer を作成すると、ここに最新 traces が表示されます。';
           viewerEmptyTitle.textContent = 'viewer 未作成';
@@ -727,6 +731,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           return;
         }
 
+        activeViewerEyebrow.textContent = activeViewer.entries.length ? '3. Table' : '3. Viewer';
         activeViewerTitle.textContent = activeViewer.name;
         activeViewerSubtitle.textContent = `${activeViewer.entry_count} entries captured. Latest ${Math.min(activeViewer.entries.length, activeViewer.entry_count)} rows are shown below.`;
 
