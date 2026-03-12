@@ -1,7 +1,8 @@
 use crate::domain::telemetry::Signal;
+use crate::domain::viewer::ViewerDefinition;
 use crate::storage::postgres::{PostgresStore, ViewerSnapshotRow};
 use crate::storage::redis::{RedisStore, cmp_stream_id};
-use crate::viewer_runtime::compiler::{CompiledViewer, compile};
+use crate::viewer_runtime::compiler::{CompileError, CompiledViewer, compile};
 use crate::viewer_runtime::reducer::{apply_entry, prune_stale_buckets};
 use crate::viewer_runtime::state::{StreamCursor, ViewerState};
 use chrono::Utc;
@@ -14,6 +15,8 @@ pub enum RuntimeError {
     Redis(#[from] redis::RedisError),
     #[error("postgres error: {0}")]
     Postgres(#[from] sqlx::Error),
+    #[error("compile error: {0}")]
+    Compile(#[from] CompileError),
 }
 
 /// viewer のインメモリランタイム。
@@ -138,6 +141,30 @@ impl ViewerRuntime {
             }
         }
 
+        Ok(())
+    }
+
+    pub async fn add_viewer(&mut self, definition: ViewerDefinition) -> Result<(), RuntimeError> {
+        let viewer_id = definition.id;
+        let revision = definition.revision;
+        let viewer = compile(definition)?;
+        let mut state = ViewerState::new(viewer_id, revision);
+        let now = Utc::now();
+
+        for signal in Signal::all() {
+            if !viewer.matches_signal(signal) {
+                continue;
+            }
+
+            let entries = self.redis.read_entries_since(signal, None, 100_000).await?;
+            for (entry_id, entry) in entries {
+                apply_entry(&mut state, &viewer, entry);
+                state.last_cursor.set(signal, entry_id);
+            }
+        }
+
+        prune_stale_buckets(&mut state, viewer.lookback_ms(), now);
+        self.viewers.push((viewer, state));
         Ok(())
     }
 

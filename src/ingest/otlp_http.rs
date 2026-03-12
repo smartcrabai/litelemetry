@@ -1,5 +1,5 @@
 use crate::domain::telemetry::{NormalizedEntry, Signal};
-use crate::ingest::decode::{DecodeError, parse_content_type};
+use crate::ingest::decode::{ContentType, DecodeError, parse_content_type};
 use bytes::Bytes;
 use chrono::Utc;
 
@@ -7,20 +7,58 @@ use chrono::Utc;
 ///
 /// - content-type が未対応の場合は `DecodeError::UnsupportedContentType` を返す。
 /// - 成功した場合はペイロードをそのまま保持する NormalizedEntry を返す。
-///   service_name は今後のフェーズでプロトバイナリをパースして設定する予定 (現時点は None)。
+///   traces の JSON payload からは `service.name` を抽出する。
 pub fn parse_ingest_request(
     signal: Signal,
     content_type_header: Option<&str>,
     body: Bytes,
 ) -> Result<NormalizedEntry, DecodeError> {
     let ct = content_type_header.unwrap_or("");
-    parse_content_type(ct)?;
+    let content_type = parse_content_type(ct)?;
     Ok(NormalizedEntry {
         signal,
         observed_at: Utc::now(),
-        service_name: None,
+        service_name: extract_service_name(signal, content_type, &body),
         payload: body,
     })
+}
+
+fn extract_service_name(signal: Signal, content_type: ContentType, body: &Bytes) -> Option<String> {
+    if signal != Signal::Traces || content_type != ContentType::Json {
+        return None;
+    }
+
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let resource_spans = value.get("resourceSpans")?.as_array()?;
+
+    for resource_span in resource_spans {
+        let Some(attributes) = resource_span
+            .get("resource")
+            .and_then(|resource| resource.get("attributes"))
+            .and_then(serde_json::Value::as_array)
+        else {
+            continue;
+        };
+
+        for attribute in attributes {
+            let Some(key) = attribute.get("key").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            if key != "service.name" {
+                continue;
+            }
+
+            if let Some(service_name) = attribute
+                .get("value")
+                .and_then(|value| value.get("stringValue"))
+                .and_then(serde_json::Value::as_str)
+            {
+                return Some(service_name.to_string());
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -206,13 +244,64 @@ mod tests {
     // ─── parse_ingest_request: 境界値 ───────────────────────────────────────
 
     #[test]
-    fn test_parse_ingest_request_service_name_is_none_initially() {
-        // Given: プロトバイナリパースは未実装なので service_name は None
+    fn test_parse_ingest_request_service_name_is_none_for_protobuf_traces() {
+        // Given: プロトバイナリからの service_name 抽出は未実装
         let entry =
             parse_ingest_request(Signal::Traces, Some("application/x-protobuf"), Bytes::new())
                 .unwrap();
 
-        // Then: service_name は None (将来のフェーズで実装予定)
+        // Then: service_name は None
         assert_eq!(entry.service_name, None);
+    }
+
+    #[test]
+    fn test_parse_ingest_request_extracts_service_name_from_trace_json() {
+        let body = Bytes::from_static(
+            br#"{
+                "resourceSpans": [
+                    {
+                        "resource": {
+                            "attributes": [
+                                {
+                                    "key": "service.name",
+                                    "value": { "stringValue": "checkout-ui" }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }"#,
+        );
+
+        let entry = parse_ingest_request(Signal::Traces, Some("application/json"), body).unwrap();
+
+        assert_eq!(entry.service_name.as_deref(), Some("checkout-ui"));
+    }
+
+    #[test]
+    fn test_parse_ingest_request_extracts_service_name_from_later_resource_span() {
+        let body = Bytes::from_static(
+            br#"{
+                "resourceSpans": [
+                    {
+                        "resource": {}
+                    },
+                    {
+                        "resource": {
+                            "attributes": [
+                                {
+                                    "key": "service.name",
+                                    "value": { "stringValue": "payments-api" }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }"#,
+        );
+
+        let entry = parse_ingest_request(Signal::Traces, Some("application/json"), body).unwrap();
+
+        assert_eq!(entry.service_name.as_deref(), Some("payments-api"));
     }
 }

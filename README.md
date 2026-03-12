@@ -94,7 +94,7 @@ docker compose up --build
 
 Services exposed locally:
 
-- `http://localhost:8080` — litelemetry OTLP/HTTP ingest
+- `http://localhost:8080` — litelemetry UI + OTLP/HTTP ingest
 - `localhost:6379` — Redis
 - `localhost:5432` — PostgreSQL (`postgres/postgres`, DB=`litelemetry`)
 
@@ -109,7 +109,11 @@ docker compose up --build
 
 When `DATABASE_URL` is set (as it is in `compose.yml`), the app automatically creates the `viewer_definitions` and `viewer_snapshots` tables and starts the background viewer runtime.
 
-Note: viewer definitions are still managed directly in PostgreSQL; there is not yet an HTTP API for creating them.
+Open `http://localhost:8080` to access the built-in viewer workspace. From that page you can:
+
+- create a traces viewer from the browser
+- send a sample trace to `/v1/traces`
+- confirm the reflected entries in a table view backed by the in-memory viewer runtime
 
 ## Testing
 

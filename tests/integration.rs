@@ -12,14 +12,16 @@ use bytes::Bytes;
 use chrono::{Duration, Utc};
 use litelemetry::domain::telemetry::{NormalizedEntry, Signal, SignalMask};
 use litelemetry::domain::viewer::ViewerDefinition;
-use litelemetry::server::build_app;
+use litelemetry::server::{build_app, build_app_with_services};
 use litelemetry::storage::postgres::{PostgresStore, ViewerSnapshotRow};
 use litelemetry::storage::redis::RedisStore;
 use litelemetry::viewer_runtime::runtime::ViewerRuntime;
 use litelemetry::viewer_runtime::state::StreamCursor;
 use serde_json::json;
+use std::sync::Arc;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::{postgres::Postgres, redis::Redis};
+use tokio::sync::Mutex;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -61,6 +63,43 @@ fn make_traces_entry(age_ms: i64) -> NormalizedEntry {
         service_name: Some("test-svc".to_string()),
         payload: Bytes::from_static(b"\x0a\x01\x02"),
     }
+}
+
+fn make_trace_payload(service_name: &str, span_name: &str) -> Bytes {
+    Bytes::from(
+        json!({
+            "resourceSpans": [
+                {
+                    "resource": {
+                        "attributes": [
+                            {
+                                "key": "service.name",
+                                "value": {
+                                    "stringValue": service_name
+                                }
+                            }
+                        ]
+                    },
+                    "scopeSpans": [
+                        {
+                            "scope": {
+                                "name": "integration-test"
+                            },
+                            "spans": [
+                                {
+                                    "traceId": "00000000000000000000000000000001",
+                                    "spanId": "0000000000000001",
+                                    "name": span_name,
+                                    "kind": 1
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        })
+        .to_string(),
+    )
 }
 
 // ─── startup resume ─────────────────────────────────────────────────────────
@@ -479,6 +518,79 @@ async fn test_ingest_traces_via_otlp_http() {
         "Redis の traces stream に 1 件追加されること"
     );
     assert_eq!(entries[0].1.signal, Signal::Traces);
+}
+
+/// viewer UI 用 API: viewer 作成後に traces が一覧 API へ反映されることを確認
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_create_viewer_then_trace_is_reflected_in_viewer_api() {
+    let redis_container = Redis::default().start().await.unwrap();
+    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
+    let pg_container = Postgres::default().start().await.unwrap();
+    let pg_port = pg_container.get_host_port_ipv4(5432).await.unwrap();
+
+    let pg = make_postgres_store(pg_port).await;
+    pg.create_schema().await.unwrap();
+
+    let runtime = ViewerRuntime::build(pg.clone(), make_redis_store(redis_port).await)
+        .await
+        .unwrap();
+    let runtime = Arc::new(Mutex::new(runtime));
+
+    let app = build_app_with_services(make_redis_store(redis_port).await, Some(pg), Some(runtime));
+
+    let create_request = Request::builder()
+        .method("POST")
+        .uri("/api/viewers")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "Checkout traces" }).to_string(),
+        ))
+        .unwrap();
+
+    let create_response = app.clone().oneshot(create_request).await.unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+
+    let trace_request = Request::builder()
+        .method("POST")
+        .uri("/v1/traces")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(make_trace_payload(
+            "checkout-ui",
+            "render-checkout",
+        )))
+        .unwrap();
+
+    let trace_response = app.clone().oneshot(trace_request).await.unwrap();
+    assert_eq!(trace_response.status(), StatusCode::OK);
+
+    let list_request = Request::builder()
+        .method("GET")
+        .uri("/api/viewers")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let list_response = app.oneshot(list_request).await.unwrap();
+    assert_eq!(list_response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(list_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let viewers = payload["viewers"].as_array().unwrap();
+
+    assert_eq!(viewers.len(), 1, "viewer が 1 件作成されること");
+    assert_eq!(viewers[0]["entry_count"], 1, "trace が 1 件反映されること");
+    assert_eq!(viewers[0]["entries"][0]["signal"], "traces");
+    assert_eq!(viewers[0]["entries"][0]["service_name"], "checkout-ui");
+
+    let preview = viewers[0]["entries"][0]["payload_preview"]
+        .as_str()
+        .unwrap();
+    assert!(
+        preview.contains("render-checkout"),
+        "payload preview に span name が含まれること: {preview}"
+    );
 }
 
 /// OTLP/HTTP metrics エンドポイントへの ingest
