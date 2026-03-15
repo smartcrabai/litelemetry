@@ -1,6 +1,6 @@
 services:
   redis:
-    image: redis:8-alpine
+    image: redis:8-alpine@sha256:2afba59292f25f5d1af200496db41bea2c6c816b059f57ae74703a50a03a27d0
     command:
       - redis-server
       - --maxmemory
@@ -16,7 +16,7 @@ services:
       retries: 20
 
   postgres:
-    image: postgres:18-alpine
+    image: postgres:18-alpine@sha256:4da1a4828be12604092fa55311276f08f9224a74a62dcb4708bd7439e2a03911
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -32,7 +32,7 @@ services:
       retries: 20
 
   redis-seeder:
-    image: redis:8-alpine
+    image: redis:8-alpine@sha256:2afba59292f25f5d1af200496db41bea2c6c816b059f57ae74703a50a03a27d0
     depends_on:
       redis:
         condition: service_healthy
