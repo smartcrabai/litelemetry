@@ -11,33 +11,29 @@ chrono = { features = ["serde"], version = "0.4" }
 redis = { features = ["tokio-comp", "streams"], version = "1.0" }
 serde = { features = ["derive"], version = "1" }
 serde_json = "1"
-sqlx = { features = [
-  "runtime-tokio-rustls",
-  "postgres",
-  "uuid",
-  "chrono",
-  "json",
-], version = "0.8" }
 thiserror = "2"
 tokio = { features = ["full"], version = "1" }
 tracing = "0.1"
 tracing-subscriber = { features = ["env-filter"], version = "0.3" }
 uuid = { features = ["v4", "serde"], version = "1" }
 
+[dependencies.sqlx]
+features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"]
+version = "0.8"
+
 [dev-dependencies]
 opentelemetry = "=0.31.0"
 opentelemetry-otlp = { features = ["http-proto"], version = "=0.31.0" }
-opentelemetry_sdk = { features = [
-  "trace",
-  "metrics",
-  "logs",
-], version = "=0.31.0" }
 testcontainers = "=0.27.1"
-testcontainers-modules = { features = [
-  "redis",
-  "postgres",
-], version = "=0.15.0" }
 tower = "=0.5.3"
+
+[dev-dependencies.opentelemetry_sdk]
+features = ["trace", "metrics", "logs"]
+version = "=0.31.0"
+
+[dev-dependencies.testcontainers-modules]
+features = ["redis", "postgres"]
+version = "=0.15.0"
 
 [profile.release]
 codegen-units = 1
