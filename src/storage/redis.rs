@@ -107,7 +107,7 @@ fn parse_xread_reply(
         return Ok(Vec::new());
     }
 
-    let reply = redis::streams::StreamReadReply::from_redis_value(&value)?;
+    let reply = redis::streams::StreamReadReply::from_redis_value(value)?;
     let mut results = Vec::new();
     for key_data in reply.keys {
         for item in key_data.ids {
