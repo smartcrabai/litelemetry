@@ -10,7 +10,7 @@ use crate::viewer_runtime::state::ViewerState;
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, Path, State},
     http::{HeaderMap, StatusCode},
     response::Html,
     routing::{get, post},
@@ -490,6 +490,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             <li><code>POST /api/viewers</code> で signal ごとの viewer を作成</li>
             <li><code>POST /v1/{signal}</code> へ OTLP JSON を送信</li>
             <li><code>GET /api/viewers</code> で最新 state を取得</li>
+            <li><code>GET /api/viewers/{id}</code> で単一 viewer の詳細を取得</li>
             <li><code>GET /healthz</code> で死活確認</li>
           </ul>
         </aside>
@@ -685,7 +686,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       }
 
       function signalConfig(signal) {
-        return SAMPLE_CONFIG[signal] || SAMPLE_CONFIG.traces;
+        return SAMPLE_CONFIG[signal];
       }
 
       function titleCaseSignal(signal) {
@@ -1182,7 +1183,7 @@ pub type SharedViewerRuntime = Arc<Mutex<ViewerRuntime>>;
 #[derive(Debug, Deserialize)]
 struct CreateViewerRequest {
     name: String,
-    signal: Option<String>,
+    signal: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1237,6 +1238,7 @@ pub fn build_app_with_services(
         .route("/", get(index))
         .route("/healthz", get(healthz))
         .route("/api/viewers", get(list_viewers).post(create_viewer))
+        .route("/api/viewers/{id}", get(get_viewer))
         .route("/v1/traces", post(ingest_traces))
         .route("/v1/metrics", post(ingest_metrics))
         .route("/v1/logs", post(ingest_logs))
@@ -1248,6 +1250,24 @@ async fn index() -> Html<&'static str> {
     Html(VIEWER_PAGE)
 }
 
+async fn get_viewer(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ViewerSummary>, StatusCode> {
+    let runtime = state
+        .viewer_runtime
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let runtime = runtime.lock().await;
+
+    runtime
+        .viewers()
+        .iter()
+        .find(|(viewer, _)| viewer.definition().id == id)
+        .map(|(viewer, viewer_state)| Json(viewer_summary(viewer, viewer_state)))
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
 async fn healthz() -> &'static str {
     "ok"
 }
@@ -1257,14 +1277,9 @@ async fn list_viewers(
 ) -> Result<Json<ViewerListResponse>, StatusCode> {
     let runtime = state
         .viewer_runtime
-        .clone()
+        .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let mut runtime = runtime.lock().await;
-
-    if let Err(error) = runtime.apply_diff_batch().await {
-        tracing::error!("viewer list apply_diff_batch failed: {error}");
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-    }
+    let runtime = runtime.lock().await;
 
     let viewers = runtime
         .viewers()
@@ -1282,7 +1297,7 @@ async fn create_viewer(
     let postgres = state.postgres.ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let runtime = state
         .viewer_runtime
-        .clone()
+        .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 
     let name = payload.name.trim();
@@ -1290,10 +1305,7 @@ async fn create_viewer(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let signal = match payload.signal.as_deref().map(str::trim) {
-        None | Some("") => Signal::Traces,
-        Some(raw_signal) => parse_signal_name(raw_signal).ok_or(StatusCode::BAD_REQUEST)?,
-    };
+    let signal = parse_signal_name(payload.signal.trim()).ok_or(StatusCode::BAD_REQUEST)?;
 
     let id = Uuid::new_v4();
     let definition = ViewerDefinition {
@@ -1700,12 +1712,12 @@ fn structured_log_preview(payload: &Bytes) -> Option<String> {
             "severity={severity_text} | body={body_text} | otlp_json"
         )),
         (None, None, Some(body_text)) => Some(format!("body={body_text} | otlp_json")),
-        (Some(service_name), None, None) => Some(format!("service={service_name} | otlp_json")),
-        (None, Some(severity_text), None) => Some(format!("severity={severity_text} | otlp_json")),
-        (None, None, None) => None,
         (Some(service_name), Some(severity_text), None) => Some(format!(
             "service={service_name} | severity={severity_text} | otlp_json"
         )),
+        (Some(service_name), None, None) => Some(format!("service={service_name} | otlp_json")),
+        (None, Some(severity_text), None) => Some(format!("severity={severity_text} | otlp_json")),
+        (None, None, None) => None,
     }
 }
 
