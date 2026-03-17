@@ -1180,6 +1180,14 @@ pub struct AppState {
 
 pub type SharedViewerRuntime = Arc<Mutex<ViewerRuntime>>;
 
+impl AppState {
+    fn require_viewer_runtime(&self) -> Result<&SharedViewerRuntime, StatusCode> {
+        self.viewer_runtime
+            .as_ref()
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateViewerRequest {
     name: String,
@@ -1254,11 +1262,7 @@ async fn get_viewer(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ViewerSummary>, StatusCode> {
-    let runtime = state
-        .viewer_runtime
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let runtime = runtime.lock().await;
+    let runtime = state.require_viewer_runtime()?.lock().await;
 
     runtime
         .viewers()
@@ -1275,11 +1279,7 @@ async fn healthz() -> &'static str {
 async fn list_viewers(
     State(state): State<AppState>,
 ) -> Result<Json<ViewerListResponse>, StatusCode> {
-    let runtime = state
-        .viewer_runtime
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let runtime = runtime.lock().await;
+    let runtime = state.require_viewer_runtime()?.lock().await;
 
     let viewers = runtime
         .viewers()
@@ -1294,11 +1294,11 @@ async fn create_viewer(
     State(state): State<AppState>,
     Json(payload): Json<CreateViewerRequest>,
 ) -> Result<(StatusCode, Json<CreateViewerResponse>), StatusCode> {
-    let postgres = state.postgres.ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let runtime = state
-        .viewer_runtime
+    let postgres = state
+        .postgres
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let runtime = state.require_viewer_runtime()?;
 
     let name = payload.name.trim();
     if name.is_empty() || name.chars().count() > 80 {
