@@ -32,7 +32,7 @@ const MAX_PAYLOAD_PREVIEW_CHARS: usize = 160;
 const VIEWER_ENTRY_PREVIEW_LIMIT: usize = 50;
 
 const VIEWER_PAGE: &str = r####"<!doctype html>
-<html lang="ja">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -91,14 +91,12 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         width: min(1200px, calc(100% - 32px));
         margin: 0 auto;
         padding: 32px 0 44px;
+        display: grid;
+        gap: 18px;
       }
 
       .stack,
-      .hero,
-      .workspace,
-      .forms,
       .panel,
-      .viewer-list,
       .table-wrap,
       .empty {
         display: grid;
@@ -107,15 +105,6 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
       [hidden] {
         display: none !important;
-      }
-
-      .hero {
-        grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.9fr);
-        margin-bottom: 22px;
-      }
-
-      .workspace {
-        grid-template-columns: minmax(320px, 360px) minmax(0, 1fr);
       }
 
       .panel {
@@ -131,15 +120,6 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         background: var(--panel-strong);
       }
 
-      .hero-copy {
-        background: linear-gradient(145deg, rgba(255, 251, 245, 0.96), rgba(255, 243, 230, 0.72));
-      }
-
-      .hero-side {
-        background: linear-gradient(180deg, rgba(16, 43, 52, 0.93), rgba(14, 30, 42, 0.96));
-        color: #f5efe7;
-      }
-
       .eyebrow,
       .label {
         margin: 0;
@@ -151,13 +131,6 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
       .eyebrow {
         color: var(--accent-strong);
-      }
-
-      .hero-side .eyebrow,
-      .hero-side p,
-      .hero-side li,
-      .hero-side code {
-        color: rgba(245, 239, 231, 0.86);
       }
 
       h1,
@@ -196,44 +169,6 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         font: inherit;
       }
 
-      .pill-row,
-      .meta-row {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 10px;
-      }
-
-      .pill,
-      .chip {
-        display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        padding: 8px 12px;
-        border-radius: 999px;
-        border: 1px solid var(--line);
-        background: rgba(255, 255, 255, 0.72);
-      }
-
-      .pill::before {
-        content: "";
-        width: 10px;
-        height: 10px;
-        border-radius: 999px;
-        background: var(--teal);
-        box-shadow: 0 0 0 6px rgba(13, 109, 98, 0.12);
-      }
-
-      .hint-list {
-        padding-left: 18px;
-        margin: 0;
-        display: grid;
-        gap: 10px;
-      }
-
-      .forms {
-        align-content: start;
-      }
-
       .field {
         display: grid;
         gap: 8px;
@@ -264,12 +199,6 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       button:focus-visible {
         outline: 2px solid rgba(13, 109, 98, 0.4);
         outline-offset: 3px;
-      }
-
-      .action-row {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 12px;
       }
 
       button {
@@ -325,55 +254,28 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         background: #ffe8e2;
       }
 
-      .viewer-list {
-        align-content: start;
-      }
-
-      .viewer-item {
-        width: 100%;
-        display: grid;
-        gap: 12px;
-        padding: 16px;
-        border-radius: 20px;
-        border: 1px solid var(--line);
-        color: inherit;
-        background: rgba(255, 255, 255, 0.72);
-        text-align: left;
-      }
-
-      .viewer-item[data-active="true"] {
-        border-color: rgba(13, 109, 98, 0.28);
-        background: linear-gradient(135deg, rgba(13, 109, 98, 0.12), rgba(255, 255, 255, 0.84));
-      }
-
-      .viewer-item .title-row {
+      .toolbar {
         display: flex;
-        justify-content: space-between;
-        gap: 12px;
-        align-items: start;
+        flex-direction: column;
+        gap: 14px;
       }
 
-      .viewer-item .count {
-        min-width: 56px;
-        text-align: center;
-        border-radius: 999px;
-        padding: 6px 10px;
-        background: var(--teal-soft);
-        color: var(--teal);
-      }
-
-      .viewer-meta {
+      .toolbar-row {
         display: flex;
+        gap: 12px;
+        align-items: center;
         flex-wrap: wrap;
-        gap: 8px;
       }
 
-      .viewer-meta span {
-        padding: 6px 10px;
-        border-radius: 999px;
-        background: rgba(255, 255, 255, 0.78);
-        border: 1px solid var(--line);
-        font-size: 0.88rem;
+      .toolbar-row select {
+        width: auto;
+        min-width: 120px;
+        flex-shrink: 0;
+      }
+
+      .toolbar-row input {
+        flex: 1;
+        min-width: 160px;
       }
 
       .table-wrap {
@@ -438,13 +340,6 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         color: #9e2f25;
       }
 
-      @media (max-width: 940px) {
-        .hero,
-        .workspace {
-          grid-template-columns: 1fr;
-        }
-      }
-
       @media (max-width: 640px) {
         main {
           width: min(100% - 20px, 100%);
@@ -456,8 +351,14 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           border-radius: 24px;
         }
 
-        .action-row {
-          display: grid;
+        .toolbar-row {
+          flex-direction: column;
+          align-items: stretch;
+        }
+
+        .toolbar-row select,
+        .toolbar-row input {
+          width: 100%;
         }
 
         button {
@@ -468,179 +369,61 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
   </head>
   <body>
     <main>
-      <section class="hero">
-        <article class="panel panel-strong hero-copy stack">
-          <p class="eyebrow">Viewer workspace</p>
-          <h1>UI から viewer を作って telemetry を流し込む。</h1>
-          <p>
-            Compose 起動後、この画面だけで traces / metrics / logs の viewer 作成、サンプル送信、反映確認まで進められます。
-            反映結果は右側のテーブルでそのまま確認できます。
-          </p>
-          <div class="pill-row">
-            <span class="pill">Create viewer</span>
-            <span class="pill">Send OTLP sample</span>
-            <span class="pill">Table verification</span>
-          </div>
-        </article>
-
-        <aside class="panel hero-side stack">
-          <p class="eyebrow">Routes</p>
-          <h2>Compose の smoke test を UI から完結させる。</h2>
-          <ul class="hint-list">
-            <li><code>POST /api/viewers</code> で signal ごとの viewer を作成</li>
-            <li><code>POST /v1/{signal}</code> へ OTLP JSON を送信</li>
-            <li><code>GET /api/viewers</code> で最新 state を取得</li>
-            <li><code>GET /api/viewers/{id}</code> で単一 viewer の詳細を取得</li>
-            <li><code>GET /healthz</code> で死活確認</li>
-          </ul>
-        </aside>
+      <section class="toolbar panel panel-strong">
+        <div class="toolbar-row">
+          <select id="viewer-signal-select" data-testid="viewer-signal-select" name="viewer-signal">
+            <option value="traces">traces</option>
+            <option value="metrics">metrics</option>
+            <option value="logs">logs</option>
+          </select>
+          <input id="viewer-name-input" data-testid="viewer-name-input" name="viewer-name" placeholder="checkout traces" maxlength="80" />
+          <button id="create-viewer-button" data-testid="create-viewer-button" class="primary" type="button">+ Create viewer</button>
+          <button id="refresh-viewers-button" class="secondary" type="button">Refresh</button>
+        </div>
+        <div id="status-box" data-testid="status-box" class="status-box" data-state="working">
+          Loading viewers...
+        </div>
       </section>
 
-      <section class="workspace">
-        <aside class="forms">
-          <article class="panel panel-strong stack">
-            <p class="eyebrow">1. Create Viewer</p>
-            <div class="field">
-              <label for="viewer-signal-select">Signal</label>
-              <select id="viewer-signal-select" data-testid="viewer-signal-select" name="viewer-signal">
-                <option value="traces">traces</option>
-                <option value="metrics">metrics</option>
-                <option value="logs">logs</option>
-              </select>
-            </div>
-            <div class="field">
-              <label for="viewer-name-input">Viewer name</label>
-              <input id="viewer-name-input" data-testid="viewer-name-input" name="viewer-name" placeholder="checkout traces" maxlength="80" />
-              <small id="viewer-name-hint">選んだ signal の viewer を 5 分 lookback で作成します。</small>
-            </div>
-            <div class="action-row">
-              <button id="create-viewer-button" data-testid="create-viewer-button" class="primary" type="button">
-                Create viewer
-              </button>
-            </div>
-          </article>
-
-          <article class="panel stack">
-            <p class="eyebrow">2. Send Sample</p>
-            <div class="field">
-              <label for="sample-service-input">Service name</label>
-              <input id="sample-service-input" data-testid="sample-service-input" name="sample-service" value="checkout-ui" maxlength="80" />
-            </div>
-            <div class="field">
-              <label id="sample-detail-label" for="sample-detail-input">Span name</label>
-              <input id="sample-detail-input" data-testid="sample-detail-input" name="sample-detail" value="render-checkout" maxlength="120" />
-              <small id="sample-signal-hint">現在選択中の viewer と同じ signal に送信します。</small>
-            </div>
-            <div class="action-row">
-              <button id="send-sample-button" data-testid="send-sample-button" class="secondary" type="button" disabled>
-                Send trace sample
-              </button>
-              <button id="refresh-viewers-button" class="secondary" type="button">
-                Refresh table
-              </button>
-            </div>
-          </article>
-
-          <article class="panel stack">
-            <p class="eyebrow">Status</p>
-            <div id="status-box" data-testid="status-box" class="status-box" data-state="working">
-              viewer 一覧を読み込んでいます。
-            </div>
-          </article>
-
-          <article class="panel viewer-list">
-            <div class="title-row">
-              <div>
-                <p class="eyebrow">Viewer List</p>
-                <h3>Active viewers</h3>
-              </div>
-            </div>
-            <div id="viewer-list" data-testid="viewer-list" class="viewer-list"></div>
-          </article>
-        </aside>
-
-        <section class="panel panel-strong stack table-wrap">
+      <section class="panel panel-strong stack table-wrap">
+        <div id="viewer-table-scroll" class="table-scroll" hidden>
+          <table data-testid="viewer-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>ID</th>
+                <th>Signal</th>
+                <th>Lookback</th>
+                <th>Entries</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="viewer-table-body"></tbody>
+          </table>
+        </div>
+        <div id="viewer-empty" data-testid="viewer-empty" class="empty">
           <div class="stack">
-            <p id="active-viewer-eyebrow" class="eyebrow">3. Viewer</p>
-            <h2 id="active-viewer-title" data-testid="active-viewer-title">Viewer を読み込み中</h2>
-            <p id="active-viewer-subtitle">利用可能な viewer を取得しています。</p>
+            <strong id="viewer-empty-title">Loading viewers</strong>
+            <p id="viewer-empty-body">Fetching the viewer list...</p>
           </div>
-
-          <div id="viewer-empty" data-testid="viewer-empty" class="empty">
-            <div class="stack">
-              <strong>viewer 読み込み中</strong>
-              <p>viewer 一覧の取得が完了すると、ここに最新 telemetry が表示されます。</p>
-            </div>
-          </div>
-
-          <div id="viewer-table-wrap" class="table-scroll" hidden>
-            <table data-testid="viewer-table">
-              <thead>
-                <tr>
-                  <th>Observed At</th>
-                  <th>Signal</th>
-                  <th>Service</th>
-                  <th>Payload Preview</th>
-                  <th>Bytes</th>
-                </tr>
-              </thead>
-              <tbody id="viewer-table-body"></tbody>
-            </table>
-          </div>
-        </section>
+        </div>
       </section>
     </main>
 
     <script>
       const statusBox = document.getElementById('status-box');
-      const viewerList = document.getElementById('viewer-list');
       const viewerSignalSelect = document.getElementById('viewer-signal-select');
       const viewerNameInput = document.getElementById('viewer-name-input');
-      const viewerNameHint = document.getElementById('viewer-name-hint');
-      const sampleServiceInput = document.getElementById('sample-service-input');
-      const sampleDetailLabel = document.getElementById('sample-detail-label');
-      const sampleDetailInput = document.getElementById('sample-detail-input');
-      const sampleSignalHint = document.getElementById('sample-signal-hint');
       const createViewerButton = document.getElementById('create-viewer-button');
-      const sendSampleButton = document.getElementById('send-sample-button');
       const refreshViewersButton = document.getElementById('refresh-viewers-button');
-      const activeViewerEyebrow = document.getElementById('active-viewer-eyebrow');
-      const activeViewerTitle = document.getElementById('active-viewer-title');
-      const activeViewerSubtitle = document.getElementById('active-viewer-subtitle');
       const viewerEmpty = document.getElementById('viewer-empty');
-      const viewerEmptyTitle = viewerEmpty.querySelector('strong');
-      const viewerEmptyBody = viewerEmpty.querySelector('p');
-      const viewerTableWrap = document.getElementById('viewer-table-wrap');
+      const viewerEmptyTitle = document.getElementById('viewer-empty-title');
+      const viewerEmptyBody = document.getElementById('viewer-empty-body');
+      const viewerTableScroll = document.getElementById('viewer-table-scroll');
       const viewerTableBody = document.getElementById('viewer-table-body');
 
-      const SAMPLE_CONFIG = {
-        traces: {
-          viewerPlaceholder: 'checkout traces',
-          detailLabel: 'Span name',
-          defaultService: 'checkout-ui',
-          defaultDetail: 'render-checkout',
-          buttonLabel: 'Send trace sample'
-        },
-        metrics: {
-          viewerPlaceholder: 'orders metrics',
-          detailLabel: 'Metric name',
-          defaultService: 'orders-api',
-          defaultDetail: 'http.server.requests',
-          buttonLabel: 'Send metrics sample'
-        },
-        logs: {
-          viewerPlaceholder: 'billing logs',
-          detailLabel: 'Log message',
-          defaultService: 'worker-billing',
-          defaultDetail: 'payment authorized',
-          buttonLabel: 'Send logs sample'
-        }
-      };
-
-      let activeViewerId = null;
       let latestViewers = [];
       let viewerLoadState = 'loading';
-      let sampleSignal = null;
 
       function setStatus(kind, message) {
         statusBox.dataset.state = kind;
@@ -658,10 +441,6 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
         element.textContent = text;
         return element;
-      }
-
-      function makeViewerMetaPill(text) {
-        return makeTextElement('span', text);
       }
 
       function formatLookbackMs(lookbackMs) {
@@ -685,197 +464,58 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         row.appendChild(makeTextElement('td', text));
       }
 
-      function signalConfig(signal) {
-        return SAMPLE_CONFIG[signal];
-      }
+      const VIEWER_PLACEHOLDERS = { traces: 'checkout traces', metrics: 'orders metrics', logs: 'billing logs' };
 
-      function titleCaseSignal(signal) {
-        return signal.charAt(0).toUpperCase() + signal.slice(1);
-      }
-
-      function currentActiveViewer() {
-        return latestViewers.find(viewer => viewer.id === activeViewerId) || null;
-      }
-
-      function currentViewerSignal(activeViewer) {
-        return activeViewer && activeViewer.signals.length ? activeViewer.signals[0] : viewerSignalSelect.value;
+      function formatStatus(status) {
+        if (!status) return JSON.stringify(status);
+        if (status.type === 'ok') return 'ok';
+        if (status.type === 'degraded') return `degraded: ${status.reason}`;
+        return JSON.stringify(status);
       }
 
       function syncCreateForm() {
         const signal = viewerSignalSelect.value;
-        const config = signalConfig(signal);
-        viewerNameInput.placeholder = config.viewerPlaceholder;
-        viewerNameHint.textContent = `選んだ ${signal} signal の viewer を 5 分 lookback で作成します。`;
+        viewerNameInput.placeholder = VIEWER_PLACEHOLDERS[signal] || signal;
       }
 
-      function syncSampleForm(signal, options = {}) {
-        const config = signalConfig(signal);
-        const forceDefaults = options.forceDefaults ?? false;
-        const signalChanged = sampleSignal !== signal;
-
-        sampleSignal = signal;
-        sampleDetailLabel.textContent = config.detailLabel;
-        sampleServiceInput.placeholder = config.defaultService;
-        sampleDetailInput.placeholder = config.defaultDetail;
-        sampleSignalHint.textContent = latestViewers.length
-          ? `現在選択中の viewer と同じ ${signal} signal に OTLP JSON を送信します。`
-          : `viewer を作成すると ${signal} sample を送信できます。`;
-        sendSampleButton.textContent = config.buttonLabel;
-
-        if (forceDefaults || signalChanged) {
-          sampleServiceInput.value = config.defaultService;
-          sampleDetailInput.value = config.defaultDetail;
-        }
+      function showEmpty(title, body) {
+        viewerEmptyTitle.textContent = title;
+        viewerEmptyBody.textContent = body;
+        viewerEmpty.hidden = false;
+        viewerTableScroll.hidden = true;
+        viewerTableBody.replaceChildren();
       }
 
-      function normalizeActiveViewer() {
-        if (!latestViewers.length) {
-          activeViewerId = null;
-          return null;
-        }
-
-        const existing = latestViewers.find(viewer => viewer.id === activeViewerId);
-        if (existing) {
-          return existing;
-        }
-
-        activeViewerId = latestViewers[0].id;
-        return latestViewers[0];
-      }
-
-      function renderViewerList() {
-        viewerList.replaceChildren();
-
+      function renderViewerTable() {
         if (viewerLoadState === 'loading') {
-          viewerList.appendChild(makeTextElement('p', 'viewer 一覧を読み込んでいます。'));
-          sendSampleButton.disabled = true;
+          showEmpty('Loading viewers', 'Fetching the viewer list...');
           return;
         }
 
         if (viewerLoadState === 'error') {
-          viewerList.appendChild(makeTextElement('p', 'viewer 一覧の取得に失敗しました。', 'error-inline'));
-          sendSampleButton.disabled = true;
+          showEmpty('Failed to load viewers', 'Press Refresh to retry.');
           return;
         }
 
         if (!latestViewers.length) {
-          viewerList.appendChild(makeTextElement('p', 'viewer はまだありません。', 'error-inline'));
-          sendSampleButton.disabled = true;
-          return;
-        }
-
-        sendSampleButton.disabled = false;
-
-        for (const viewer of latestViewers) {
-          const button = document.createElement('button');
-          button.type = 'button';
-          button.className = 'viewer-item';
-          button.dataset.viewerId = viewer.id;
-          button.dataset.active = String(viewer.id === activeViewerId);
-
-          const titleRow = document.createElement('div');
-          titleRow.className = 'title-row';
-
-          const titleStack = document.createElement('div');
-          titleStack.className = 'stack';
-          titleStack.appendChild(makeTextElement('strong', viewer.name));
-          titleStack.appendChild(makeTextElement('small', truncateId(viewer.id)));
-
-          const count = makeTextElement('span', String(viewer.entry_count), 'count');
-          titleRow.append(titleStack, count);
-
-          const meta = document.createElement('div');
-          meta.className = 'viewer-meta';
-          for (const signal of viewer.signals) {
-            meta.appendChild(makeViewerMetaPill(signal));
-          }
-          meta.appendChild(makeViewerMetaPill(`lookback ${formatLookbackMs(viewer.lookback_ms)}`));
-
-          button.append(titleRow, meta);
-          button.addEventListener('click', () => {
-            activeViewerId = viewer.id;
-            render();
-          });
-          viewerList.appendChild(button);
-        }
-      }
-
-      function renderTable(activeViewer) {
-        if (viewerLoadState === 'loading') {
-          activeViewerEyebrow.textContent = '3. Viewer';
-          activeViewerTitle.textContent = 'Viewer を読み込み中';
-          activeViewerSubtitle.textContent = '利用可能な viewer を取得しています。';
-          viewerEmptyTitle.textContent = 'viewer 読み込み中';
-          viewerEmptyBody.textContent = 'viewer 一覧の取得が完了すると、ここに最新 telemetry が表示されます。';
-          viewerEmpty.hidden = false;
-          viewerTableWrap.hidden = true;
-          viewerTableBody.replaceChildren();
-          return;
-        }
-
-        if (viewerLoadState === 'error') {
-          activeViewerEyebrow.textContent = '3. Viewer';
-          activeViewerTitle.textContent = 'Viewer の取得に失敗しました';
-          activeViewerSubtitle.textContent = '接続が回復すると自動で再取得します。';
-          viewerEmptyTitle.textContent = 'viewer 取得失敗';
-          viewerEmptyBody.textContent = '少し待つか、Refresh table を押して再取得してください。';
-          viewerEmpty.hidden = false;
-          viewerTableWrap.hidden = true;
-          viewerTableBody.replaceChildren();
-          return;
-        }
-
-        if (!activeViewer) {
-          const signal = viewerSignalSelect.value;
-          activeViewerEyebrow.textContent = '3. Viewer';
-          activeViewerTitle.textContent = 'Viewer がまだありません';
-          activeViewerSubtitle.textContent = '左側で viewer を作成するか、seed 済み viewer を選ぶとここに最新 telemetry が表示されます。';
-          viewerEmptyTitle.textContent = 'viewer 未作成';
-          viewerEmptyBody.textContent = `まず ${signal} viewer を作成し、その後で sample を送信してください。`;
-          viewerEmpty.hidden = false;
-          viewerTableWrap.hidden = true;
-          viewerTableBody.replaceChildren();
-          return;
-        }
-
-        const signal = currentViewerSignal(activeViewer);
-        activeViewerEyebrow.textContent = activeViewer.entries.length ? '3. Table' : '3. Viewer';
-        activeViewerTitle.textContent = activeViewer.name;
-        activeViewerSubtitle.textContent = `${activeViewer.entry_count} entries captured for ${signal}. Latest ${Math.min(activeViewer.entries.length, activeViewer.entry_count)} rows are shown below.`;
-
-        if (!activeViewer.entries.length) {
-          viewerEmpty.hidden = false;
-          viewerTableWrap.hidden = true;
-          viewerTableBody.replaceChildren();
-          viewerEmptyTitle.textContent = `${signal} 未反映`;
-          viewerEmptyBody.textContent = `Send sample を押すと、この ${signal} viewer に entries が追加されます。`;
+          showEmpty('No viewers yet', 'Use the form above to create a viewer.');
           return;
         }
 
         viewerEmpty.hidden = true;
-        viewerTableWrap.hidden = false;
+        viewerTableScroll.hidden = false;
         viewerTableBody.replaceChildren();
 
-        for (const entry of activeViewer.entries) {
+        for (const viewer of latestViewers) {
           const row = document.createElement('tr');
-          appendTableCell(row, new Date(entry.observed_at).toLocaleString());
-          appendTableCell(row, entry.signal);
-          appendTableCell(row, entry.service_name || '-');
-
-          const previewCell = document.createElement('td');
-          previewCell.appendChild(makeTextElement('code', entry.payload_preview));
-          row.appendChild(previewCell);
-
-          appendTableCell(row, String(entry.payload_size_bytes));
+          appendTableCell(row, viewer.name);
+          appendTableCell(row, truncateId(viewer.id));
+          appendTableCell(row, viewer.signals.join(', '));
+          appendTableCell(row, formatLookbackMs(viewer.lookback_ms));
+          appendTableCell(row, String(viewer.entry_count));
+          appendTableCell(row, formatStatus(viewer.status));
           viewerTableBody.appendChild(row);
         }
-      }
-
-      function render() {
-        const activeViewer = normalizeActiveViewer();
-        renderViewerList();
-        renderTable(activeViewer);
-        syncSampleForm(currentViewerSignal(activeViewer));
       }
 
       async function refreshViewers(options = {}) {
@@ -895,15 +535,15 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           const payload = await response.json();
           latestViewers = payload.viewers;
           viewerLoadState = 'ready';
-          render();
+          renderViewerTable();
 
           if (!silent) {
             setStatus('ok', `Viewer list refreshed at ${new Date().toLocaleTimeString()}.`);
           } else if (previousLoadState !== 'ready') {
             if (latestViewers.length) {
-              setStatus('ok', `${latestViewers.length} viewer loaded.`);
+              setStatus('ok', `${latestViewers.length} viewer(s) loaded.`);
             } else {
-              setStatus('idle', 'Viewer はまだありません。左側から作成できます。');
+              setStatus('idle', 'No viewers yet. Create one above.');
             }
           }
         } catch (error) {
@@ -915,7 +555,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             viewerLoadState = 'error';
           }
 
-          render();
+          renderViewerTable();
 
           if (previousLoadState === 'ready') {
             setStatus('error', `Viewer list refresh failed: ${error.message}. Showing the latest successful snapshot.`);
@@ -951,10 +591,8 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             throw new Error(`HTTP ${response.status}`);
           }
 
-          const payload = await response.json();
-          activeViewerId = payload.id;
           await refreshViewers({ silent: true });
-          setStatus('ok', `${titleCaseSignal(signal)} viewer "${name}" created.`);
+          setStatus('ok', `${signal.charAt(0).toUpperCase() + signal.slice(1)} viewer "${name}" created.`);
         } catch (error) {
           setStatus('error', `Viewer creation failed: ${error.message}`);
         } finally {
@@ -962,204 +600,17 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
       }
 
-      function buildResourceAttributes(activeViewer, serviceName) {
-        return [
-          { key: 'service.name', value: { stringValue: serviceName } },
-          { key: 'viewer.id', value: { stringValue: activeViewerId || '' } },
-          { key: 'viewer.name', value: { stringValue: activeViewer ? activeViewer.name : '' } }
-        ];
-      }
-
-      function buildTraceBody(activeViewer, serviceName, spanName) {
-        const now = Date.now();
-        const traceIdSuffix = `${now}`.padStart(32, '0').slice(-32);
-        const spanIdSuffix = `${now}`.padStart(16, '0').slice(-16);
-
-        return {
-          resourceSpans: [
-            {
-              resource: {
-                attributes: buildResourceAttributes(activeViewer, serviceName)
-              },
-              scopeSpans: [
-                {
-                  scope: { name: 'litelemetry.ui' },
-                  spans: [
-                    {
-                      traceId: traceIdSuffix,
-                      spanId: spanIdSuffix,
-                      name: spanName,
-                      kind: 1,
-                      startTimeUnixNano: `${now}000000`,
-                      endTimeUnixNano: `${now + 1}000000`
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        };
-      }
-
-      function buildMetricBody(activeViewer, serviceName, metricName) {
-        const now = Date.now();
-        const metricValue = String((now % 97) + 1);
-
-        return {
-          resourceMetrics: [
-            {
-              resource: {
-                attributes: buildResourceAttributes(activeViewer, serviceName)
-              },
-              scopeMetrics: [
-                {
-                  scope: { name: 'litelemetry.ui' },
-                  metrics: [
-                    {
-                      name: metricName,
-                      description: 'litelemetry workspace sample metric',
-                      unit: '1',
-                      sum: {
-                        aggregationTemporality: 2,
-                        isMonotonic: true,
-                        dataPoints: [
-                          {
-                            attributes: [
-                              { key: 'viewer.id', value: { stringValue: activeViewerId || '' } }
-                            ],
-                            asInt: metricValue,
-                            timeUnixNano: `${now}000000`
-                          }
-                        ]
-                      }
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        };
-      }
-
-      function buildLogBody(activeViewer, serviceName, message) {
-        const now = Date.now();
-
-        return {
-          resourceLogs: [
-            {
-              resource: {
-                attributes: buildResourceAttributes(activeViewer, serviceName)
-              },
-              scopeLogs: [
-                {
-                  scope: { name: 'litelemetry.ui' },
-                  logRecords: [
-                    {
-                      timeUnixNano: `${now}000000`,
-                      observedTimeUnixNano: `${now}000000`,
-                      severityNumber: 9,
-                      severityText: 'INFO',
-                      body: { stringValue: message },
-                      attributes: [
-                        { key: 'viewer.id', value: { stringValue: activeViewerId || '' } }
-                      ]
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        };
-      }
-
-      function buildSampleBody(signal, activeViewer, serviceName, detailValue) {
-        if (signal === 'metrics') {
-          return buildMetricBody(activeViewer, serviceName, detailValue);
-        }
-        if (signal === 'logs') {
-          return buildLogBody(activeViewer, serviceName, detailValue);
-        }
-        return buildTraceBody(activeViewer, serviceName, detailValue);
-      }
-
-      async function waitForEntries(previousCount) {
-        for (let attempt = 0; attempt < 10; attempt += 1) {
-          await new Promise(resolve => window.setTimeout(resolve, 300));
-          await refreshViewers({ silent: true });
-          const activeViewer = currentActiveViewer();
-          if (activeViewer && activeViewer.entry_count > previousCount) {
-            return true;
-          }
-        }
-        return false;
-      }
-
-      async function sendSample() {
-        if (!latestViewers.length) {
-          setStatus('error', 'Create or select a viewer before sending a sample.');
-          return;
-        }
-
-        const activeViewer = currentActiveViewer() || latestViewers[0];
-        const signal = currentViewerSignal(activeViewer);
-        const config = signalConfig(signal);
-        const serviceName = sampleServiceInput.value.trim() || config.defaultService;
-        const detailValue = sampleDetailInput.value.trim() || config.defaultDetail;
-        const beforeCount = activeViewer ? activeViewer.entry_count : 0;
-
-        sendSampleButton.disabled = true;
-        setStatus('working', `Sending ${signal} sample for service "${serviceName}"...`);
-
-        try {
-          const response = await fetch(`/v1/${signal}`, {
-            method: 'POST',
-            headers: {
-              'content-type': 'application/json'
-            },
-            body: JSON.stringify(buildSampleBody(signal, activeViewer, serviceName, detailValue))
-          });
-
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-          }
-
-          const reflected = await waitForEntries(beforeCount);
-          if (reflected) {
-            setStatus('ok', `${titleCaseSignal(signal)} sample reflected in "${activeViewer.name}".`);
-          } else {
-            setStatus('error', `${titleCaseSignal(signal)} sample accepted, but the viewer table did not update in time.`);
-          }
-        } catch (error) {
-          setStatus('error', `${titleCaseSignal(signal)} sample send failed: ${error.message}`);
-        } finally {
-          sendSampleButton.disabled = !latestViewers.length;
-        }
-      }
-
       createViewerButton.addEventListener('click', createViewer);
-      sendSampleButton.addEventListener('click', sendSample);
       refreshViewersButton.addEventListener('click', () => refreshViewers());
-      viewerSignalSelect.addEventListener('change', () => {
-        syncCreateForm();
-        if (!latestViewers.length) {
-          syncSampleForm(viewerSignalSelect.value, { forceDefaults: true });
-        }
-      });
+      viewerSignalSelect.addEventListener('change', syncCreateForm);
       viewerNameInput.addEventListener('keydown', event => {
         if (event.key === 'Enter') {
           event.preventDefault();
           createViewer();
         }
       });
-      sampleDetailInput.addEventListener('keydown', event => {
-        if (event.key === 'Enter' && !sendSampleButton.disabled) {
-          event.preventDefault();
-          sendSample();
-        }
-      });
 
       syncCreateForm();
-      syncSampleForm(viewerSignalSelect.value, { forceDefaults: true });
       refreshViewers({ silent: true });
       window.setInterval(() => refreshViewers({ silent: true }), 1500);
     </script>
@@ -1268,7 +719,7 @@ async fn get_viewer(
         .viewers()
         .iter()
         .find(|(viewer, _)| viewer.definition().id == id)
-        .map(|(viewer, viewer_state)| Json(viewer_summary(viewer, viewer_state)))
+        .map(|(viewer, viewer_state)| Json(viewer_summary(viewer, viewer_state, true)))
         .ok_or(StatusCode::NOT_FOUND)
 }
 
@@ -1284,7 +735,7 @@ async fn list_viewers(
     let viewers = runtime
         .viewers()
         .iter()
-        .map(|(viewer, viewer_state)| viewer_summary(viewer, viewer_state))
+        .map(|(viewer, viewer_state)| viewer_summary(viewer, viewer_state, false))
         .collect();
 
     Ok(Json(ViewerListResponse { viewers }))
@@ -1392,21 +843,29 @@ async fn handle_ingest(
     }
 }
 
-fn viewer_summary(viewer: &CompiledViewer, viewer_state: &ViewerState) -> ViewerSummary {
+fn viewer_summary(
+    viewer: &CompiledViewer,
+    viewer_state: &ViewerState,
+    include_entries: bool,
+) -> ViewerSummary {
     let definition = viewer.definition();
-    let entries = viewer_state
-        .entries
-        .iter()
-        .rev()
-        .take(VIEWER_ENTRY_PREVIEW_LIMIT)
-        .map(|entry| ViewerEntryRow {
-            observed_at: entry.observed_at,
-            signal: signal_name(entry.signal),
-            service_name: entry.service_name.clone(),
-            payload_size_bytes: entry.payload.len(),
-            payload_preview: payload_preview(entry.signal, &entry.payload),
-        })
-        .collect();
+    let entries = if include_entries {
+        viewer_state
+            .entries
+            .iter()
+            .rev()
+            .take(VIEWER_ENTRY_PREVIEW_LIMIT)
+            .map(|entry| ViewerEntryRow {
+                observed_at: entry.observed_at,
+                signal: signal_name(entry.signal),
+                service_name: entry.service_name.clone(),
+                payload_size_bytes: entry.payload.len(),
+                payload_preview: payload_preview(entry.signal, &entry.payload),
+            })
+            .collect()
+    } else {
+        vec![]
+    };
 
     ViewerSummary {
         id: definition.id,
@@ -1488,8 +947,9 @@ fn compact_whitespace(text: &str) -> String {
 }
 
 fn truncate_preview(text: &str) -> String {
-    let preview: String = text.chars().take(MAX_PAYLOAD_PREVIEW_CHARS).collect();
-    if text.chars().count() > MAX_PAYLOAD_PREVIEW_CHARS {
+    let mut chars = text.chars();
+    let preview: String = chars.by_ref().take(MAX_PAYLOAD_PREVIEW_CHARS).collect();
+    if chars.next().is_some() {
         format!("{preview}...")
     } else {
         preview
@@ -1832,12 +1292,9 @@ mod tests {
 
         assert!(html.contains("litelemetry viewer"));
         assert!(html.contains("Create viewer"));
-        assert!(html.contains("Send OTLP sample"));
         assert!(html.contains("viewer-signal-select"));
-        assert!(html.contains("Send metrics sample"));
-        assert!(html.contains("Send logs sample"));
-        assert!(html.contains("Viewer を読み込み中"));
-        assert!(html.contains("viewer 読み込み中"));
+        assert!(html.contains("Loading viewers"));
+        assert!(html.contains("status-box"));
         assert!(html.contains("viewer-table"));
     }
 
