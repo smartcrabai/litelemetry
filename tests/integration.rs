@@ -41,6 +41,40 @@ async fn make_postgres_store(port: u16) -> PostgresStore {
         .expect("PostgreSQL connection failed")
 }
 
+/// Helper that sets up Redis + PostgreSQL + ViewerRuntime + App in one go.
+/// Holds container references so they are not dropped before the test ends.
+struct ViewerTestEnv {
+    app: axum::Router,
+    _redis_container: testcontainers::ContainerAsync<Redis>,
+    _pg_container: testcontainers::ContainerAsync<Postgres>,
+}
+
+async fn setup_viewer_app() -> ViewerTestEnv {
+    let (redis_container, pg_container) =
+        tokio::join!(Redis::default().start(), Postgres::default().start(),);
+    let redis_container = redis_container.unwrap();
+    let pg_container = pg_container.unwrap();
+    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
+    let pg_port = pg_container.get_host_port_ipv4(5432).await.unwrap();
+
+    let pg = make_postgres_store(pg_port).await;
+    pg.create_schema().await.unwrap();
+
+    let redis = make_redis_store(redis_port).await;
+    let runtime = ViewerRuntime::build(pg.clone(), redis.clone())
+        .await
+        .unwrap();
+    let runtime = Arc::new(Mutex::new(runtime));
+
+    let app = build_app_with_services(redis, Some(pg), Some(runtime));
+
+    ViewerTestEnv {
+        app,
+        _redis_container: redis_container,
+        _pg_container: pg_container,
+    }
+}
+
 fn make_viewer_def(signal_mask: SignalMask, lookback_ms: i64, revision: i64) -> ViewerDefinition {
     ViewerDefinition {
         id: Uuid::new_v4(),
@@ -605,32 +639,8 @@ async fn test_ingest_traces_via_otlp_http() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_create_viewer_then_trace_is_reflected_in_viewer_api() {
-    let redis_container = Redis::default().start().await.unwrap();
-    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
-    let pg_container = Postgres::default().start().await.unwrap();
-    let pg_port = pg_container.get_host_port_ipv4(5432).await.unwrap();
-
-    let pg = make_postgres_store(pg_port).await;
-    pg.create_schema().await.unwrap();
-
-    let runtime = ViewerRuntime::build(pg.clone(), make_redis_store(redis_port).await)
-        .await
-        .unwrap();
-    let runtime = Arc::new(Mutex::new(runtime));
-
-    let app = build_app_with_services(make_redis_store(redis_port).await, Some(pg), Some(runtime));
-
-    let create_request = Request::builder()
-        .method("POST")
-        .uri("/api/viewers")
-        .header("content-type", "application/json")
-        .body(axum::body::Body::from(
-            json!({ "name": "Checkout traces", "signal": "traces" }).to_string(),
-        ))
-        .unwrap();
-
-    let create_response = app.clone().oneshot(create_request).await.unwrap();
-    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let env = setup_viewer_app().await;
+    let app = env.app;
 
     let trace_request = Request::builder()
         .method("POST")
@@ -644,6 +654,18 @@ async fn test_create_viewer_then_trace_is_reflected_in_viewer_api() {
 
     let trace_response = app.clone().oneshot(trace_request).await.unwrap();
     assert_eq!(trace_response.status(), StatusCode::OK);
+
+    let create_request = Request::builder()
+        .method("POST")
+        .uri("/api/viewers")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "Checkout traces", "signal": "traces" }).to_string(),
+        ))
+        .unwrap();
+
+    let create_response = app.clone().oneshot(create_request).await.unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
 
     let list_request = Request::builder()
         .method("GET")
@@ -677,32 +699,8 @@ async fn test_create_viewer_then_trace_is_reflected_in_viewer_api() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_create_viewer_then_metric_is_reflected_in_viewer_api() {
-    let redis_container = Redis::default().start().await.unwrap();
-    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
-    let pg_container = Postgres::default().start().await.unwrap();
-    let pg_port = pg_container.get_host_port_ipv4(5432).await.unwrap();
-
-    let pg = make_postgres_store(pg_port).await;
-    pg.create_schema().await.unwrap();
-
-    let runtime = ViewerRuntime::build(pg.clone(), make_redis_store(redis_port).await)
-        .await
-        .unwrap();
-    let runtime = Arc::new(Mutex::new(runtime));
-
-    let app = build_app_with_services(make_redis_store(redis_port).await, Some(pg), Some(runtime));
-
-    let create_request = Request::builder()
-        .method("POST")
-        .uri("/api/viewers")
-        .header("content-type", "application/json")
-        .body(axum::body::Body::from(
-            json!({ "name": "Orders metrics", "signal": "metrics" }).to_string(),
-        ))
-        .unwrap();
-
-    let create_response = app.clone().oneshot(create_request).await.unwrap();
-    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let env = setup_viewer_app().await;
+    let app = env.app;
 
     let metric_request = Request::builder()
         .method("POST")
@@ -717,6 +715,18 @@ async fn test_create_viewer_then_metric_is_reflected_in_viewer_api() {
 
     let metric_response = app.clone().oneshot(metric_request).await.unwrap();
     assert_eq!(metric_response.status(), StatusCode::OK);
+
+    let create_request = Request::builder()
+        .method("POST")
+        .uri("/api/viewers")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "Orders metrics", "signal": "metrics" }).to_string(),
+        ))
+        .unwrap();
+
+    let create_response = app.clone().oneshot(create_request).await.unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
 
     let list_request = Request::builder()
         .method("GET")
@@ -754,32 +764,8 @@ async fn test_create_viewer_then_metric_is_reflected_in_viewer_api() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_create_viewer_then_log_is_reflected_in_viewer_api() {
-    let redis_container = Redis::default().start().await.unwrap();
-    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
-    let pg_container = Postgres::default().start().await.unwrap();
-    let pg_port = pg_container.get_host_port_ipv4(5432).await.unwrap();
-
-    let pg = make_postgres_store(pg_port).await;
-    pg.create_schema().await.unwrap();
-
-    let runtime = ViewerRuntime::build(pg.clone(), make_redis_store(redis_port).await)
-        .await
-        .unwrap();
-    let runtime = Arc::new(Mutex::new(runtime));
-
-    let app = build_app_with_services(make_redis_store(redis_port).await, Some(pg), Some(runtime));
-
-    let create_request = Request::builder()
-        .method("POST")
-        .uri("/api/viewers")
-        .header("content-type", "application/json")
-        .body(axum::body::Body::from(
-            json!({ "name": "Billing logs", "signal": "logs" }).to_string(),
-        ))
-        .unwrap();
-
-    let create_response = app.clone().oneshot(create_request).await.unwrap();
-    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let env = setup_viewer_app().await;
+    let app = env.app;
 
     let log_request = Request::builder()
         .method("POST")
@@ -794,6 +780,18 @@ async fn test_create_viewer_then_log_is_reflected_in_viewer_api() {
 
     let log_response = app.clone().oneshot(log_request).await.unwrap();
     assert_eq!(log_response.status(), StatusCode::OK);
+
+    let create_request = Request::builder()
+        .method("POST")
+        .uri("/api/viewers")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "Billing logs", "signal": "logs" }).to_string(),
+        ))
+        .unwrap();
+
+    let create_response = app.clone().oneshot(create_request).await.unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
 
     let list_request = Request::builder()
         .method("GET")
@@ -910,6 +908,176 @@ async fn test_ingest_unsupported_content_type_returns_415() {
     assert_eq!(
         response.status(),
         StatusCode::UNSUPPORTED_MEDIA_TYPE,
-        "text/plain は 415 を返すこと"
+        "text/plain should return 415"
+    );
+}
+
+// ─── GET /api/viewers/:id ────────────────────────────────────────────────────
+
+/// GET /api/viewers/:id returns the correct viewer summary.
+///
+/// Scenario:
+///   1. Ingest one trace
+///   2. Create a viewer (add_viewer reads Redis history, entry_count becomes 1)
+///   3. Fetch single viewer summary via GET /api/viewers/:id
+///   4. Verify name / signals / entry_count are correct
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_get_viewer_by_id_returns_viewer_summary() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    // 1. Ingest one trace
+    let trace_request = Request::builder()
+        .method("POST")
+        .uri("/v1/traces")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(make_trace_payload(
+            "detail-svc",
+            "render-detail",
+        )))
+        .unwrap();
+    let trace_response = app.clone().oneshot(trace_request).await.unwrap();
+    assert_eq!(trace_response.status(), StatusCode::OK);
+
+    // 2. Create a viewer (add_viewer reads Redis history)
+    let create_request = Request::builder()
+        .method("POST")
+        .uri("/api/viewers")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "Detail Traces Viewer", "signal": "traces" }).to_string(),
+        ))
+        .unwrap();
+
+    let create_response = app.clone().oneshot(create_request).await.unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+
+    let create_body = axum::body::to_bytes(create_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_payload: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
+    let viewer_id = create_payload["id"].as_str().unwrap().to_string();
+
+    // 3. Fetch viewer by id
+    let get_request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/viewers/{viewer_id}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let get_response = app.oneshot(get_request).await.unwrap();
+    assert_eq!(
+        get_response.status(),
+        StatusCode::OK,
+        "GET /api/viewers/:id should return 200 OK"
+    );
+
+    let body = axum::body::to_bytes(get_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    // 4. Verify response fields
+    assert_eq!(
+        payload["name"], "Detail Traces Viewer",
+        "viewer name should match"
+    );
+    assert_eq!(payload["signals"][0], "traces", "signal should be traces");
+    assert_eq!(
+        payload["entry_count"], 1,
+        "one trace should be reflected in entry_count"
+    );
+    assert_eq!(
+        payload["entries"][0]["service_name"], "detail-svc",
+        "service_name should match"
+    );
+
+    let preview = payload["entries"][0]["payload_preview"].as_str().unwrap();
+    assert!(
+        preview.contains("render-detail"),
+        "payload_preview should contain span name: {preview}"
+    );
+}
+
+/// GET /api/viewers/:id returns 404 for an unknown ID.
+///
+/// Scenario:
+///   1. Start runtime with no viewers
+///   2. Call GET /api/viewers/:id with a random UUID
+///   3. Expect 404 Not Found
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_get_viewer_by_id_not_found_returns_404() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    let unknown_id = Uuid::new_v4();
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/viewers/{unknown_id}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "unknown viewer ID should return 404"
+    );
+}
+
+/// GET /api/viewers/:id returns 503 when viewer runtime is not configured.
+///
+/// Scenario:
+///   1. Start app without viewer runtime (build_app)
+///   2. Call GET /api/viewers/:id
+///   3. Expect 503 Service Unavailable
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_get_viewer_by_id_without_runtime_returns_503() {
+    let redis_container = Redis::default().start().await.unwrap();
+    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
+
+    let app = build_app(make_redis_store(redis_port).await);
+
+    let viewer_id = Uuid::new_v4();
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/viewers/{viewer_id}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "should return 503 when runtime is not configured"
+    );
+}
+
+/// GET /api/viewers/:id returns 400 Bad Request when given an invalid UUID.
+///
+/// Scenario:
+///   1. Start app with runtime
+///   2. Call GET /api/viewers/not-a-uuid
+///   3. Expect 400 Bad Request (Axum's Path extractor fails to parse UUID)
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_get_viewer_by_id_invalid_uuid_returns_400() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/api/viewers/not-a-uuid")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "invalid UUID should return 400"
     );
 }
