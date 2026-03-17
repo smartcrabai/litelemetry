@@ -63,4 +63,26 @@ INSERT INTO viewer_definitions (
     '{"default_view":"table"}'::jsonb,
     1,
     true
+) , (
+    '7a8c1f4e-3e29-4b6a-9d12-f1a2b3c4d5e6',
+    'compose-seed-metrics-stacked-bar',
+    'Compose Seed Metrics (Stacked Bar)',
+    1000,
+    86400000,
+    2,
+    '{"kind":"stacked_bar","signal":"metrics"}'::jsonb,
+    '{"default_view":"table"}'::jsonb,
+    1,
+    true
+) , (
+    'c9d0e1f2-a3b4-5c6d-7e8f-091a2b3c4d5e',
+    'compose-seed-metrics-line',
+    'Compose Seed Metrics (Line)',
+    1000,
+    86400000,
+    2,
+    '{"kind":"line","signal":"metrics"}'::jsonb,
+    '{"default_view":"table"}'::jsonb,
+    1,
+    true
 ) ON CONFLICT DO NOTHING;

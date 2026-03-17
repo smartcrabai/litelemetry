@@ -365,7 +365,48 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           width: 100%;
         }
       }
+      .chart-section {
+        display: none;
+      }
+
+      .chart-section.visible {
+        display: grid;
+        gap: 18px;
+      }
+
+      .chart-section canvas {
+        width: 100%;
+        max-height: 400px;
+      }
+
+      .viewer-row {
+        cursor: pointer;
+      }
+
+      .viewer-row:hover td {
+        background: var(--accent-soft);
+      }
+
+      .viewer-row.selected td {
+        background: var(--teal-soft);
+      }
+
+      .chart-type-select {
+        min-height: 32px;
+        padding: 4px 8px;
+        border-radius: 10px;
+        min-width: 100px;
+      }
+
+      .entries-table-wrap {
+        overflow: auto;
+        max-height: 400px;
+        border-radius: 16px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.76);
+      }
     </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
   </head>
   <body>
     <main>
@@ -375,6 +416,11 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             <option value="traces">traces</option>
             <option value="metrics">metrics</option>
             <option value="logs">logs</option>
+          </select>
+          <select id="viewer-chart-type-select" data-testid="viewer-chart-type-select" name="viewer-chart-type">
+            <option value="table">Table</option>
+            <option value="stacked_bar">Stacked Bar</option>
+            <option value="line">Line</option>
           </select>
           <input id="viewer-name-input" data-testid="viewer-name-input" name="viewer-name" placeholder="checkout traces" maxlength="80" />
           <button id="create-viewer-button" data-testid="create-viewer-button" class="primary" type="button">+ Create viewer</button>
@@ -393,6 +439,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
                 <th>Name</th>
                 <th>ID</th>
                 <th>Signal</th>
+                <th>Chart</th>
                 <th>Lookback</th>
                 <th>Entries</th>
                 <th>Status</th>
@@ -408,11 +455,32 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           </div>
         </div>
       </section>
+
+      <section id="viewer-detail-section" class="panel panel-strong chart-section">
+        <h3 id="viewer-detail-title">Viewer Detail</h3>
+        <div id="viewer-chart-container">
+          <canvas id="viewer-chart-canvas"></canvas>
+        </div>
+        <div id="viewer-entries-table" class="entries-table-wrap" hidden>
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Signal</th>
+                <th>Service</th>
+                <th>Preview</th>
+              </tr>
+            </thead>
+            <tbody id="viewer-entries-body"></tbody>
+          </table>
+        </div>
+      </section>
     </main>
 
     <script>
       const statusBox = document.getElementById('status-box');
       const viewerSignalSelect = document.getElementById('viewer-signal-select');
+      const viewerChartTypeSelect = document.getElementById('viewer-chart-type-select');
       const viewerNameInput = document.getElementById('viewer-name-input');
       const createViewerButton = document.getElementById('create-viewer-button');
       const refreshViewersButton = document.getElementById('refresh-viewers-button');
@@ -421,9 +489,17 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const viewerEmptyBody = document.getElementById('viewer-empty-body');
       const viewerTableScroll = document.getElementById('viewer-table-scroll');
       const viewerTableBody = document.getElementById('viewer-table-body');
+      const viewerDetailSection = document.getElementById('viewer-detail-section');
+      const viewerDetailTitle = document.getElementById('viewer-detail-title');
+      const viewerChartContainer = document.getElementById('viewer-chart-container');
+      const viewerChartCanvas = document.getElementById('viewer-chart-canvas');
+      const viewerEntriesTable = document.getElementById('viewer-entries-table');
+      const viewerEntriesBody = document.getElementById('viewer-entries-body');
 
       let latestViewers = [];
       let viewerLoadState = 'loading';
+      let selectedViewerId = null;
+      let currentChart = null;
 
       function setStatus(kind, message) {
         statusBox.dataset.state = kind;
@@ -465,6 +541,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       }
 
       const VIEWER_PLACEHOLDERS = { traces: 'checkout traces', metrics: 'orders metrics', logs: 'billing logs' };
+      const CHART_TYPE_LABELS = { table: 'Table', stacked_bar: 'Stacked Bar', line: 'Line' };
 
       function formatStatus(status) {
         if (!status) return JSON.stringify(status);
@@ -476,6 +553,11 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       function syncCreateForm() {
         const signal = viewerSignalSelect.value;
         viewerNameInput.placeholder = VIEWER_PLACEHOLDERS[signal] || signal;
+        const isMetrics = signal === 'metrics';
+        viewerChartTypeSelect.disabled = !isMetrics;
+        if (!isMetrics) {
+          viewerChartTypeSelect.value = 'table';
+        }
       }
 
       function showEmpty(title, body) {
@@ -484,6 +566,24 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         viewerEmpty.hidden = false;
         viewerTableScroll.hidden = true;
         viewerTableBody.replaceChildren();
+      }
+
+      async function patchViewerChartType(viewerId, chartType) {
+        try {
+          const response = await fetch(`/api/viewers/${viewerId}`, {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ chart_type: chartType })
+          });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          await refreshViewers({ silent: true });
+          if (selectedViewerId === viewerId) {
+            await showViewerDetail(viewerId);
+          }
+          setStatus('ok', `Chart type updated to ${CHART_TYPE_LABELS[chartType] || chartType}.`);
+        } catch (error) {
+          setStatus('error', `Failed to update chart type: ${error.message}`);
+        }
       }
 
       function renderViewerTable() {
@@ -508,13 +608,173 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
         for (const viewer of latestViewers) {
           const row = document.createElement('tr');
+          row.className = 'viewer-row';
+          if (viewer.id === selectedViewerId) row.classList.add('selected');
+
           appendTableCell(row, viewer.name);
           appendTableCell(row, truncateId(viewer.id));
           appendTableCell(row, viewer.signals.join(', '));
+
+          const chartCell = document.createElement('td');
+          const isMetrics = viewer.signals.includes('metrics');
+          if (isMetrics) {
+            const sel = document.createElement('select');
+            sel.className = 'chart-type-select';
+            for (const [val, label] of Object.entries(CHART_TYPE_LABELS)) {
+              const opt = document.createElement('option');
+              opt.value = val;
+              opt.textContent = label;
+              if (val === (viewer.chart_type || 'table')) opt.selected = true;
+              sel.appendChild(opt);
+            }
+            sel.addEventListener('change', (e) => {
+              e.stopPropagation();
+              patchViewerChartType(viewer.id, sel.value);
+            });
+            sel.addEventListener('click', (e) => e.stopPropagation());
+            chartCell.appendChild(sel);
+          } else {
+            chartCell.textContent = 'table';
+          }
+          row.appendChild(chartCell);
+
           appendTableCell(row, formatLookbackMs(viewer.lookback_ms));
           appendTableCell(row, String(viewer.entry_count));
           appendTableCell(row, formatStatus(viewer.status));
+
+          row.addEventListener('click', () => showViewerDetail(viewer.id));
           viewerTableBody.appendChild(row);
+        }
+      }
+
+      function getBucketSizeMs(lookbackMs) {
+        if (lookbackMs <= 5 * 60 * 1000) return 10 * 1000;
+        if (lookbackMs <= 60 * 60 * 1000) return 60 * 1000;
+        return 5 * 60 * 1000;
+      }
+
+      function bucketKey(dateStr, bucketMs) {
+        const t = new Date(dateStr).getTime();
+        return new Date(Math.floor(t / bucketMs) * bucketMs).toISOString();
+      }
+
+      function buildChartData(entries, lookbackMs) {
+        const bucketMs = getBucketSizeMs(lookbackMs);
+        const grouped = {};
+        const allBuckets = new Set();
+
+        for (const entry of entries) {
+          const key = bucketKey(entry.observed_at, bucketMs);
+          allBuckets.add(key);
+          const series = `${entry.metric_name || 'unknown'} (${entry.service_name || 'unknown'})`;
+          if (!grouped[series]) grouped[series] = {};
+          grouped[series][key] = (grouped[series][key] || 0) + (entry.metric_value ?? 0);
+        }
+
+        const labels = [...allBuckets].sort();
+        const datasets = Object.entries(grouped).map(([series, buckets]) => {
+          const hue = Math.abs([...series].reduce((h, c) => h * 31 + c.charCodeAt(0), 0)) % 360;
+          return {
+            label: series,
+            data: labels.map(l => buckets[l] || 0),
+            backgroundColor: `hsla(${hue}, 60%, 55%, 0.7)`,
+            borderColor: `hsl(${hue}, 60%, 45%)`,
+            borderWidth: 1,
+            fill: false,
+          };
+        });
+
+        return {
+          labels: labels.map(l => {
+            const d = new Date(l);
+            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+          }),
+          datasets,
+        };
+      }
+
+      function renderChart(chartType, entries, lookbackMs) {
+        if (currentChart) {
+          currentChart.destroy();
+          currentChart = null;
+        }
+
+        if (chartType === 'table' || !entries.length) {
+          viewerChartContainer.hidden = true;
+          return;
+        }
+
+        viewerChartContainer.hidden = false;
+        const data = buildChartData(entries, lookbackMs);
+        const isStacked = chartType === 'stacked_bar';
+        const type = isStacked ? 'bar' : 'line';
+
+        currentChart = new Chart(viewerChartCanvas, {
+          type,
+          data,
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { position: 'bottom' } },
+            scales: {
+              x: { stacked: isStacked },
+              y: { stacked: isStacked, beginAtZero: true },
+            },
+          },
+        });
+      }
+
+      function renderEntriesTable(entries) {
+        viewerEntriesBody.replaceChildren();
+        if (!entries.length) {
+          viewerEntriesTable.hidden = true;
+          return;
+        }
+        viewerEntriesTable.hidden = false;
+        for (const entry of entries) {
+          const row = document.createElement('tr');
+          appendTableCell(row, new Date(entry.observed_at).toLocaleTimeString());
+          appendTableCell(row, entry.signal);
+          appendTableCell(row, entry.service_name || '-');
+          const previewCell = document.createElement('td');
+          const code = document.createElement('code');
+          code.textContent = entry.payload_preview;
+          previewCell.appendChild(code);
+          row.appendChild(previewCell);
+          viewerEntriesBody.appendChild(row);
+        }
+      }
+
+      async function showViewerDetail(viewerId) {
+        selectedViewerId = viewerId;
+        renderViewerTable();
+
+        try {
+          const response = await fetch(`/api/viewers/${viewerId}`, {
+            headers: { 'accept': 'application/json' }
+          });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+          const viewer = await response.json();
+          viewerDetailTitle.textContent = `${viewer.name} (${viewer.chart_type || 'table'})`;
+          viewerDetailSection.classList.add('visible');
+
+          const chartType = viewer.chart_type || 'table';
+          if (chartType !== 'table' && viewer.signals.includes('metrics')) {
+            renderChart(chartType, viewer.entries, viewer.lookback_ms);
+            viewerEntriesTable.hidden = true;
+          } else {
+            viewerChartContainer.hidden = true;
+            renderEntriesTable(viewer.entries);
+          }
+        } catch (error) {
+          viewerDetailSection.classList.remove('visible');
+          viewerDetailTitle.textContent = '';
+          viewerChartContainer.hidden = true;
+          if (currentChart) { currentChart.destroy(); currentChart = null; }
+          viewerEntriesBody.replaceChildren();
+          viewerEntriesTable.hidden = true;
+          setStatus('error', `Failed to load viewer detail: ${error.message}`);
         }
       }
 
@@ -568,6 +828,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       async function createViewer() {
         const name = viewerNameInput.value.trim();
         const signal = viewerSignalSelect.value;
+        const chart_type = viewerChartTypeSelect.value;
         if (!name) {
           setStatus('error', 'Viewer name is required.');
           viewerNameInput.focus();
@@ -584,7 +845,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
               'content-type': 'application/json',
               'accept': 'application/json'
             },
-            body: JSON.stringify({ name, signal })
+            body: JSON.stringify({ name, signal, chart_type })
           });
 
           if (!response.ok) {
@@ -639,10 +900,25 @@ impl AppState {
     }
 }
 
+fn default_chart_type() -> String {
+    "table".to_string()
+}
+
+fn is_valid_chart_type(chart_type: &str) -> bool {
+    matches!(chart_type, "table" | "stacked_bar" | "line")
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateViewerRequest {
     name: String,
     signal: String,
+    #[serde(default = "default_chart_type")]
+    chart_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchViewerRequest {
+    chart_type: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -661,6 +937,7 @@ struct ViewerSummary {
     slug: String,
     name: String,
     signals: Vec<&'static str>,
+    chart_type: String,
     refresh_interval_ms: u32,
     lookback_ms: i64,
     entry_count: usize,
@@ -675,6 +952,10 @@ struct ViewerEntryRow {
     service_name: Option<String>,
     payload_size_bytes: usize,
     payload_preview: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metric_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metric_value: Option<f64>,
 }
 
 /// Axum app を構築して返す
@@ -697,7 +978,7 @@ pub fn build_app_with_services(
         .route("/", get(index))
         .route("/healthz", get(healthz))
         .route("/api/viewers", get(list_viewers).post(create_viewer))
-        .route("/api/viewers/{id}", get(get_viewer))
+        .route("/api/viewers/{id}", get(get_viewer).patch(patch_viewer))
         .route("/v1/traces", post(ingest_traces))
         .route("/v1/metrics", post(ingest_metrics))
         .route("/v1/logs", post(ingest_logs))
@@ -758,6 +1039,10 @@ async fn create_viewer(
 
     let signal = parse_signal_name(payload.signal.trim()).ok_or(StatusCode::BAD_REQUEST)?;
 
+    if !is_valid_chart_type(&payload.chart_type) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     let id = Uuid::new_v4();
     let definition = ViewerDefinition {
         id,
@@ -767,7 +1052,7 @@ async fn create_viewer(
         lookback_ms: DEFAULT_VIEWER_LOOKBACK_MS,
         signal_mask: signal.into(),
         definition_json: json!({
-            "kind": "table",
+            "kind": payload.chart_type,
             "signal": signal_name(signal)
         }),
         layout_json: json!({
@@ -796,6 +1081,67 @@ async fn create_viewer(
         })?;
 
     Ok((StatusCode::CREATED, Json(CreateViewerResponse { id })))
+}
+
+async fn patch_viewer(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<PatchViewerRequest>,
+) -> Result<StatusCode, StatusCode> {
+    let postgres = state
+        .postgres
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let runtime = state.require_viewer_runtime()?;
+
+    if !is_valid_chart_type(&payload.chart_type) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Read current state under lock, then release before DB write
+    let (definition_json, layout_json) = {
+        let rt = runtime.lock().await;
+        let (viewer, _) = rt
+            .viewers()
+            .iter()
+            .find(|(viewer, _)| viewer.definition().id == id)
+            .ok_or(StatusCode::NOT_FOUND)?;
+
+        let current_kind = viewer
+            .definition()
+            .definition_json
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("table");
+        if current_kind == payload.chart_type {
+            return Ok(StatusCode::OK);
+        }
+
+        let mut definition_json = viewer.definition().definition_json.clone();
+        definition_json["kind"] = json!(payload.chart_type);
+        let layout_json = viewer.definition().layout_json.clone();
+        (definition_json, layout_json)
+    }; // lock released here
+
+    let updated = postgres
+        .update_viewer_definition_json(id, &definition_json, &layout_json)
+        .await
+        .map_err(|error| {
+            tracing::error!("update_viewer_definition_json failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    if !updated {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // Re-acquire lock to update in-memory state
+    runtime
+        .lock()
+        .await
+        .update_viewer_definition(id, definition_json, layout_json);
+
+    Ok(StatusCode::OK)
 }
 
 async fn ingest_traces(
@@ -849,18 +1195,44 @@ fn viewer_summary(
     include_entries: bool,
 ) -> ViewerSummary {
     let definition = viewer.definition();
+    let chart_type = definition
+        .definition_json
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("table")
+        .to_string();
+
     let entries = if include_entries {
         viewer_state
             .entries
             .iter()
             .rev()
             .take(VIEWER_ENTRY_PREVIEW_LIMIT)
-            .map(|entry| ViewerEntryRow {
-                observed_at: entry.observed_at,
-                signal: signal_name(entry.signal),
-                service_name: entry.service_name.clone(),
-                payload_size_bytes: entry.payload.len(),
-                payload_preview: payload_preview(entry.signal, &entry.payload),
+            .map(|entry| {
+                let (metric_name, metric_value, preview) = if entry.signal == Signal::Metrics {
+                    let fields = extract_metric_fields(&entry.payload);
+                    let name = fields.as_ref().and_then(|f| f.metric_name.clone());
+                    let value = fields
+                        .as_ref()
+                        .and_then(|f| f.metric_value.as_ref().and_then(|s| s.parse::<f64>().ok()));
+                    let preview = fields
+                        .as_ref()
+                        .and_then(format_metric_preview)
+                        .map(|s| truncate_preview(&s))
+                        .unwrap_or_else(|| raw_payload_preview(&entry.payload));
+                    (name, value, preview)
+                } else {
+                    (None, None, payload_preview(entry.signal, &entry.payload))
+                };
+                ViewerEntryRow {
+                    observed_at: entry.observed_at,
+                    signal: signal_name(entry.signal),
+                    service_name: entry.service_name.clone(),
+                    payload_size_bytes: entry.payload.len(),
+                    payload_preview: preview,
+                    metric_name,
+                    metric_value,
+                }
             })
             .collect()
     } else {
@@ -872,6 +1244,7 @@ fn viewer_summary(
         slug: definition.slug.clone(),
         name: definition.name.clone(),
         signals: signal_mask_labels(definition.signal_mask),
+        chart_type,
         refresh_interval_ms: definition.refresh_interval_ms,
         lookback_ms: definition.lookback_ms,
         entry_count: viewer_state.entries.len(),
@@ -909,7 +1282,10 @@ fn payload_preview(signal: Signal, payload: &Bytes) -> String {
     if let Some(summary) = structured_payload_preview(signal, payload) {
         return summary;
     }
+    raw_payload_preview(payload)
+}
 
+fn raw_payload_preview(payload: &Bytes) -> String {
     match std::str::from_utf8(payload) {
         Ok(text) => {
             let compact = compact_whitespace(text);
@@ -1001,7 +1377,13 @@ fn attribute_string_value(attributes: &[serde_json::Value], key: &str) -> Option
     None
 }
 
-fn structured_metric_preview(payload: &Bytes) -> Option<String> {
+struct MetricFields {
+    service_name: Option<String>,
+    metric_name: Option<String>,
+    metric_value: Option<String>,
+}
+
+fn extract_metric_fields(payload: &Bytes) -> Option<MetricFields> {
     let value: serde_json::Value = serde_json::from_slice(payload).ok()?;
     let resource_metrics = value.get("resourceMetrics")?.as_array()?;
     let service_name = extract_service_name_from_resource_blocks(Signal::Metrics, &value);
@@ -1051,7 +1433,19 @@ fn structured_metric_preview(payload: &Bytes) -> Option<String> {
         }
     }
 
-    match (service_name, metric_name, metric_value) {
+    Some(MetricFields {
+        service_name,
+        metric_name,
+        metric_value,
+    })
+}
+
+fn format_metric_preview(fields: &MetricFields) -> Option<String> {
+    match (
+        &fields.service_name,
+        &fields.metric_name,
+        &fields.metric_value,
+    ) {
         (Some(service_name), Some(metric_name), Some(metric_value)) => Some(format!(
             "service={service_name} | metric={metric_name} | value={metric_value} | otlp_json"
         )),
@@ -1065,6 +1459,11 @@ fn structured_metric_preview(payload: &Bytes) -> Option<String> {
         (Some(service_name), None, _) => Some(format!("service={service_name} | otlp_json")),
         (None, None, _) => None,
     }
+}
+
+fn structured_metric_preview(payload: &Bytes) -> Option<String> {
+    let fields = extract_metric_fields(payload)?;
+    format_metric_preview(&fields)
 }
 
 fn metric_first_value(metric: &serde_json::Value) -> Option<String> {

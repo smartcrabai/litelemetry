@@ -6,8 +6,10 @@ use crate::viewer_runtime::compiler::{CompileError, CompiledViewer, compile};
 use crate::viewer_runtime::reducer::{apply_entry, prune_stale_buckets};
 use crate::viewer_runtime::state::{StreamCursor, ViewerState};
 use chrono::Utc;
+use serde_json::Value;
 use std::collections::HashMap;
 use thiserror::Error;
+use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -166,6 +168,22 @@ impl ViewerRuntime {
         prune_stale_buckets(&mut state, viewer.lookback_ms(), now);
         self.viewers.push((viewer, state));
         Ok(())
+    }
+
+    pub fn update_viewer_definition(
+        &mut self,
+        id: Uuid,
+        definition_json: Value,
+        layout_json: Value,
+    ) -> bool {
+        for (viewer, state) in &mut self.viewers {
+            if viewer.definition().id == id {
+                viewer.update_definition_json(definition_json, layout_json);
+                state.revision += 1;
+                return true;
+            }
+        }
+        false
     }
 
     pub fn viewers(&self) -> &[(CompiledViewer, ViewerState)] {

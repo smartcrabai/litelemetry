@@ -166,6 +166,29 @@ impl PostgresStore {
         Ok(snapshots)
     }
 
+    /// viewer の definition_json / layout_json を更新する (revision も +1)
+    pub async fn update_viewer_definition_json(
+        &self,
+        id: Uuid,
+        definition_json: &Value,
+        layout_json: &Value,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE viewer_definitions
+             SET definition_json = $1,
+                 layout_json = $2,
+                 revision = revision + 1
+             WHERE id = $3",
+        )
+        .bind(definition_json)
+        .bind(layout_json)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
     /// viewer の snapshot を upsert する
     pub async fn upsert_snapshot(&self, snapshot: &ViewerSnapshotRow) -> Result<(), sqlx::Error> {
         let status_json = serde_json::to_value(&snapshot.status)
