@@ -667,13 +667,20 @@ async fn test_create_viewer_then_trace_is_reflected_in_viewer_api() {
     let create_response = app.clone().oneshot(create_request).await.unwrap();
     assert_eq!(create_response.status(), StatusCode::CREATED);
 
+    let create_body = axum::body::to_bytes(create_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_payload: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
+    let viewer_id = create_payload["id"].as_str().unwrap().to_string();
+
+    // list API で entry_count を確認
     let list_request = Request::builder()
         .method("GET")
         .uri("/api/viewers")
         .body(axum::body::Body::empty())
         .unwrap();
 
-    let list_response = app.oneshot(list_request).await.unwrap();
+    let list_response = app.clone().oneshot(list_request).await.unwrap();
     assert_eq!(list_response.status(), StatusCode::OK);
 
     let body = axum::body::to_bytes(list_response.into_body(), usize::MAX)
@@ -684,12 +691,24 @@ async fn test_create_viewer_then_trace_is_reflected_in_viewer_api() {
 
     assert_eq!(viewers.len(), 1, "viewer が 1 件作成されること");
     assert_eq!(viewers[0]["entry_count"], 1, "trace が 1 件反映されること");
-    assert_eq!(viewers[0]["entries"][0]["signal"], "traces");
-    assert_eq!(viewers[0]["entries"][0]["service_name"], "checkout-ui");
 
-    let preview = viewers[0]["entries"][0]["payload_preview"]
-        .as_str()
+    // 個別 viewer API で entries を確認
+    let get_request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/viewers/{viewer_id}"))
+        .body(axum::body::Body::empty())
         .unwrap();
+
+    let get_response = app.oneshot(get_request).await.unwrap();
+    let get_body = axum::body::to_bytes(get_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let viewer: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+
+    assert_eq!(viewer["entries"][0]["signal"], "traces");
+    assert_eq!(viewer["entries"][0]["service_name"], "checkout-ui");
+
+    let preview = viewer["entries"][0]["payload_preview"].as_str().unwrap();
     assert!(
         preview.contains("render-checkout"),
         "payload preview に span name が含まれること: {preview}"
@@ -728,13 +747,20 @@ async fn test_create_viewer_then_metric_is_reflected_in_viewer_api() {
     let create_response = app.clone().oneshot(create_request).await.unwrap();
     assert_eq!(create_response.status(), StatusCode::CREATED);
 
+    let create_body = axum::body::to_bytes(create_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_payload: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
+    let viewer_id = create_payload["id"].as_str().unwrap().to_string();
+
+    // list API で entry_count を確認
     let list_request = Request::builder()
         .method("GET")
         .uri("/api/viewers")
         .body(axum::body::Body::empty())
         .unwrap();
 
-    let list_response = app.oneshot(list_request).await.unwrap();
+    let list_response = app.clone().oneshot(list_request).await.unwrap();
     assert_eq!(list_response.status(), StatusCode::OK);
 
     let body = axum::body::to_bytes(list_response.into_body(), usize::MAX)
@@ -749,12 +775,24 @@ async fn test_create_viewer_then_metric_is_reflected_in_viewer_api() {
         viewers[0]["entry_count"], 1,
         "metrics が 1 件反映されること"
     );
-    assert_eq!(viewers[0]["entries"][0]["signal"], "metrics");
-    assert_eq!(viewers[0]["entries"][0]["service_name"], "orders-api");
 
-    let preview = viewers[0]["entries"][0]["payload_preview"]
-        .as_str()
+    // 個別 viewer API で entries を確認
+    let get_request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/viewers/{viewer_id}"))
+        .body(axum::body::Body::empty())
         .unwrap();
+
+    let get_response = app.oneshot(get_request).await.unwrap();
+    let get_body = axum::body::to_bytes(get_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let viewer: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+
+    assert_eq!(viewer["entries"][0]["signal"], "metrics");
+    assert_eq!(viewer["entries"][0]["service_name"], "orders-api");
+
+    let preview = viewer["entries"][0]["payload_preview"].as_str().unwrap();
     assert!(
         preview.contains("http.server.requests"),
         "payload preview に metric name が含まれること: {preview}"
@@ -793,13 +831,20 @@ async fn test_create_viewer_then_log_is_reflected_in_viewer_api() {
     let create_response = app.clone().oneshot(create_request).await.unwrap();
     assert_eq!(create_response.status(), StatusCode::CREATED);
 
+    let create_body = axum::body::to_bytes(create_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_payload: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
+    let viewer_id = create_payload["id"].as_str().unwrap().to_string();
+
+    // list API で entry_count を確認
     let list_request = Request::builder()
         .method("GET")
         .uri("/api/viewers")
         .body(axum::body::Body::empty())
         .unwrap();
 
-    let list_response = app.oneshot(list_request).await.unwrap();
+    let list_response = app.clone().oneshot(list_request).await.unwrap();
     assert_eq!(list_response.status(), StatusCode::OK);
 
     let body = axum::body::to_bytes(list_response.into_body(), usize::MAX)
@@ -811,12 +856,24 @@ async fn test_create_viewer_then_log_is_reflected_in_viewer_api() {
     assert_eq!(viewers.len(), 1, "viewer が 1 件作成されること");
     assert_eq!(viewers[0]["signals"][0], "logs");
     assert_eq!(viewers[0]["entry_count"], 1, "log が 1 件反映されること");
-    assert_eq!(viewers[0]["entries"][0]["signal"], "logs");
-    assert_eq!(viewers[0]["entries"][0]["service_name"], "worker-billing");
 
-    let preview = viewers[0]["entries"][0]["payload_preview"]
-        .as_str()
+    // 個別 viewer API で entries を確認
+    let get_request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/viewers/{viewer_id}"))
+        .body(axum::body::Body::empty())
         .unwrap();
+
+    let get_response = app.oneshot(get_request).await.unwrap();
+    let get_body = axum::body::to_bytes(get_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let viewer: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+
+    assert_eq!(viewer["entries"][0]["signal"], "logs");
+    assert_eq!(viewer["entries"][0]["service_name"], "worker-billing");
+
+    let preview = viewer["entries"][0]["payload_preview"].as_str().unwrap();
     assert!(
         preview.contains("payment authorized"),
         "payload preview に log message が含まれること: {preview}"
@@ -1079,5 +1136,274 @@ async fn test_get_viewer_by_id_invalid_uuid_returns_400() {
         response.status(),
         StatusCode::BAD_REQUEST,
         "invalid UUID should return 400"
+    );
+}
+
+// ─── chart_type & PATCH ──────────────────────────────────────────────────────
+
+/// chart_type 付きで viewer を作成すると、レスポンスの chart_type に反映される
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_create_viewer_with_chart_type() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    let create_request = Request::builder()
+        .method("POST")
+        .uri("/api/viewers")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "Metrics bar", "signal": "metrics", "chart_type": "stacked_bar" })
+                .to_string(),
+        ))
+        .unwrap();
+
+    let create_response = app.clone().oneshot(create_request).await.unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+
+    let create_body = axum::body::to_bytes(create_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_payload: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
+    let viewer_id = create_payload["id"].as_str().unwrap().to_string();
+
+    // GET /api/viewers/:id で chart_type が stacked_bar であることを確認
+    let get_request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/viewers/{viewer_id}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let get_response = app.oneshot(get_request).await.unwrap();
+    assert_eq!(get_response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(get_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        payload["chart_type"], "stacked_bar",
+        "chart_type should be stacked_bar"
+    );
+}
+
+/// chart_type を省略した場合はデフォルト "table" になる
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_create_viewer_default_chart_type_is_table() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    let create_request = Request::builder()
+        .method("POST")
+        .uri("/api/viewers")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "Default chart", "signal": "traces" }).to_string(),
+        ))
+        .unwrap();
+
+    let create_response = app.clone().oneshot(create_request).await.unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+
+    let create_body = axum::body::to_bytes(create_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_payload: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
+    let viewer_id = create_payload["id"].as_str().unwrap().to_string();
+
+    let get_request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/viewers/{viewer_id}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let get_response = app.oneshot(get_request).await.unwrap();
+    let body = axum::body::to_bytes(get_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        payload["chart_type"], "table",
+        "default chart_type should be table"
+    );
+}
+
+/// PATCH /api/viewers/:id で chart_type を変更 → 再取得で反映される
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_patch_viewer_chart_type() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    // metrics viewer を "table" で作成
+    let create_request = Request::builder()
+        .method("POST")
+        .uri("/api/viewers")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "Patch test", "signal": "metrics" }).to_string(),
+        ))
+        .unwrap();
+
+    let create_response = app.clone().oneshot(create_request).await.unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+
+    let create_body = axum::body::to_bytes(create_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_payload: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
+    let viewer_id = create_payload["id"].as_str().unwrap().to_string();
+
+    // PATCH で "line" に変更
+    let patch_request = Request::builder()
+        .method("PATCH")
+        .uri(format!("/api/viewers/{viewer_id}"))
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "chart_type": "line" }).to_string(),
+        ))
+        .unwrap();
+
+    let patch_response = app.clone().oneshot(patch_request).await.unwrap();
+    assert_eq!(
+        patch_response.status(),
+        StatusCode::OK,
+        "PATCH should return 200 OK"
+    );
+
+    // GET で "line" に変わっていることを確認
+    let get_request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/viewers/{viewer_id}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let get_response = app.oneshot(get_request).await.unwrap();
+    let body = axum::body::to_bytes(get_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        payload["chart_type"], "line",
+        "chart_type should be updated to line"
+    );
+}
+
+/// 無効な chart_type で作成 → 400 BAD REQUEST
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_create_viewer_invalid_chart_type_returns_400() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/viewers")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "Bad chart", "signal": "metrics", "chart_type": "pie" }).to_string(),
+        ))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "invalid chart_type should return 400"
+    );
+}
+
+/// 存在しない ID に PATCH → 404
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_patch_nonexistent_viewer_returns_404() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    let unknown_id = Uuid::new_v4();
+    let request = Request::builder()
+        .method("PATCH")
+        .uri(format!("/api/viewers/{unknown_id}"))
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "chart_type": "line" }).to_string(),
+        ))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "PATCH on unknown ID should return 404"
+    );
+}
+
+/// メトリクス ingest 後の entries に metric_name / metric_value が含まれる
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_metric_entries_contain_metric_name_and_value() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    // メトリクスを ingest
+    let metric_request = Request::builder()
+        .method("POST")
+        .uri("/v1/metrics")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(make_metric_payload(
+            "web-api",
+            "http.request.duration",
+            150,
+        )))
+        .unwrap();
+
+    let metric_response = app.clone().oneshot(metric_request).await.unwrap();
+    assert_eq!(metric_response.status(), StatusCode::OK);
+
+    // metrics viewer を作成
+    let create_request = Request::builder()
+        .method("POST")
+        .uri("/api/viewers")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "Duration metrics", "signal": "metrics", "chart_type": "line" })
+                .to_string(),
+        ))
+        .unwrap();
+
+    let create_response = app.clone().oneshot(create_request).await.unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+
+    let create_body = axum::body::to_bytes(create_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_payload: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
+    let viewer_id = create_payload["id"].as_str().unwrap().to_string();
+
+    // GET /api/viewers/:id で entries に metric_name / metric_value が含まれることを確認
+    let get_request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/viewers/{viewer_id}"))
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let get_response = app.oneshot(get_request).await.unwrap();
+    assert_eq!(get_response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(get_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(payload["entry_count"], 1);
+    let entry = &payload["entries"][0];
+    assert_eq!(
+        entry["metric_name"], "http.request.duration",
+        "metric_name should be extracted"
+    );
+    assert_eq!(
+        entry["metric_value"], 150.0,
+        "metric_value should be extracted as f64"
     );
 }

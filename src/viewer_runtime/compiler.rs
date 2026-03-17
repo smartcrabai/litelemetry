@@ -1,5 +1,6 @@
 use crate::domain::telemetry::Signal;
 use crate::domain::viewer::ViewerDefinition;
+use serde_json::Value;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -29,6 +30,11 @@ impl CompiledViewer {
 
     pub fn lookback_ms(&self) -> i64 {
         self.definition.lookback_ms
+    }
+
+    pub fn update_definition_json(&mut self, definition_json: Value, layout_json: Value) {
+        self.definition.definition_json = definition_json;
+        self.definition.layout_json = layout_json;
     }
 }
 
