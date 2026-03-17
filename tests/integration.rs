@@ -41,8 +41,8 @@ async fn make_postgres_store(port: u16) -> PostgresStore {
         .expect("PostgreSQL connection failed")
 }
 
-/// Redis + PostgreSQL + ViewerRuntime + App を一括でセットアップするヘルパー。
-/// コンテナの参照を保持して、テスト終了まで破棄されないようにする。
+/// Helper that sets up Redis + PostgreSQL + ViewerRuntime + App in one go.
+/// Holds container references so they are not dropped before the test ends.
 struct ViewerTestEnv {
     app: axum::Router,
     _redis_container: testcontainers::ContainerAsync<Redis>,
@@ -908,26 +908,26 @@ async fn test_ingest_unsupported_content_type_returns_415() {
     assert_eq!(
         response.status(),
         StatusCode::UNSUPPORTED_MEDIA_TYPE,
-        "text/plain は 415 を返すこと"
+        "text/plain should return 415"
     );
 }
 
 // ─── GET /api/viewers/:id ────────────────────────────────────────────────────
 
-/// GET /api/viewers/:id が正しい viewer summary を返すこと
+/// GET /api/viewers/:id returns the correct viewer summary.
 ///
-/// シナリオ:
-///   1. traces を 1 件 ingest
-///   2. viewer を作成 (add_viewer が Redis 履歴を読み込み entry_count=1 になる)
-///   3. GET /api/viewers/:id で単一 viewer の summary を取得
-///   4. name / signals / entry_count が正しいことを確認
+/// Scenario:
+///   1. Ingest one trace
+///   2. Create a viewer (add_viewer reads Redis history, entry_count becomes 1)
+///   3. Fetch single viewer summary via GET /api/viewers/:id
+///   4. Verify name / signals / entry_count are correct
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_get_viewer_by_id_returns_viewer_summary() {
     let env = setup_viewer_app().await;
     let app = env.app;
 
-    // 1. traces を 1 件 ingest
+    // 1. Ingest one trace
     let trace_request = Request::builder()
         .method("POST")
         .uri("/v1/traces")
@@ -940,7 +940,7 @@ async fn test_get_viewer_by_id_returns_viewer_summary() {
     let trace_response = app.clone().oneshot(trace_request).await.unwrap();
     assert_eq!(trace_response.status(), StatusCode::OK);
 
-    // 2. viewer を作成 (add_viewer が Redis 履歴を読み込む)
+    // 2. Create a viewer (add_viewer reads Redis history)
     let create_request = Request::builder()
         .method("POST")
         .uri("/api/viewers")
@@ -959,7 +959,7 @@ async fn test_get_viewer_by_id_returns_viewer_summary() {
     let create_payload: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
     let viewer_id = create_payload["id"].as_str().unwrap().to_string();
 
-    // 3. GET /api/viewers/:id
+    // 3. Fetch viewer by id
     let get_request = Request::builder()
         .method("GET")
         .uri(format!("/api/viewers/{viewer_id}"))
@@ -970,7 +970,7 @@ async fn test_get_viewer_by_id_returns_viewer_summary() {
     assert_eq!(
         get_response.status(),
         StatusCode::OK,
-        "GET /api/viewers/:id は 200 OK を返すこと"
+        "GET /api/viewers/:id should return 200 OK"
     );
 
     let body = axum::body::to_bytes(get_response.into_body(), usize::MAX)
@@ -978,34 +978,34 @@ async fn test_get_viewer_by_id_returns_viewer_summary() {
         .unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    // 4. レスポンスの検証
+    // 4. Verify response fields
     assert_eq!(
         payload["name"], "Detail Traces Viewer",
-        "viewer name が正しいこと"
+        "viewer name should match"
     );
+    assert_eq!(payload["signals"][0], "traces", "signal should be traces");
     assert_eq!(
-        payload["signals"][0], "traces",
-        "signal が traces であること"
+        payload["entry_count"], 1,
+        "one trace should be reflected in entry_count"
     );
-    assert_eq!(payload["entry_count"], 1, "trace が 1 件反映されること");
     assert_eq!(
         payload["entries"][0]["service_name"], "detail-svc",
-        "service_name が正しいこと"
+        "service_name should match"
     );
 
     let preview = payload["entries"][0]["payload_preview"].as_str().unwrap();
     assert!(
         preview.contains("render-detail"),
-        "payload_preview に span name が含まれること: {preview}"
+        "payload_preview should contain span name: {preview}"
     );
 }
 
-/// GET /api/viewers/:id で存在しない ID に対して 404 が返ること
+/// GET /api/viewers/:id returns 404 for an unknown ID.
 ///
-/// シナリオ:
-///   1. runtime を起動 (viewer なし)
-///   2. ランダムな UUID で GET /api/viewers/:id
-///   3. 404 Not Found が返ること
+/// Scenario:
+///   1. Start runtime with no viewers
+///   2. Call GET /api/viewers/:id with a random UUID
+///   3. Expect 404 Not Found
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_get_viewer_by_id_not_found_returns_404() {
@@ -1023,16 +1023,16 @@ async fn test_get_viewer_by_id_not_found_returns_404() {
     assert_eq!(
         response.status(),
         StatusCode::NOT_FOUND,
-        "存在しない viewer ID に対して 404 が返ること"
+        "unknown viewer ID should return 404"
     );
 }
 
-/// GET /api/viewers/:id で viewer runtime が未設定の場合に 503 が返ること
+/// GET /api/viewers/:id returns 503 when viewer runtime is not configured.
 ///
-/// シナリオ:
-///   1. viewer runtime なしの app (build_app) を起動
-///   2. GET /api/viewers/:id を呼ぶ
-///   3. 503 Service Unavailable が返ること
+/// Scenario:
+///   1. Start app without viewer runtime (build_app)
+///   2. Call GET /api/viewers/:id
+///   3. Expect 503 Service Unavailable
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_get_viewer_by_id_without_runtime_returns_503() {
@@ -1052,16 +1052,16 @@ async fn test_get_viewer_by_id_without_runtime_returns_503() {
     assert_eq!(
         response.status(),
         StatusCode::SERVICE_UNAVAILABLE,
-        "runtime が設定されていない場合は 503 が返ること"
+        "should return 503 when runtime is not configured"
     );
 }
 
-/// GET /api/viewers/:id の ID に無効な UUID を渡した場合に 400 Bad Request が返ること
+/// GET /api/viewers/:id returns 400 Bad Request when given an invalid UUID.
 ///
-/// シナリオ:
-///   1. runtime あり app を起動
-///   2. GET /api/viewers/not-a-uuid を呼ぶ
-///   3. 400 Bad Request が返ること (Axum の Path extractor が UUID パースに失敗)
+/// Scenario:
+///   1. Start app with runtime
+///   2. Call GET /api/viewers/not-a-uuid
+///   3. Expect 400 Bad Request (Axum's Path extractor fails to parse UUID)
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_get_viewer_by_id_invalid_uuid_returns_400() {
@@ -1078,6 +1078,6 @@ async fn test_get_viewer_by_id_invalid_uuid_returns_400() {
     assert_eq!(
         response.status(),
         StatusCode::BAD_REQUEST,
-        "無効な UUID に対して 400 が返ること"
+        "invalid UUID should return 400"
     );
 }
