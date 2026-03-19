@@ -1459,9 +1459,7 @@ async fn setup_memory_viewer_app() -> MemoryViewerTestEnv {
         Some(runtime),
     );
 
-    MemoryViewerTestEnv {
-        app,
-    }
+    MemoryViewerTestEnv { app }
 }
 
 // ─── startup resume (memory) ─────────────────────────────────────────────────

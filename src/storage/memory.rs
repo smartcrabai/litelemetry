@@ -104,6 +104,12 @@ pub struct MemoryViewerStore {
     inner: Arc<Mutex<MemoryViewerData>>,
 }
 
+impl Default for MemoryViewerStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MemoryViewerStore {
     pub fn new() -> Self {
         Self {
