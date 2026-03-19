@@ -2463,16 +2463,17 @@ async fn get_dashboard(
         let viewers = rt.viewers();
         panel_entries
             .into_iter()
-            .map(|(viewer_id, position)| {
+            .filter_map(|(viewer_id, position)| {
                 let viewer = viewers
                     .iter()
                     .find(|(v, _)| v.definition().id == viewer_id)
                     .map(|(v, state)| viewer_summary(v, state, true));
-                DashboardPanel {
+                viewer.as_ref()?; // 存在しない viewer はスキップ
+                Some(DashboardPanel {
                     viewer_id,
                     position,
                     viewer,
-                }
+                })
             })
             .collect()
     } else {
