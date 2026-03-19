@@ -24,8 +24,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-/// OTLP ペイロードの最大ボディサイズ (4 MiB)。
-/// 単一バッチとして現実的なサイズ上限。
+/// Maximum body size for OTLP payloads (4 MiB).
+/// A realistic upper limit for a single batch.
 const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_VIEWER_LOOKBACK_MS: i64 = 5 * 60 * 1_000;
 const DEFAULT_VIEWER_REFRESH_MS: u32 = 1_000;
@@ -375,7 +375,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           width: 100%;
         }
       }
-      /* ─── Sidebar ─── */
+      /* --- Sidebar --- */
       .sidebar {
         position: fixed;
         top: 0;
@@ -479,7 +479,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         margin-left: 260px;
       }
 
-      /* ─── Dashboard page ─── */
+      /* --- Dashboard page --- */
       .dashboard-page-header {
         display: flex;
         align-items: center;
@@ -552,7 +552,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
       }
 
-      /* ─── Modal ─── */
+      /* --- Modal --- */
       .modal-overlay {
         position: fixed;
         inset: 0;
@@ -1512,7 +1512,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       refreshViewers({ silent: true });
       window.setInterval(() => refreshViewers({ silent: true }), 5000);
 
-      // ─── Sidebar & Navigation ────────────────────────────────────────────
+      // --- Sidebar & Navigation --------------------------------------------
       const sidebarToggle = document.getElementById('sidebar-toggle');
       const sidebar = document.getElementById('sidebar');
       const navViewers = document.getElementById('nav-viewers');
@@ -1565,7 +1565,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         navigateTo('viewers');
       });
 
-      // ─── Dashboard list in sidebar ───────────────────────────────────────
+      // --- Dashboard list in sidebar ---------------------------------------
 
       async function refreshDashboardList() {
         try {
@@ -1593,7 +1593,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
       }
 
-      // ─── Dashboard detail ────────────────────────────────────────────────
+      // --- Dashboard detail ------------------------------------------------
 
       function destroyPanelCharts() {
         for (const c of dashboardPanelCharts) {
@@ -1776,7 +1776,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           });
       }
 
-      // ─── Dashboard settings modal ────────────────────────────────────────
+      // --- Dashboard settings modal ----------------------------------------
 
       dashboardSettingsButton.addEventListener('click', () => {
         if (!currentDashboardId) return;
@@ -1880,7 +1880,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         document.body.appendChild(overlay);
       }
 
-      // ─── New Dashboard modal ─────────────────────────────────────────────
+      // --- New Dashboard modal ---------------------------------------------
 
       newDashboardButton.addEventListener('click', () => openNewDashboardModal());
 
@@ -1979,7 +1979,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         nameInput.focus();
       }
 
-      // ─── Polling ─────────────────────────────────────────────────────────
+      // --- Polling ---------------------------------------------------------
 
       refreshDashboardList();
       window.setInterval(() => {
@@ -1993,10 +1993,10 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 </html>
 "####;
 
-/// Axum 共有 state
+/// Axum shared state
 ///
-/// StreamStore は Clone 可能なため Arc<Mutex<>> でラップする必要はない。
-/// Axum は各リクエストで State を clone する。
+/// StreamStore is Clone-able, so it does not need to be wrapped in Arc<Mutex<>>.
+/// Axum clones State for each request.
 #[derive(Clone)]
 pub struct AppState {
     pub stream_store: StreamStore,
@@ -2104,7 +2104,7 @@ struct TraceSummary {
     spans: Vec<SpanRow>,
 }
 
-/// Axum app を構築して返す (ingest-only モード用)
+/// Builds and returns an Axum app (for ingest-only mode)
 pub fn build_app(stream_store: StreamStore) -> Router {
     build_app_with_services(stream_store, None, None)
 }
@@ -2300,7 +2300,7 @@ async fn patch_viewer(
     Ok(StatusCode::OK)
 }
 
-// ─── ダッシュボード API ─────────────────────────────────────────────────────
+// --- Dashboard API ----------------------------------------------------------
 
 fn default_columns() -> u32 {
     2
@@ -2457,7 +2457,7 @@ async fn get_dashboard(
 
     let panel_entries = dashboard_panels_from_layout(&dashboard.layout_json);
 
-    // ViewerRuntime からパネルの viewer データを取得 (runtime がない場合は空)
+    // Fetch viewer data for panels from ViewerRuntime (empty if runtime is unavailable)
     let panels = if let Some(runtime) = state.viewer_runtime.as_ref() {
         let rt = runtime.lock().await;
         let viewers = rt.viewers();
@@ -2468,7 +2468,7 @@ async fn get_dashboard(
                     .iter()
                     .find(|(v, _)| v.definition().id == viewer_id)
                     .map(|(v, state)| viewer_summary(v, state, true));
-                viewer.as_ref()?; // 存在しない viewer はスキップ
+                viewer.as_ref()?; // Skip viewers that do not exist
                 Some(DashboardPanel {
                     viewer_id,
                     position,
@@ -2573,7 +2573,7 @@ async fn delete_dashboard(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ─── Ingest ─────────────────────────────────────────────────────────────────
+// --- Ingest -----------------------------------------------------------------
 
 async fn ingest_traces(
     State(state): State<AppState>,

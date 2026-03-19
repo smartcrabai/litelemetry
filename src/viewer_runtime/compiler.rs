@@ -11,15 +11,15 @@ pub enum CompileError {
     NonPositiveLookback(i64),
 }
 
-/// コンパイル済み viewer。起動時に ViewerDefinition から生成する。
-/// `compile()` により signal_mask > 0 かつ lookback_ms > 0 が保証される。
+/// Compiled viewer. Generated from ViewerDefinition at startup.
+/// `compile()` guarantees that signal_mask > 0 and lookback_ms > 0.
 #[derive(Debug)]
 pub struct CompiledViewer {
     definition: ViewerDefinition,
 }
 
 impl CompiledViewer {
-    /// このエントリが viewer の対象シグナルに合致するかを返す
+    /// Returns whether this entry matches the viewer's target signals
     pub fn matches_signal(&self, signal: Signal) -> bool {
         self.definition.signal_mask.contains(signal)
     }
@@ -38,8 +38,8 @@ impl CompiledViewer {
     }
 }
 
-/// ViewerDefinition を検証・変換して CompiledViewer を返す。
-/// signal_mask が空の場合、または lookback_ms が 0 以下の場合はエラー。
+/// Validates and converts a ViewerDefinition into a CompiledViewer.
+/// Returns an error if signal_mask is empty or lookback_ms is 0 or less.
 pub fn compile(definition: ViewerDefinition) -> Result<CompiledViewer, CompileError> {
     if definition.signal_mask.is_empty() {
         return Err(CompileError::ZeroSignalMask);
@@ -72,29 +72,29 @@ mod tests {
         }
     }
 
-    // ─── compile ────────────────────────────────────────────────────────────
+    // --- compile ------------------------------------------------------------
 
     #[test]
     fn test_compile_succeeds_for_traces_only() {
-        // Given: traces だけを対象にした viewer 定義
+        // Given: a viewer definition targeting only traces
         let def = make_viewer(Signal::Traces.into());
 
         // When: compile
         let result = compile(def);
 
-        // Then: 成功する
+        // Then: succeeds
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_compile_fails_for_zero_signal_mask() {
-        // Given: signal_mask = 0 (シグナル未指定)
+        // Given: signal_mask = 0 (no signal specified)
         let def = make_viewer(SignalMask::NONE);
 
         // When: compile
         let result = compile(def);
 
-        // Then: ZeroSignalMask エラー
+        // Then: ZeroSignalMask error
         assert!(
             matches!(result, Err(CompileError::ZeroSignalMask)),
             "expected ZeroSignalMask, got {result:?}"
@@ -110,7 +110,7 @@ mod tests {
         // When: compile
         let result = compile(def);
 
-        // Then: NonPositiveLookback エラー
+        // Then: NonPositiveLookback error
         assert!(
             matches!(result, Err(CompileError::NonPositiveLookback(0))),
             "expected NonPositiveLookback, got {result:?}"
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn test_compile_preserves_definition_fields() {
-        // Given: 特定 id / slug の viewer 定義
+        // Given: a viewer definition with a specific id / slug
         let def = make_viewer(Signal::Traces.into());
         let id = def.id;
         let slug = def.slug.clone();
@@ -127,19 +127,19 @@ mod tests {
         // When: compile
         let compiled = compile(def).unwrap();
 
-        // Then: 定義フィールドが保持される
+        // Then: definition fields are preserved
         assert_eq!(compiled.definition.id, id);
         assert_eq!(compiled.definition.slug, slug);
     }
 
-    // ─── matches_signal ──────────────────────────────────────────────────────
+    // --- matches_signal -----------------------------------------------------
 
     #[test]
     fn test_matches_signal_traces_only() {
-        // Given: traces のみの viewer
+        // Given: a traces-only viewer
         let compiled = compile(make_viewer(Signal::Traces.into())).unwrap();
 
-        // When/Then: traces だけ合致、他は不合致
+        // When/Then: only traces matches; others do not
         assert!(compiled.matches_signal(Signal::Traces));
         assert!(!compiled.matches_signal(Signal::Metrics));
         assert!(!compiled.matches_signal(Signal::Logs));
@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn test_matches_signal_metrics_only() {
-        // Given: metrics のみの viewer
+        // Given: a metrics-only viewer
         let compiled = compile(make_viewer(Signal::Metrics.into())).unwrap();
 
         // When/Then
@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn test_matches_signal_logs_only() {
-        // Given: logs のみの viewer
+        // Given: a logs-only viewer
         let compiled = compile(make_viewer(Signal::Logs.into())).unwrap();
 
         // When/Then
@@ -169,11 +169,11 @@ mod tests {
 
     #[test]
     fn test_matches_signal_all_signals() {
-        // Given: traces | metrics | logs の viewer
+        // Given: a viewer for traces | metrics | logs
         let compiled =
             compile(make_viewer(Signal::Traces | Signal::Metrics | Signal::Logs)).unwrap();
 
-        // When/Then: 全シグナルに合致
+        // When/Then: matches all signals
         assert!(compiled.matches_signal(Signal::Traces));
         assert!(compiled.matches_signal(Signal::Metrics));
         assert!(compiled.matches_signal(Signal::Logs));
@@ -181,10 +181,10 @@ mod tests {
 
     #[test]
     fn test_matches_signal_traces_and_metrics() {
-        // Given: traces | metrics の viewer
+        // Given: a viewer for traces | metrics
         let compiled = compile(make_viewer(Signal::Traces | Signal::Metrics)).unwrap();
 
-        // When/Then: logs には合致しない
+        // When/Then: does not match logs
         assert!(compiled.matches_signal(Signal::Traces));
         assert!(compiled.matches_signal(Signal::Metrics));
         assert!(!compiled.matches_signal(Signal::Logs));

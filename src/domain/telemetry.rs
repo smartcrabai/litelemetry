@@ -2,7 +2,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// OTel signal の種別
+/// OTel signal type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Signal {
     Traces,
@@ -11,7 +11,7 @@ pub enum Signal {
 }
 
 impl Signal {
-    /// signal_mask のビット値を返す
+    /// Returns the bit value for signal_mask
     pub const fn as_mask(self) -> u32 {
         match self {
             Signal::Traces => 0b001,
@@ -20,19 +20,19 @@ impl Signal {
         }
     }
 
-    /// 全 signal の配列を返す
+    /// Returns an array of all signals
     pub const fn all() -> [Signal; 3] {
         [Signal::Traces, Signal::Metrics, Signal::Logs]
     }
 }
 
-/// Signal のビットマスクを表す型安全なラッパー
+/// Type-safe wrapper representing a bitmask of Signals
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignalMask(u32);
 
 impl SignalMask {
     pub const NONE: Self = SignalMask(0);
-    /// 有効なシグナルビット (Traces | Metrics | Logs) のみを残すマスク
+    /// Mask that retains only valid signal bits (Traces | Metrics | Logs)
     const VALID_BITS: u32 =
         Signal::Traces.as_mask() | Signal::Metrics.as_mask() | Signal::Logs.as_mask();
 
@@ -40,8 +40,8 @@ impl SignalMask {
         self.0 & signal.as_mask() != 0
     }
 
-    /// 生の u32 値から SignalMask を生成する。
-    /// 有効なシグナルビット (bits 0-2) 以外は無視される。
+    /// Creates a SignalMask from a raw u32 value.
+    /// Bits outside the valid signal bits (bits 0-2) are ignored.
     pub fn from_raw(v: u32) -> Self {
         SignalMask(v & Self::VALID_BITS)
     }
@@ -50,7 +50,7 @@ impl SignalMask {
         self.0
     }
 
-    /// 有効なシグナルビットがひとつも立っていない場合に true を返す。
+    /// Returns true if no valid signal bits are set.
     pub fn is_empty(self) -> bool {
         self.0 & Self::VALID_BITS == 0
     }
@@ -76,13 +76,13 @@ impl std::ops::BitOr<Signal> for SignalMask {
     }
 }
 
-/// Redis stream に書き込む正規化済みエントリ
+/// Normalized entry written to the Redis stream
 #[derive(Debug, Clone)]
 pub struct NormalizedEntry {
     pub signal: Signal,
     pub observed_at: DateTime<Utc>,
-    /// resource.service.name があれば Some
+    /// Some if resource.service.name is present
     pub service_name: Option<String>,
-    /// 元の OTLP バイナリ payload
+    /// Original OTLP binary payload
     pub payload: Bytes,
 }

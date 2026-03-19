@@ -20,9 +20,9 @@ pub enum RuntimeError {
     Compile(#[from] CompileError),
 }
 
-/// viewer のインメモリランタイム。
-/// - `build()` でストア定義 + snapshot + stream 差分から初期状態を構築する。
-/// - `apply_diff_batch()` でストリームから差分を取得し全 viewer にファンアウトする。
+/// In-memory runtime for viewers.
+/// - `build()` constructs the initial state from store definitions + snapshots + stream diffs.
+/// - `apply_diff_batch()` fetches diffs from the stream and fans them out to all viewers.
 pub struct ViewerRuntime {
     viewers: Vec<(CompiledViewer, ViewerState)>,
     stream_store: StreamStore,
@@ -30,16 +30,16 @@ pub struct ViewerRuntime {
 }
 
 impl ViewerRuntime {
-    /// ストア + ストリームから初期状態を構築する。
+    /// Constructs the initial state from the store and streams.
     ///
-    /// signal ごとに 1 回だけストリームを読み、全 viewer にファンアウトする。
+    /// Reads the stream once per signal and fans out to all viewers.
     pub async fn build(
         viewer_store: ViewerStore,
         mut stream_store: StreamStore,
     ) -> Result<Self, RuntimeError> {
         let definitions = viewer_store.load_viewer_definitions().await?;
 
-        // 全 viewer の snapshot を一括取得して HashMap に格納 (N+1 クエリ回避)
+        // Bulk-fetch all viewer snapshots and store in a HashMap (avoids N+1 queries)
         let def_ids: Vec<_> = definitions.iter().map(|d| d.id).collect();
         let snapshots: HashMap<_, _> = viewer_store
             .load_snapshots(&def_ids)
@@ -62,7 +62,7 @@ impl ViewerRuntime {
                 }
             };
 
-            // snapshot の revision が一致すればそのカーソルから resume
+            // Resume from the snapshot cursor if revisions match
             let cursor = match snapshots.get(&def_id) {
                 Some(snapshot) if snapshot.revision == def_revision => serde_json::from_value::<
                     StreamCursor,
@@ -83,13 +83,13 @@ impl ViewerRuntime {
             viewers.push((viewer, state));
         }
 
-        // signal ごとに 1 回だけストリームを読み、全 viewer にファンアウト
+        // Read the stream once per signal and fan out to all viewers
         let now = Utc::now();
         for signal in Signal::all() {
             fan_out_signal_entries(&mut viewers, &mut stream_store, signal).await?;
         }
 
-        // lookback を超えたエントリを prune
+        // Prune entries that exceed the lookback window
         for (viewer, state) in &mut viewers {
             prune_stale_buckets(state, viewer.lookback_ms(), now);
         }
@@ -101,14 +101,14 @@ impl ViewerRuntime {
         })
     }
 
-    /// 全 viewer の差分をストリームから取得して更新する。
+    /// Fetches diffs from the stream for all viewers and updates them.
     ///
-    /// 同じ signal を監視する複数の viewer には、1 回の読み出し結果をファンアウトする。
-    /// snapshot は更新後にストアへ upsert する。
+    /// Fans out a single read result to multiple viewers watching the same signal.
+    /// Upserts snapshots to the store after updating.
     pub async fn apply_diff_batch(&mut self) -> Result<(), RuntimeError> {
         let now = Utc::now();
 
-        // カーソル変化を検知するため事前にキャプチャ
+        // Capture cursor state beforehand to detect changes
         let prev_cursors: Vec<StreamCursor> = self
             .viewers
             .iter()
@@ -119,12 +119,12 @@ impl ViewerRuntime {
             fan_out_signal_entries(&mut self.viewers, &mut self.stream_store, signal).await?;
         }
 
-        // lookback を超えたエントリを prune
+        // Prune entries that exceed the lookback window
         for (viewer, state) in &mut self.viewers {
             prune_stale_buckets(state, viewer.lookback_ms(), now);
         }
 
-        // カーソルが進んだ viewer のみ snapshot を upsert (失敗しても次バッチで再試行されるので継続する)
+        // Upsert snapshots only for viewers whose cursor advanced (failures are retried in the next batch)
         for (i, (_, state)) in self.viewers.iter().enumerate() {
             if state.last_cursor == prev_cursors[i] {
                 continue;
@@ -193,7 +193,7 @@ impl ViewerRuntime {
     }
 }
 
-/// 指定 signal についてストリームを 1 回読み、全 viewer にエントリをファンアウトする。
+/// Reads the stream once for the specified signal and fans out entries to all viewers.
 async fn fan_out_signal_entries(
     viewers: &mut [(CompiledViewer, ViewerState)],
     stream_store: &mut StreamStore,
@@ -203,8 +203,8 @@ async fn fan_out_signal_entries(
         return Ok(());
     }
 
-    // 全 viewer の中で最も古いカーソル (= 最も多くのエントリを読む必要がある) を使って読み出す。
-    // None = 先頭から読む必要がある viewer が存在するため最小値として扱う。
+    // Use the oldest cursor among all viewers (= the one requiring the most entries to be read).
+    // None = treated as the minimum because a viewer needs to read from the beginning.
     let min_cursor: Option<String> = viewers
         .iter()
         .filter(|(v, _)| v.matches_signal(signal))
@@ -227,7 +227,7 @@ async fn fan_out_signal_entries(
             if !viewer.matches_signal(signal) {
                 continue;
             }
-            // viewer 固有のカーソルより後のエントリだけ適用
+            // Only apply entries that come after the viewer's own cursor
             if let Some(vc) = state.last_cursor.get(signal)
                 && !cmp_stream_id(entry_id, vc).is_gt()
             {

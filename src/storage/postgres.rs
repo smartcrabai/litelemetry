@@ -5,7 +5,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-/// viewer_snapshots テーブルの行
+/// Row in the viewer_snapshots table
 #[derive(Debug, Clone)]
 pub struct ViewerSnapshotRow {
     pub viewer_id: Uuid,
@@ -15,7 +15,7 @@ pub struct ViewerSnapshotRow {
     pub generated_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// PostgreSQL へのアクセスを担うストア
+/// Store responsible for PostgreSQL access
 #[derive(Clone)]
 pub struct PostgresStore {
     pool: PgPool,
@@ -62,7 +62,7 @@ impl PostgresStore {
         Ok(Self { pool })
     }
 
-    /// 起動時 bootstrap 用: 必要なスキーマを作成する
+    /// For startup bootstrap: creates the required schema
     pub async fn create_schema(&self) -> Result<(), sqlx::Error> {
         sqlx::query(CREATE_VIEWER_DEFINITIONS_SQL)
             .execute(&self.pool)
@@ -76,7 +76,7 @@ impl PostgresStore {
         Ok(())
     }
 
-    /// テスト用: viewer_definitions にレコードを挿入する
+    /// For testing: inserts a record into viewer_definitions
     pub async fn insert_viewer_definition(
         &self,
         def: &ViewerDefinition,
@@ -102,7 +102,7 @@ impl PostgresStore {
         Ok(())
     }
 
-    /// 有効な viewer 定義を全件取得する
+    /// Fetches all enabled viewer definitions
     pub async fn load_viewer_definitions(&self) -> Result<Vec<ViewerDefinition>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT id, slug, name, refresh_interval_ms, lookback_ms, signal_mask,
@@ -135,7 +135,7 @@ impl PostgresStore {
         Ok(defs)
     }
 
-    /// 複数の viewer snapshot を一括取得する。存在しない viewer_id は結果に含まれない。
+    /// Bulk-fetches multiple viewer snapshots. viewer_ids that do not exist are excluded from the result.
     pub async fn load_snapshots(
         &self,
         viewer_ids: &[Uuid],
@@ -182,7 +182,7 @@ impl PostgresStore {
         Ok(snapshots)
     }
 
-    /// viewer の definition_json / layout_json を更新する (revision も +1)
+    /// Updates the viewer's definition_json / layout_json (also increments revision by +1)
     pub async fn update_viewer_definition_json(
         &self,
         id: Uuid,
@@ -205,7 +205,7 @@ impl PostgresStore {
         Ok(result.rows_affected() > 0)
     }
 
-    /// viewer の snapshot を upsert する
+    /// Upserts a viewer snapshot
     pub async fn upsert_snapshot(&self, snapshot: &ViewerSnapshotRow) -> Result<(), sqlx::Error> {
         let status_json = serde_json::to_value(&snapshot.status)
             .expect("ViewerStatus serialization should never fail");
@@ -232,9 +232,9 @@ impl PostgresStore {
         Ok(())
     }
 
-    // ─── ダッシュボード CRUD ────────────────────────────────────────────────────
+    // --- Dashboard CRUD ------------------------------------------------------
 
-    /// dashboard_definitions にレコードを挿入する
+    /// Inserts a record into dashboard_definitions
     pub async fn insert_dashboard(
         &self,
         dashboard: &DashboardDefinition,
@@ -255,7 +255,7 @@ impl PostgresStore {
         Ok(())
     }
 
-    /// 有効なダッシュボード定義を全件取得する
+    /// Fetches all enabled dashboard definitions
     pub async fn load_dashboards(&self) -> Result<Vec<DashboardDefinition>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT id, slug, name, layout_json, revision, enabled
@@ -280,7 +280,7 @@ impl PostgresStore {
             .collect())
     }
 
-    /// ダッシュボードを ID で取得する
+    /// Fetches a dashboard by ID
     pub async fn load_dashboard(
         &self,
         id: Uuid,
@@ -305,7 +305,7 @@ impl PostgresStore {
         }))
     }
 
-    /// ダッシュボードの name と layout_json を更新する (revision も +1)
+    /// Updates the dashboard's name and layout_json (also increments revision by +1)
     pub async fn update_dashboard(
         &self,
         id: Uuid,
@@ -329,7 +329,7 @@ impl PostgresStore {
         Ok(result.rows_affected() > 0)
     }
 
-    /// ダッシュボードを削除する
+    /// Deletes a dashboard
     pub async fn delete_dashboard(&self, id: Uuid) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("DELETE FROM dashboard_definitions WHERE id = $1")
             .bind(id)

@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-/// OTLP リクエストのエンコーディング種別
+/// Encoding type of an OTLP request
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContentType {
     Protobuf,
@@ -13,9 +13,9 @@ pub enum DecodeError {
     UnsupportedContentType(String),
 }
 
-/// Content-Type ヘッダ値を解析して ContentType を返す。
+/// Parses a Content-Type header value and returns a ContentType.
 /// "application/x-protobuf" -> Protobuf
-/// "application/json" (charset 付き可) -> Json
+/// "application/json" (charset parameter allowed) -> Json
 pub fn parse_content_type(content_type: &str) -> Result<ContentType, DecodeError> {
     let mime_type = content_type.split(';').next().unwrap_or("").trim();
     match mime_type {
@@ -29,7 +29,7 @@ pub fn parse_content_type(content_type: &str) -> Result<ContentType, DecodeError
 mod tests {
     use super::*;
 
-    // ─── parse_content_type ───────────────────────────────────────────────────
+    // --- parse_content_type --------------------------------------------------
 
     #[test]
     fn test_parse_content_type_protobuf() {
@@ -53,14 +53,14 @@ mod tests {
     fn test_parse_content_type_json_with_charset() {
         // Given: application/json; charset=utf-8
         // When: parse
-        // Then: ContentType::Json (charset パラメータは無視)
+        // Then: ContentType::Json (charset parameter is ignored)
         let result = parse_content_type("application/json; charset=utf-8");
         assert_eq!(result.unwrap(), ContentType::Json);
     }
 
     #[test]
     fn test_parse_content_type_json_with_whitespace() {
-        // Given: application/json;charset=utf-8 (空白なし)
+        // Given: application/json;charset=utf-8 (no whitespace)
         // When: parse
         // Then: ContentType::Json
         let result = parse_content_type("application/json;charset=utf-8");
@@ -69,9 +69,9 @@ mod tests {
 
     #[test]
     fn test_parse_content_type_unknown_returns_error() {
-        // Given: text/plain (未対応 content-type)
+        // Given: text/plain (unsupported content-type)
         // When: parse
-        // Then: UnsupportedContentType エラー
+        // Then: UnsupportedContentType error
         let result = parse_content_type("text/plain");
         assert!(
             matches!(result, Err(DecodeError::UnsupportedContentType(_))),
@@ -81,9 +81,9 @@ mod tests {
 
     #[test]
     fn test_parse_content_type_empty_returns_error() {
-        // Given: 空文字列
+        // Given: empty string
         // When: parse
-        // Then: UnsupportedContentType エラー
+        // Then: UnsupportedContentType error
         let result = parse_content_type("");
         assert!(matches!(
             result,
