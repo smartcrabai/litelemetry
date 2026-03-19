@@ -3,26 +3,26 @@ use crate::viewer_runtime::compiler::CompiledViewer;
 use crate::viewer_runtime::state::ViewerState;
 use chrono::{DateTime, Utc};
 
-/// エントリを viewer に適用する。
-/// - viewer の signal_mask に合致しないエントリは無視する。
-/// - 合致した場合は state.entries に追加する。
+/// Applies an entry to the viewer.
+/// - Ignores entries that do not match the viewer's signal_mask.
+/// - If they match, adds the entry to state.entries.
 ///
-/// **前提条件**: 呼び出し元は entry を時刻昇順（古い順）で渡す責任を持つ。
-/// prune_stale_buckets は entries が時刻昇順であることを前提とするため、
-/// 順序が乱れると刈り込みが正しく動作しない。
+/// **Precondition**: The caller is responsible for passing entries in ascending time order (oldest first).
+/// prune_stale_buckets assumes entries are in ascending time order;
+/// if the order is disrupted, pruning will not work correctly.
 pub fn apply_entry(state: &mut ViewerState, viewer: &CompiledViewer, entry: NormalizedEntry) {
     if viewer.matches_signal(entry.signal) {
         state.entries.push(entry);
     }
 }
 
-/// now から lookback_ms より前のエントリを state から削除する。
-/// - 削除したエントリ数を返す。
-/// - `entry.observed_at <= now - lookback_ms` が削除対象 (境界も含む)。
-/// - state.entries が時刻昇順（古い順）であることを前提とする。
+/// Removes entries from state that are older than lookback_ms before now.
+/// - Returns the number of removed entries.
+/// - Entries satisfying `entry.observed_at <= now - lookback_ms` are removed (boundary included).
+/// - Assumes state.entries is in ascending time order (oldest first).
 pub fn prune_stale_buckets(state: &mut ViewerState, lookback_ms: i64, now: DateTime<Utc>) -> usize {
     let cutoff = now - chrono::Duration::milliseconds(lookback_ms);
-    // 時刻昇順を前提に二分探索でカット位置を特定し O(log n + 削除数) で処理する
+    // Assumes ascending time order; use binary search to find the cut position in O(log n + removed count)
     let pos = state.entries.partition_point(|e| e.observed_at <= cutoff);
     state.entries.drain(..pos);
     pos
@@ -68,71 +68,71 @@ mod tests {
         ViewerState::new(Uuid::new_v4(), 1)
     }
 
-    // ─── apply_entry ─────────────────────────────────────────────────────────
+    // --- apply_entry --------------------------------------------------------
 
     #[test]
     fn test_apply_entry_matching_signal_is_added() {
-        // Given: traces を対象とする viewer、空の state
+        // Given: a viewer targeting traces, and an empty state
         let viewer = make_compiled_viewer(Signal::Traces.into());
         let mut state = make_state();
         let entry = make_entry(Signal::Traces, 0);
 
-        // When: traces エントリを適用
+        // When: applying a traces entry
         apply_entry(&mut state, &viewer, entry);
 
-        // Then: エントリが追加される
+        // Then: the entry is added
         assert_eq!(state.entries.len(), 1);
     }
 
     #[test]
     fn test_apply_entry_non_matching_signal_is_ignored() {
-        // Given: traces のみを対象とする viewer
+        // Given: a viewer targeting only traces
         let viewer = make_compiled_viewer(Signal::Traces.into());
         let mut state = make_state();
         let entry = make_entry(Signal::Metrics, 0);
 
-        // When: metrics エントリを適用
+        // When: applying a metrics entry
         apply_entry(&mut state, &viewer, entry);
 
-        // Then: エントリは無視される
+        // Then: the entry is ignored
         assert_eq!(state.entries.len(), 0);
     }
 
     #[test]
     fn test_apply_multiple_entries_all_matching() {
-        // Given: 全シグナルを対象とする viewer
+        // Given: a viewer targeting all signals
         let viewer = make_compiled_viewer(Signal::Traces | Signal::Metrics | Signal::Logs);
         let mut state = make_state();
 
-        // When: 各シグナルのエントリを適用
+        // When: applying entries for each signal
         apply_entry(&mut state, &viewer, make_entry(Signal::Traces, 0));
         apply_entry(&mut state, &viewer, make_entry(Signal::Metrics, 0));
         apply_entry(&mut state, &viewer, make_entry(Signal::Logs, 0));
 
-        // Then: 全エントリが追加される
+        // Then: all entries are added
         assert_eq!(state.entries.len(), 3);
     }
 
     #[test]
     fn test_apply_entry_logs_ignored_by_traces_viewer() {
-        // Given: traces のみの viewer
+        // Given: a traces-only viewer
         let viewer = make_compiled_viewer(Signal::Traces.into());
         let mut state = make_state();
 
-        // When: logs エントリを適用
+        // When: applying a logs entry
         apply_entry(&mut state, &viewer, make_entry(Signal::Logs, 0));
 
-        // Then: 無視される
+        // Then: ignored
         assert_eq!(state.entries.len(), 0);
     }
 
-    // ─── prune_stale_buckets ─────────────────────────────────────────────────
-    // 注意: entries は時刻昇順（古い順）で挿入する必要がある。
+    // --- prune_stale_buckets ------------------------------------------------
+    // Note: entries must be inserted in ascending time order (oldest first).
 
     #[test]
     fn test_prune_removes_entries_older_than_lookback() {
-        // Given: 2件の古いエントリ (120s, 90s前) と 1件の新しいエントリ (10s前)
-        //        昇順 (古い→新しい) で挿入。lookback = 60_000ms
+        // Given: 2 old entries (120s, 90s ago) and 1 recent entry (10s ago),
+        //        inserted in ascending order (oldest to newest). lookback = 60_000ms
         let viewer = make_compiled_viewer(Signal::Traces.into());
         let mut state = make_state();
         let lookback_ms = 60_000i64;
@@ -145,28 +145,28 @@ mod tests {
         // When: prune
         let pruned = prune_stale_buckets(&mut state, lookback_ms, now);
 
-        // Then: 古い 2件が削除され、新しい 1件が残る
+        // Then: the 2 old entries are removed and 1 recent entry remains
         assert_eq!(pruned, 2);
         assert_eq!(state.entries.len(), 1);
     }
 
     #[test]
     fn test_prune_empty_state_returns_zero() {
-        // Given: 空の state
+        // Given: empty state
         let mut state = make_state();
         let now = Utc::now();
 
         // When: prune
         let pruned = prune_stale_buckets(&mut state, 60_000, now);
 
-        // Then: 0件削除
+        // Then: 0 entries removed
         assert_eq!(pruned, 0);
         assert_eq!(state.entries.len(), 0);
     }
 
     #[test]
     fn test_prune_all_within_lookback_removes_nothing() {
-        // Given: 全エントリが lookback 内 (30s, 10s前) - 昇順で挿入
+        // Given: all entries are within lookback (30s, 10s ago) - inserted in ascending order
         let viewer = make_compiled_viewer(Signal::Traces.into());
         let mut state = make_state();
         let lookback_ms = 60_000i64;
@@ -178,14 +178,14 @@ mod tests {
         // When: prune
         let pruned = prune_stale_buckets(&mut state, lookback_ms, now);
 
-        // Then: 削除なし
+        // Then: nothing removed
         assert_eq!(pruned, 0);
         assert_eq!(state.entries.len(), 2);
     }
 
     #[test]
     fn test_prune_all_stale_removes_all() {
-        // Given: 全エントリが lookback 外 (180s, 90s前) - 昇順で挿入
+        // Given: all entries are outside lookback (180s, 90s ago) - inserted in ascending order
         let viewer = make_compiled_viewer(Signal::Traces.into());
         let mut state = make_state();
         let lookback_ms = 60_000i64;
@@ -197,21 +197,21 @@ mod tests {
         // When: prune
         let pruned = prune_stale_buckets(&mut state, lookback_ms, now);
 
-        // Then: 全件削除
+        // Then: all entries removed
         assert_eq!(pruned, 2);
         assert_eq!(state.entries.len(), 0);
     }
 
     #[test]
     fn test_prune_boundary_entry_is_removed() {
-        // Given: ちょうど lookback_ms 前のエントリ 1件と、それより新しい 1件
-        //        境界 (= lookback_ms 前) は削除対象 (境界含む)
+        // Given: 1 entry exactly lookback_ms ago and 1 more recent entry
+        //        The boundary (= lookback_ms ago) is subject to removal (boundary included)
         let viewer = make_compiled_viewer(Signal::Traces.into());
         let mut state = make_state();
         let lookback_ms = 60_000i64;
         let now = Utc::now();
 
-        // ちょうど境界 (60s 前) - 古い方を先に追加
+        // Exactly at the boundary (60s ago) - add the older entry first
         let boundary_entry = NormalizedEntry {
             signal: Signal::Traces,
             observed_at: now - Duration::milliseconds(lookback_ms),
@@ -220,13 +220,13 @@ mod tests {
         };
         state.entries.push(boundary_entry);
 
-        // 境界より新しい (30s 前)
+        // More recent than the boundary (30s ago)
         apply_entry(&mut state, &viewer, make_entry(Signal::Traces, 30_000));
 
         // When: prune
         let pruned = prune_stale_buckets(&mut state, lookback_ms, now);
 
-        // Then: 境界エントリが削除され、新しい 1件のみ残る
+        // Then: the boundary entry is removed and only 1 recent entry remains
         assert_eq!(pruned, 1);
         assert_eq!(state.entries.len(), 1);
     }

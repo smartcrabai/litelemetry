@@ -3,7 +3,7 @@ use crate::domain::viewer::ViewerStatus;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// signal 別の Redis Stream cursor
+/// Per-signal Redis Stream cursor
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StreamCursor {
     pub traces: Option<String>,
@@ -29,12 +29,12 @@ impl StreamCursor {
     }
 }
 
-/// viewer のインメモリ実行時状態
+/// In-memory runtime state of a viewer
 #[derive(Debug, Clone)]
 pub struct ViewerState {
     pub viewer_id: Uuid,
     pub revision: i64,
-    /// 取り込み済みエントリ (時刻昇順)
+    /// Ingested entries (ascending time order)
     pub entries: Vec<NormalizedEntry>,
     pub last_cursor: StreamCursor,
     pub status: ViewerStatus,

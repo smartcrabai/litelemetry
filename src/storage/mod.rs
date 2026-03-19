@@ -17,7 +17,7 @@ pub enum StorageError {
     Postgres(#[from] sqlx::Error),
 }
 
-/// stream 読み書きを担う enum ストア
+/// Enum store responsible for stream read/write
 #[derive(Clone)]
 pub enum StreamStore {
     Redis(redis::RedisStore),
@@ -48,7 +48,7 @@ impl StreamStore {
     }
 }
 
-/// viewer 定義・スナップショット管理を担う enum ストア
+/// Enum store responsible for viewer definition and snapshot management
 #[derive(Clone)]
 pub enum ViewerStore {
     Postgres(postgres::PostgresStore),
@@ -120,7 +120,7 @@ impl ViewerStore {
         }
     }
 
-    // ─── ダッシュボード CRUD ────────────────────────────────────────────────────
+    // --- Dashboard CRUD ------------------------------------------------------
 
     pub async fn insert_dashboard(
         &self,

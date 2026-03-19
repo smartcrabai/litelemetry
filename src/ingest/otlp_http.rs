@@ -3,11 +3,11 @@ use crate::ingest::decode::{ContentType, DecodeError, parse_content_type};
 use bytes::Bytes;
 use chrono::Utc;
 
-/// OTLP/HTTP リクエストを解析して NormalizedEntry を生成する (I/O なし)。
+/// Parses an OTLP/HTTP request and produces a NormalizedEntry (no I/O).
 ///
-/// - content-type が未対応の場合は `DecodeError::UnsupportedContentType` を返す。
-/// - 成功した場合はペイロードをそのまま保持する NormalizedEntry を返す。
-///   JSON payload からは signal に応じて `service.name` を抽出する。
+/// - Returns `DecodeError::UnsupportedContentType` if the content-type is unsupported.
+/// - On success, returns a NormalizedEntry that holds the payload as-is.
+///   For JSON payloads, extracts `service.name` according to the signal type.
 pub fn parse_ingest_request(
     signal: Signal,
     content_type_header: Option<&str>,
@@ -89,18 +89,18 @@ mod tests {
     use bytes::Bytes;
     use chrono::Utc;
 
-    // ─── parse_ingest_request: ハッピーパス ─────────────────────────────────
+    // --- parse_ingest_request: happy path -----------------------------------
 
     #[test]
     fn test_parse_ingest_request_protobuf_traces_returns_entry() {
-        // Given: traces signal, protobuf content-type, バイナリ payload
+        // Given: traces signal, protobuf content-type, binary payload
         let signal = Signal::Traces;
         let body = Bytes::from_static(b"\x0a\x0b\x0c");
 
         // When: parse
         let result = parse_ingest_request(signal, Some("application/x-protobuf"), body.clone());
 
-        // Then: 正しい signal と payload を持つ NormalizedEntry が返る
+        // Then: a NormalizedEntry with the correct signal and payload is returned
         let entry = result.unwrap();
         assert_eq!(entry.signal, Signal::Traces);
         assert_eq!(entry.payload, body);
@@ -115,21 +115,21 @@ mod tests {
             Bytes::from_static(b"{}"),
         );
 
-        // Then: 成功する
+        // Then: succeeds
         assert!(result.is_ok());
         assert_eq!(result.unwrap().signal, Signal::Traces);
     }
 
     #[test]
     fn test_parse_ingest_request_json_with_charset_returns_entry() {
-        // Given: "application/json; charset=utf-8" (charset パラメータ付き)
+        // Given: "application/json; charset=utf-8" (with charset parameter)
         let result = parse_ingest_request(
             Signal::Traces,
             Some("application/json; charset=utf-8"),
             Bytes::new(),
         );
 
-        // Then: charset は無視されて成功する
+        // Then: charset is ignored and the call succeeds
         assert!(result.is_ok());
     }
 
@@ -142,7 +142,7 @@ mod tests {
             Bytes::new(),
         );
 
-        // Then: signal は Metrics として伝播する
+        // Then: signal propagates as Metrics
         assert_eq!(result.unwrap().signal, Signal::Metrics);
     }
 
@@ -152,13 +152,13 @@ mod tests {
         let result =
             parse_ingest_request(Signal::Logs, Some("application/x-protobuf"), Bytes::new());
 
-        // Then: signal は Logs として伝播する
+        // Then: signal propagates as Logs
         assert_eq!(result.unwrap().signal, Signal::Logs);
     }
 
     #[test]
     fn test_parse_ingest_request_preserves_payload_bytes() {
-        // Given: 特定のバイト列
+        // Given: a specific byte sequence
         let payload = Bytes::copy_from_slice(&[0x0a, 0x1b, 0x2c, 0x3d]);
 
         // When: parse
@@ -169,23 +169,23 @@ mod tests {
         )
         .unwrap();
 
-        // Then: payload が変更されずに保持される
+        // Then: payload is preserved unchanged
         assert_eq!(entry.payload, payload);
     }
 
     #[test]
     fn test_parse_ingest_request_empty_body_succeeds() {
-        // Given: 空のボディ
+        // Given: empty body
         let result =
             parse_ingest_request(Signal::Traces, Some("application/x-protobuf"), Bytes::new());
 
-        // Then: 成功する (ボディの内容は検証しない)
+        // Then: succeeds (body contents are not validated)
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_parse_ingest_request_observed_at_is_close_to_now() {
-        // Given: パース実行前後の時刻を記録
+        // Given: record timestamps before and after parsing
         let before = Utc::now();
 
         // When: parse
@@ -195,7 +195,7 @@ mod tests {
 
         let after = Utc::now();
 
-        // Then: observed_at は before 以上・after 以下の範囲に収まる
+        // Then: observed_at falls within the range [before, after]
         assert!(
             entry.observed_at >= before,
             "observed_at {:?} should be >= before {:?}",
@@ -210,14 +210,14 @@ mod tests {
         );
     }
 
-    // ─── parse_ingest_request: エラーケース ─────────────────────────────────
+    // --- parse_ingest_request: error cases ----------------------------------
 
     #[test]
     fn test_parse_ingest_request_text_plain_returns_unsupported_error() {
-        // Given: text/plain (未対応 content-type)
+        // Given: text/plain (unsupported content-type)
         let result = parse_ingest_request(Signal::Traces, Some("text/plain"), Bytes::new());
 
-        // Then: UnsupportedContentType エラー
+        // Then: UnsupportedContentType error
         assert!(
             matches!(result, Err(DecodeError::UnsupportedContentType(_))),
             "expected UnsupportedContentType, got {result:?}"
@@ -226,10 +226,10 @@ mod tests {
 
     #[test]
     fn test_parse_ingest_request_missing_content_type_returns_error() {
-        // Given: content-type ヘッダーなし (None)
+        // Given: no content-type header (None)
         let result = parse_ingest_request(Signal::Traces, None, Bytes::new());
 
-        // Then: UnsupportedContentType エラー (空文字列扱い)
+        // Then: UnsupportedContentType error (treated as empty string)
         assert!(
             matches!(result, Err(DecodeError::UnsupportedContentType(_))),
             "expected UnsupportedContentType, got {result:?}"
@@ -238,10 +238,10 @@ mod tests {
 
     #[test]
     fn test_parse_ingest_request_empty_content_type_returns_error() {
-        // Given: 空文字列の content-type
+        // Given: empty string content-type
         let result = parse_ingest_request(Signal::Traces, Some(""), Bytes::new());
 
-        // Then: UnsupportedContentType エラー
+        // Then: UnsupportedContentType error
         assert!(
             matches!(result, Err(DecodeError::UnsupportedContentType(_))),
             "expected UnsupportedContentType, got {result:?}"
@@ -250,27 +250,27 @@ mod tests {
 
     #[test]
     fn test_parse_ingest_request_multipart_returns_error() {
-        // Given: multipart/form-data (未対応)
+        // Given: multipart/form-data (unsupported)
         let result =
             parse_ingest_request(Signal::Traces, Some("multipart/form-data"), Bytes::new());
 
-        // Then: UnsupportedContentType エラー
+        // Then: UnsupportedContentType error
         assert!(matches!(
             result,
             Err(DecodeError::UnsupportedContentType(_))
         ));
     }
 
-    // ─── parse_ingest_request: 境界値 ───────────────────────────────────────
+    // --- parse_ingest_request: boundary values ------------------------------
 
     #[test]
     fn test_parse_ingest_request_service_name_is_none_for_protobuf_traces() {
-        // Given: プロトバイナリからの service_name 抽出は未実装
+        // Given: service_name extraction from protobuf binary is not implemented
         let entry =
             parse_ingest_request(Signal::Traces, Some("application/x-protobuf"), Bytes::new())
                 .unwrap();
 
-        // Then: service_name は None
+        // Then: service_name is None
         assert_eq!(entry.service_name, None);
     }
 

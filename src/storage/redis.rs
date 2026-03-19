@@ -1,9 +1,10 @@
 use crate::domain::telemetry::{NormalizedEntry, Signal};
 use bytes::Bytes;
 
-/// Redis stream ID (`<ms>-<seq>`) を数値タプルとして比較する。
+/// Compares Redis stream IDs (`<ms>-<seq>`) as numeric tuples.
 ///
-/// 文字列辞書順は seq が 2 桁以上になると誤るため (`"10" < "9"`) 数値比較が必要。
+/// Lexicographic string comparison is incorrect when seq exceeds one digit (`"10" < "9"`),
+/// so numeric comparison is required.
 pub fn cmp_stream_id(a: &str, b: &str) -> std::cmp::Ordering {
     fn parse(s: &str) -> (u64, u64) {
         let mut p = s.splitn(2, '-');
@@ -14,12 +15,12 @@ pub fn cmp_stream_id(a: &str, b: &str) -> std::cmp::Ordering {
     parse(a).cmp(&parse(b))
 }
 
-/// signal に対応する Redis stream キー名を返す。
+/// Returns the Redis stream key name corresponding to the given signal.
 ///
-/// キー命名規則: `lt:stream:{signal}`
-///   - traces  → `lt:stream:traces`
-///   - metrics → `lt:stream:metrics`
-///   - logs    → `lt:stream:logs`
+/// Key naming convention: `lt:stream:{signal}`
+///   - traces  -> `lt:stream:traces`
+///   - metrics -> `lt:stream:metrics`
+///   - logs    -> `lt:stream:logs`
 pub fn stream_key_for_signal(signal: Signal) -> &'static str {
     match signal {
         Signal::Traces => "lt:stream:traces",
@@ -28,7 +29,7 @@ pub fn stream_key_for_signal(signal: Signal) -> &'static str {
     }
 }
 
-/// Redis stream へのエントリ追加と読み出しを担うストア
+/// Store responsible for adding and reading entries in a Redis stream
 #[derive(Clone)]
 pub struct RedisStore {
     conn: redis::aio::MultiplexedConnection,
@@ -41,7 +42,7 @@ impl RedisStore {
         Ok(Self { conn })
     }
 
-    /// NormalizedEntry を対応 stream に XADD し、生成された stream ID を返す。
+    /// XADDs a NormalizedEntry to the corresponding stream and returns the generated stream ID.
     pub async fn append_entry(
         &mut self,
         entry: &NormalizedEntry,
@@ -66,10 +67,10 @@ impl RedisStore {
         Ok(id)
     }
 
-    /// cursor 以降のエントリを XREAD して返す。
+    /// XREADs and returns entries from the given cursor onwards.
     ///
-    /// XREAD は指定した ID より後 (exclusive) のエントリを返す。
-    /// cursor が None の場合はストリームの先頭 ("0-0") から読む。
+    /// XREAD returns entries after the specified ID (exclusive).
+    /// When cursor is None, reads from the beginning of the stream ("0-0").
     pub async fn read_entries_since(
         &mut self,
         signal: Signal,
@@ -77,8 +78,8 @@ impl RedisStore {
         count: usize,
     ) -> Result<Vec<(String, NormalizedEntry)>, redis::RedisError> {
         let key = stream_key_for_signal(signal);
-        // XREAD は cursor_id より後 (exclusive) を返す。
-        // cursor = None のときは "0-0" を指定して全件取得 (0-0 より大きい ID = 全エントリ)。
+        // XREAD returns entries after cursor_id (exclusive).
+        // When cursor = None, specify "0-0" to fetch all entries (IDs greater than 0-0 = all entries).
         let start_id = cursor.unwrap_or("0-0");
 
         let raw: redis::Value = redis::cmd("XREAD")
@@ -94,15 +95,15 @@ impl RedisStore {
     }
 }
 
-/// XREAD の生レスポンスをパースする。
-/// ストリームが存在しない・エントリなしの場合は空 Vec を返す。
+/// Parses the raw response from XREAD.
+/// Returns an empty Vec if the stream does not exist or has no entries.
 fn parse_xread_reply(
     signal: Signal,
     value: redis::Value,
 ) -> Result<Vec<(String, NormalizedEntry)>, redis::RedisError> {
     use redis::FromRedisValue;
 
-    // XREAD は該当エントリなしのとき Nil を返す
+    // XREAD returns Nil when there are no matching entries
     if matches!(value, redis::Value::Nil) {
         return Ok(Vec::new());
     }
@@ -146,7 +147,7 @@ mod tests {
     use super::*;
     use crate::domain::telemetry::Signal;
 
-    // ─── stream_key_for_signal ────────────────────────────────────────────────
+    // --- stream_key_for_signal -----------------------------------------------
 
     #[test]
     fn test_stream_key_for_traces() {

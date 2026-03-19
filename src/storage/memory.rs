@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 struct MemoryStreams {
     data: HashMap<Signal, VecDeque<(String, NormalizedEntry)>>,
-    /// signal ごとの単調増加シーケンス番号 (ID 生成用)
+    /// Monotonically increasing sequence number per signal (for ID generation)
     seq: HashMap<Signal, u64>,
 }
 
@@ -24,7 +24,7 @@ impl MemoryStreams {
         }
     }
 
-    /// `{timestamp_ms}-{seq}` 形式の ID を生成する
+    /// Generates an ID in the `{timestamp_ms}-{seq}` format
     fn next_id(&mut self, signal: Signal) -> String {
         let ms = chrono::Utc::now().timestamp_millis() as u64;
         let seq = self.seq.entry(signal).or_insert(0);
@@ -34,7 +34,7 @@ impl MemoryStreams {
     }
 }
 
-/// インメモリ stream ストア
+/// In-memory stream store
 #[derive(Clone)]
 pub struct MemoryStreamStore {
     inner: Arc<Mutex<MemoryStreams>>,
@@ -101,7 +101,7 @@ impl MemoryViewerData {
     }
 }
 
-/// インメモリ viewer ストア
+/// In-memory viewer store
 #[derive(Clone)]
 pub struct MemoryViewerStore {
     inner: Arc<Mutex<MemoryViewerData>>,
@@ -174,7 +174,7 @@ impl MemoryViewerStore {
         Ok(())
     }
 
-    // ─── ダッシュボード CRUD ────────────────────────────────────────────────────
+    // --- Dashboard CRUD ------------------------------------------------------
 
     pub async fn insert_dashboard(
         &self,
@@ -228,7 +228,7 @@ impl MemoryViewerStore {
     }
 }
 
-/// スタンドアロンモードで起動時に挿入するデフォルト viewer 定義
+/// Default viewer definitions inserted at startup in standalone mode
 pub fn default_viewer_definitions() -> Vec<ViewerDefinition> {
     let lookback_ms = 5 * 60 * 1_000_i64;
     vec![
@@ -271,7 +271,7 @@ pub fn default_viewer_definitions() -> Vec<ViewerDefinition> {
     ]
 }
 
-/// スタンドアロンモードで起動時に挿入するデフォルトダッシュボード定義
+/// Default dashboard definitions inserted at startup in standalone mode
 pub fn default_dashboard_definitions(viewer_ids: &[Uuid]) -> Vec<DashboardDefinition> {
     vec![DashboardDefinition {
         id: Uuid::new_v4(),

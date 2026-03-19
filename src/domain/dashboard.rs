@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-/// dashboard_definitions テーブルの行に対応するドメイン型
+/// Domain type corresponding to a row in the dashboard_definitions table
 ///
-/// layout_json の構造:
+/// Structure of layout_json:
 /// ```json
 /// {
 ///   "columns": 2,
