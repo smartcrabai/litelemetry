@@ -18,6 +18,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -405,6 +406,164 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         border: 1px solid var(--line);
         background: rgba(255, 255, 255, 0.76);
       }
+
+      .trace-detail-panel {
+        display: grid;
+        gap: 12px;
+      }
+
+      .trace-detail-header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .trace-detail-header button {
+        min-height: 36px;
+        padding: 0 14px;
+        font-size: 0.85rem;
+      }
+
+      .trace-detail-header h3 {
+        font-size: 1rem;
+        font-family: inherit;
+      }
+
+      .trace-timeline-wrap {
+        overflow: auto;
+        max-height: 600px;
+        border-radius: 16px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.76);
+      }
+
+      .trace-timeline-header {
+        display: grid;
+        grid-template-columns: minmax(200px, 35%) 1fr;
+        position: sticky;
+        top: 0;
+        background: rgba(255, 250, 243, 0.96);
+        z-index: 1;
+        border-bottom: 1px solid var(--line);
+        font-size: 0.82rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .trace-timeline-header > div {
+        padding: 10px 12px;
+      }
+
+      .trace-axis {
+        display: flex;
+        justify-content: space-between;
+        color: var(--muted);
+        font-weight: 400;
+        font-size: 0.75rem;
+        text-transform: none;
+        letter-spacing: 0;
+      }
+
+      .span-row {
+        display: grid;
+        grid-template-columns: minmax(200px, 35%) 1fr;
+        min-height: 32px;
+        border-bottom: 1px solid var(--line);
+        align-items: center;
+      }
+
+      .span-row:last-child {
+        border-bottom: 0;
+      }
+
+      .span-row:hover {
+        background: var(--accent-soft);
+      }
+
+      .span-label {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px 10px;
+        font-size: 0.82rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .span-toggle {
+        width: 16px;
+        height: 16px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        font-size: 0.7rem;
+        color: var(--muted);
+        flex-shrink: 0;
+        user-select: none;
+        border-radius: 3px;
+      }
+
+      .span-toggle:hover {
+        background: var(--line);
+      }
+
+      .span-toggle.leaf {
+        visibility: hidden;
+      }
+
+      .span-label .svc {
+        font-weight: 700;
+        flex-shrink: 0;
+      }
+
+      .span-label .op {
+        color: var(--muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .span-label .err-badge {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #c0392b;
+        flex-shrink: 0;
+      }
+
+      .span-indent {
+        display: inline-block;
+        flex-shrink: 0;
+      }
+
+      .span-bar-container {
+        position: relative;
+        height: 100%;
+        min-height: 32px;
+      }
+
+      .span-bar {
+        position: absolute;
+        top: 50%;
+        transform: translateY(-50%);
+        height: 12px;
+        border-radius: 3px;
+        min-width: 2px;
+        opacity: 0.85;
+      }
+
+      .span-bar-label {
+        position: absolute;
+        top: 50%;
+        transform: translateY(-50%);
+        font-size: 0.72rem;
+        color: var(--muted);
+        white-space: nowrap;
+        padding-left: 4px;
+      }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
   </head>
@@ -474,6 +633,34 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             <tbody id="viewer-entries-body"></tbody>
           </table>
         </div>
+        <div id="viewer-trace-list" class="entries-table-wrap" hidden>
+          <table>
+            <thead>
+              <tr>
+                <th>Trace ID</th>
+                <th>Root Span</th>
+                <th>Services</th>
+                <th>Spans</th>
+                <th>Duration</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="viewer-trace-list-body"></tbody>
+          </table>
+        </div>
+        <div id="viewer-trace-detail" class="trace-detail-panel" hidden>
+          <div class="trace-detail-header">
+            <button id="trace-back-button" class="secondary" type="button">&larr; Back</button>
+            <h3 id="trace-detail-title"></h3>
+          </div>
+          <div class="trace-timeline-wrap">
+            <div class="trace-timeline-header">
+              <div>Service &amp; Operation</div>
+              <div class="trace-axis" id="trace-axis"></div>
+            </div>
+            <div id="trace-timeline"></div>
+          </div>
+        </div>
       </section>
     </main>
 
@@ -495,6 +682,13 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const viewerChartCanvas = document.getElementById('viewer-chart-canvas');
       const viewerEntriesTable = document.getElementById('viewer-entries-table');
       const viewerEntriesBody = document.getElementById('viewer-entries-body');
+      const viewerTraceList = document.getElementById('viewer-trace-list');
+      const viewerTraceListBody = document.getElementById('viewer-trace-list-body');
+      const viewerTraceDetail = document.getElementById('viewer-trace-detail');
+      const traceBackButton = document.getElementById('trace-back-button');
+      const traceDetailTitle = document.getElementById('trace-detail-title');
+      const traceAxis = document.getElementById('trace-axis');
+      const traceTimeline = document.getElementById('trace-timeline');
 
       let latestViewers = [];
       let viewerLoadState = 'loading';
@@ -508,6 +702,28 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
       function truncateId(id) {
         return id.length <= 12 ? id : `${id.slice(0, 8)}...${id.slice(-4)}`;
+      }
+
+      function formatDurationNs(ns) {
+        const n = Number(ns);
+        if (n < 1000) return n + 'ns';
+        if (n < 1e6) return (n / 1e3).toFixed(1) + '\u00b5s';
+        if (n < 1e9) return (n / 1e6).toFixed(2) + 'ms';
+        return (n / 1e9).toFixed(2) + 's';
+      }
+
+      function formatNanoTimestamp(ns) {
+        return new Date(Number(ns) / 1e6).toLocaleTimeString();
+      }
+
+      const _svcColorCache = {};
+      function serviceColor(name) {
+        if (_svcColorCache[name]) return _svcColorCache[name];
+        let h = 0;
+        for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
+        const hue = Math.abs(h) % 360;
+        _svcColorCache[name] = 'hsl(' + hue + ', 55%, 50%)';
+        return _svcColorCache[name];
       }
 
       function makeTextElement(tagName, text, className) {
@@ -745,6 +961,172 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
       }
 
+      function hideAllDetailPanels() {
+        viewerChartContainer.hidden = true;
+        viewerEntriesTable.hidden = true;
+        viewerTraceList.hidden = true;
+        viewerTraceDetail.hidden = true;
+      }
+
+      function renderTraceList(traces) {
+        viewerTraceListBody.replaceChildren();
+        if (!traces || !traces.length) {
+          viewerTraceList.hidden = true;
+          return;
+        }
+        viewerTraceList.hidden = false;
+        for (const trace of traces) {
+          const row = document.createElement('tr');
+          row.className = 'viewer-row';
+          if (trace.has_error) row.style.background = 'var(--danger-soft)';
+          appendTableCell(row, truncateId(trace.trace_id));
+          appendTableCell(row, trace.root_span_name || '-');
+          appendTableCell(row, trace.service_names.join(', '));
+          appendTableCell(row, String(trace.span_count));
+          appendTableCell(row, formatDurationNs(trace.duration_ns));
+          const statusCell = document.createElement('td');
+          statusCell.textContent = trace.has_error ? 'error' : 'ok';
+          if (trace.has_error) statusCell.className = 'error-inline';
+          row.appendChild(statusCell);
+          row.addEventListener('click', () => showTraceDetail(trace));
+          viewerTraceListBody.appendChild(row);
+        }
+      }
+
+      function showTraceDetail(trace) {
+        viewerTraceList.hidden = true;
+        viewerTraceDetail.hidden = false;
+
+        const spanMap = {};
+        const childrenMap = {};
+        for (const s of trace.spans) {
+          spanMap[s.span_id] = s;
+          const pid = s.parent_span_id || '';
+          if (!childrenMap[pid]) childrenMap[pid] = [];
+          childrenMap[pid].push(s);
+        }
+
+        const roots = trace.spans.filter(s => !s.parent_span_id || !spanMap[s.parent_span_id]);
+        const rootSvc = roots.length ? roots[0].service_name : '';
+        const titleOp = trace.root_span_name || 'unknown';
+        traceDetailTitle.textContent = rootSvc + ': ' + titleOp + ' ' + truncateId(trace.trace_id);
+        roots.sort((a, b) => Number(a.start_time_unix_nano) - Number(b.start_time_unix_nano));
+
+        const traceStart = Math.min(...trace.spans.map(s => Number(s.start_time_unix_nano)));
+        const traceEnd = Math.max(...trace.spans.map(s => Number(s.end_time_unix_nano)));
+        const traceDuration = traceEnd - traceStart || 1;
+
+        // render axis
+        traceAxis.replaceChildren();
+        const axisSteps = 5;
+        for (let i = 0; i <= axisSteps; i++) {
+          const tick = document.createElement('span');
+          tick.textContent = formatDurationNs((traceDuration / axisSteps) * i);
+          traceAxis.appendChild(tick);
+        }
+
+        // collect collapse state
+        const collapseState = {};
+
+        function hasChildren(spanId) {
+          return childrenMap[spanId] && childrenMap[spanId].length > 0;
+        }
+
+        function renderTree() {
+          const flatSpans = [];
+          function dfs(span, depth) {
+            flatSpans.push({ span, depth });
+            if (collapseState[span.span_id]) return;
+            const children = (childrenMap[span.span_id] || [])
+              .sort((a, b) => Number(a.start_time_unix_nano) - Number(b.start_time_unix_nano));
+            for (const child of children) dfs(child, depth + 1);
+          }
+          for (const root of roots) dfs(root, 0);
+
+          traceTimeline.replaceChildren();
+          for (const { span, depth } of flatSpans) {
+            const row = document.createElement('div');
+            row.className = 'span-row';
+
+            // left: label
+            const label = document.createElement('div');
+            label.className = 'span-label';
+
+            const indent = document.createElement('span');
+            indent.className = 'span-indent';
+            indent.style.width = (depth * 16) + 'px';
+            label.appendChild(indent);
+
+            const toggle = document.createElement('span');
+            toggle.className = 'span-toggle';
+            if (hasChildren(span.span_id)) {
+              toggle.textContent = collapseState[span.span_id] ? '\u25b6' : '\u25bc';
+              toggle.addEventListener('click', (e) => {
+                e.stopPropagation();
+                collapseState[span.span_id] = !collapseState[span.span_id];
+                renderTree();
+              });
+            } else {
+              toggle.classList.add('leaf');
+            }
+            label.appendChild(toggle);
+
+            if (span.status_code === 2) {
+              const badge = document.createElement('span');
+              badge.className = 'err-badge';
+              badge.title = 'Error';
+              label.appendChild(badge);
+            }
+
+            const svc = document.createElement('span');
+            svc.className = 'svc';
+            svc.textContent = span.service_name || 'unknown';
+            svc.style.color = serviceColor(span.service_name || 'unknown');
+            label.appendChild(svc);
+
+            const op = document.createElement('span');
+            op.className = 'op';
+            op.textContent = ' ' + span.name;
+            label.appendChild(op);
+
+            row.appendChild(label);
+
+            // right: timeline bar
+            const barContainer = document.createElement('div');
+            barContainer.className = 'span-bar-container';
+
+            const start = Number(span.start_time_unix_nano);
+            const end = Number(span.end_time_unix_nano);
+            const leftPct = ((start - traceStart) / traceDuration) * 100;
+            const widthPct = Math.max(((end - start) / traceDuration) * 100, 0.3);
+
+            const bar = document.createElement('div');
+            bar.className = 'span-bar';
+            bar.style.left = leftPct + '%';
+            bar.style.width = widthPct + '%';
+            const color = span.status_code === 2 ? '#c0392b' : serviceColor(span.service_name || 'unknown');
+            bar.style.background = color;
+            barContainer.appendChild(bar);
+
+            const durLabel = document.createElement('span');
+            durLabel.className = 'span-bar-label';
+            durLabel.style.left = (leftPct + widthPct) + '%';
+            durLabel.textContent = formatDurationNs(end - start);
+            barContainer.appendChild(durLabel);
+
+            row.appendChild(barContainer);
+            traceTimeline.appendChild(row);
+          }
+        }
+
+        renderTree();
+      }
+
+      traceBackButton.addEventListener('click', () => {
+        viewerTraceDetail.hidden = true;
+        viewerTraceList.hidden = false;
+      });
+
       async function showViewerDetail(viewerId) {
         selectedViewerId = viewerId;
         renderViewerTable();
@@ -758,22 +1140,23 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           const viewer = await response.json();
           viewerDetailTitle.textContent = `${viewer.name} (${viewer.chart_type || 'table'})`;
           viewerDetailSection.classList.add('visible');
+          hideAllDetailPanels();
 
           const chartType = viewer.chart_type || 'table';
+          const isTraceViewer = viewer.signals.includes('traces');
           if (chartType !== 'table' && viewer.signals.includes('metrics')) {
             renderChart(chartType, viewer.entries, viewer.lookback_ms);
-            viewerEntriesTable.hidden = true;
+          } else if (isTraceViewer && viewer.traces && viewer.traces.length > 0) {
+            renderTraceList(viewer.traces);
           } else {
-            viewerChartContainer.hidden = true;
             renderEntriesTable(viewer.entries);
           }
         } catch (error) {
           viewerDetailSection.classList.remove('visible');
           viewerDetailTitle.textContent = '';
-          viewerChartContainer.hidden = true;
+          hideAllDetailPanels();
           if (currentChart) { currentChart.destroy(); currentChart = null; }
           viewerEntriesBody.replaceChildren();
-          viewerEntriesTable.hidden = true;
           setStatus('error', `Failed to load viewer detail: ${error.message}`);
         }
       }
@@ -943,6 +1326,8 @@ struct ViewerSummary {
     entry_count: usize,
     status: ViewerStatus,
     entries: Vec<ViewerEntryRow>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    traces: Vec<TraceSummary>,
 }
 
 #[derive(Debug, Serialize)]
@@ -956,6 +1341,30 @@ struct ViewerEntryRow {
     metric_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     metric_value: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+struct SpanRow {
+    trace_id: String,
+    span_id: String,
+    parent_span_id: String,
+    service_name: String,
+    name: String,
+    start_time_unix_nano: u64,
+    end_time_unix_nano: u64,
+    status_code: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceSummary {
+    trace_id: String,
+    root_span_name: Option<String>,
+    service_names: Vec<String>,
+    span_count: usize,
+    duration_ns: u64,
+    started_at_ns: u64,
+    has_error: bool,
+    spans: Vec<SpanRow>,
 }
 
 /// Axum app を構築して返す
@@ -1250,6 +1659,11 @@ fn viewer_summary(
         entry_count: viewer_state.entries.len(),
         status: viewer_state.status.clone(),
         entries,
+        traces: if include_entries && definition.signal_mask.contains(Signal::Traces) {
+            extract_traces_from_entries(&viewer_state.entries)
+        } else {
+            vec![]
+        },
     }
 }
 
@@ -1663,6 +2077,145 @@ fn structured_trace_preview(payload: &Bytes) -> Option<String> {
         (None, Some(span_name)) => Some(format!("span={span_name} | otlp_json")),
         (None, None) => None,
     }
+}
+
+fn extract_traces_from_entries(
+    entries: &[crate::domain::telemetry::NormalizedEntry],
+) -> Vec<TraceSummary> {
+    let mut spans_by_trace: HashMap<String, Vec<SpanRow>> = HashMap::new();
+
+    for entry in entries {
+        if entry.signal != Signal::Traces {
+            continue;
+        }
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&entry.payload) else {
+            continue;
+        };
+        let Some(resource_spans) = value.get("resourceSpans").and_then(|v| v.as_array()) else {
+            continue;
+        };
+
+        for rs in resource_spans {
+            let service_name = rs
+                .get("resource")
+                .and_then(|r| r.get("attributes"))
+                .and_then(serde_json::Value::as_array)
+                .and_then(|attrs| attribute_string_value(attrs, "service.name"))
+                .unwrap_or_default();
+
+            let Some(scope_spans) = rs.get("scopeSpans").and_then(|v| v.as_array()) else {
+                continue;
+            };
+
+            for ss in scope_spans {
+                let Some(spans) = ss.get("spans").and_then(|v| v.as_array()) else {
+                    continue;
+                };
+
+                for span in spans {
+                    let trace_id = span
+                        .get("traceId")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    if trace_id.is_empty() {
+                        continue;
+                    }
+
+                    let span_row = SpanRow {
+                        trace_id: trace_id.clone(),
+                        span_id: span
+                            .get("spanId")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        parent_span_id: span
+                            .get("parentSpanId")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        service_name: service_name.clone(),
+                        name: span
+                            .get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        start_time_unix_nano: parse_nano(span.get("startTimeUnixNano")),
+                        end_time_unix_nano: parse_nano(span.get("endTimeUnixNano")),
+                        status_code: span
+                            .get("status")
+                            .and_then(|s| s.get("code"))
+                            .and_then(|c| c.as_u64())
+                            .unwrap_or(0),
+                    };
+
+                    spans_by_trace
+                        .entry(span_row.trace_id.clone())
+                        .or_default()
+                        .push(span_row);
+                }
+            }
+        }
+    }
+
+    let mut traces: Vec<TraceSummary> = spans_by_trace
+        .into_iter()
+        .map(|(trace_id, spans)| {
+            let mut started_at_ns = u64::MAX;
+            let mut ended_at_ns = 0u64;
+            let mut root_span_name: Option<String> = None;
+            let mut has_error = false;
+            let mut svc_set = std::collections::HashSet::new();
+            for s in &spans {
+                if s.start_time_unix_nano < started_at_ns {
+                    started_at_ns = s.start_time_unix_nano;
+                }
+                if s.end_time_unix_nano > ended_at_ns {
+                    ended_at_ns = s.end_time_unix_nano;
+                }
+                if root_span_name.is_none() && s.parent_span_id.is_empty() {
+                    root_span_name = Some(s.name.clone());
+                }
+                if s.status_code == 2 {
+                    has_error = true;
+                }
+                if !s.service_name.is_empty() {
+                    svc_set.insert(s.service_name.clone());
+                }
+            }
+            if started_at_ns == u64::MAX {
+                started_at_ns = 0;
+            }
+            let duration_ns = ended_at_ns.saturating_sub(started_at_ns);
+            let mut service_names: Vec<String> = svc_set.into_iter().collect();
+            service_names.sort();
+
+            TraceSummary {
+                trace_id,
+                root_span_name,
+                service_names,
+                span_count: spans.len(),
+                duration_ns,
+                started_at_ns,
+                has_error,
+                spans,
+            }
+        })
+        .collect();
+
+    traces.sort_by(|a, b| b.started_at_ns.cmp(&a.started_at_ns));
+    traces
+}
+
+fn parse_nano(value: Option<&serde_json::Value>) -> u64 {
+    let Some(v) = value else { return 0 };
+    if let Some(n) = v.as_u64() {
+        return n;
+    }
+    if let Some(s) = v.as_str() {
+        return s.parse::<u64>().unwrap_or(0);
+    }
+    0
 }
 
 #[cfg(test)]
