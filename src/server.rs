@@ -2,8 +2,7 @@ use crate::domain::telemetry::{Signal, SignalMask};
 use crate::domain::viewer::{ViewerDefinition, ViewerStatus};
 use crate::ingest::decode::DecodeError;
 use crate::ingest::otlp_http::parse_ingest_request;
-use crate::storage::postgres::PostgresStore;
-use crate::storage::redis::RedisStore;
+use crate::storage::{StreamStore, ViewerStore};
 use crate::viewer_runtime::compiler::CompiledViewer;
 use crate::viewer_runtime::runtime::ViewerRuntime;
 use crate::viewer_runtime::state::ViewerState;
@@ -1264,12 +1263,12 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
 /// Axum 共有 state
 ///
-/// RedisStore は MultiplexedConnection をラップしており Clone で並行使用できるため、
-/// Arc<Mutex<>> でラップする必要はない。Axum は各リクエストで State を clone する。
+/// StreamStore は Clone 可能なため Arc<Mutex<>> でラップする必要はない。
+/// Axum は各リクエストで State を clone する。
 #[derive(Clone)]
 pub struct AppState {
-    pub redis: RedisStore,
-    pub postgres: Option<PostgresStore>,
+    pub stream_store: StreamStore,
+    pub viewer_store: Option<ViewerStore>,
     pub viewer_runtime: Option<SharedViewerRuntime>,
 }
 
@@ -1367,19 +1366,19 @@ struct TraceSummary {
     spans: Vec<SpanRow>,
 }
 
-/// Axum app を構築して返す
-pub fn build_app(redis: RedisStore) -> Router {
-    build_app_with_services(redis, None, None)
+/// Axum app を構築して返す (ingest-only モード用)
+pub fn build_app(stream_store: StreamStore) -> Router {
+    build_app_with_services(stream_store, None, None)
 }
 
 pub fn build_app_with_services(
-    redis: RedisStore,
-    postgres: Option<PostgresStore>,
+    stream_store: StreamStore,
+    viewer_store: Option<ViewerStore>,
     viewer_runtime: Option<SharedViewerRuntime>,
 ) -> Router {
     let state = AppState {
-        redis,
-        postgres,
+        stream_store,
+        viewer_store,
         viewer_runtime,
     };
 
@@ -1435,8 +1434,8 @@ async fn create_viewer(
     State(state): State<AppState>,
     Json(payload): Json<CreateViewerRequest>,
 ) -> Result<(StatusCode, Json<CreateViewerResponse>), StatusCode> {
-    let postgres = state
-        .postgres
+    let viewer_store = state
+        .viewer_store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let runtime = state.require_viewer_runtime()?;
@@ -1471,7 +1470,7 @@ async fn create_viewer(
         enabled: true,
     };
 
-    postgres
+    viewer_store
         .insert_viewer_definition(&definition)
         .await
         .map_err(|error| {
@@ -1497,8 +1496,8 @@ async fn patch_viewer(
     Path(id): Path<Uuid>,
     Json(payload): Json<PatchViewerRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    let postgres = state
-        .postgres
+    let viewer_store = state
+        .viewer_store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let runtime = state.require_viewer_runtime()?;
@@ -1532,7 +1531,7 @@ async fn patch_viewer(
         (definition_json, layout_json)
     }; // lock released here
 
-    let updated = postgres
+    let updated = viewer_store
         .update_viewer_definition_json(id, &definition_json, &layout_json)
         .await
         .map_err(|error| {
@@ -1585,11 +1584,11 @@ async fn handle_ingest(
 
     match parse_ingest_request(signal, content_type, body) {
         Ok(entry) => {
-            let mut redis = state.redis;
-            match redis.append_entry(&entry).await {
+            let mut stream_store = state.stream_store;
+            match stream_store.append_entry(&entry).await {
                 Ok(_) => StatusCode::OK,
                 Err(error) => {
-                    tracing::error!("redis append_entry failed: {error}");
+                    tracing::error!("stream append_entry failed: {error}");
                     StatusCode::INTERNAL_SERVER_ERROR
                 }
             }
