@@ -13,8 +13,10 @@ use chrono::{Duration, Utc};
 use litelemetry::domain::telemetry::{NormalizedEntry, Signal, SignalMask};
 use litelemetry::domain::viewer::ViewerDefinition;
 use litelemetry::server::{build_app, build_app_with_services};
+use litelemetry::storage::memory::{MemoryStreamStore, MemoryViewerStore};
 use litelemetry::storage::postgres::{PostgresStore, ViewerSnapshotRow};
 use litelemetry::storage::redis::RedisStore;
+use litelemetry::storage::{StreamStore, ViewerStore};
 use litelemetry::viewer_runtime::runtime::ViewerRuntime;
 use litelemetry::viewer_runtime::state::StreamCursor;
 use serde_json::json;
@@ -61,12 +63,19 @@ async fn setup_viewer_app() -> ViewerTestEnv {
     pg.create_schema().await.unwrap();
 
     let redis = make_redis_store(redis_port).await;
-    let runtime = ViewerRuntime::build(pg.clone(), redis.clone())
-        .await
-        .unwrap();
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Postgres(pg.clone()),
+        StreamStore::Redis(redis.clone()),
+    )
+    .await
+    .unwrap();
     let runtime = Arc::new(Mutex::new(runtime));
 
-    let app = build_app_with_services(redis, Some(pg), Some(runtime));
+    let app = build_app_with_services(
+        StreamStore::Redis(redis),
+        Some(ViewerStore::Postgres(pg)),
+        Some(runtime),
+    );
 
     ViewerTestEnv {
         app,
@@ -279,9 +288,12 @@ async fn test_startup_resume_from_snapshot_and_redis_diff() {
     }
 
     // 4. viewer runtime を起動
-    let runtime = ViewerRuntime::build(pg, make_redis_store(redis_port).await)
-        .await
-        .unwrap();
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Postgres(pg),
+        StreamStore::Redis(make_redis_store(redis_port).await),
+    )
+    .await
+    .unwrap();
 
     // 5. state が "snapshot cursor 以降の 3 件" で構築されることを確認
     let viewers = runtime.viewers();
@@ -336,9 +348,12 @@ async fn test_startup_resume_no_snapshot_falls_back_to_replay() {
     }
 
     // 3. viewer runtime を起動
-    let runtime = ViewerRuntime::build(pg, make_redis_store(redis_port).await)
-        .await
-        .unwrap();
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Postgres(pg),
+        StreamStore::Redis(make_redis_store(redis_port).await),
+    )
+    .await
+    .unwrap();
 
     // 4. 全量 replay で 4 件の state が構築されることを確認
     let viewers = runtime.viewers();
@@ -396,9 +411,12 @@ async fn test_startup_resume_revision_mismatch_falls_back_to_replay() {
     }
 
     // 3. viewer runtime を起動
-    let runtime = ViewerRuntime::build(pg, make_redis_store(redis_port).await)
-        .await
-        .unwrap();
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Postgres(pg),
+        StreamStore::Redis(make_redis_store(redis_port).await),
+    )
+    .await
+    .unwrap();
 
     // 4. revision mismatch → cursor をリセットして全量 replay → 3 件
     let viewers = runtime.viewers();
@@ -438,9 +456,12 @@ async fn test_diff_update_one_pass_fan_out_to_multiple_viewers() {
     pg.insert_viewer_definition(&def2).await.unwrap();
 
     // 空の runtime を起動
-    let mut runtime = ViewerRuntime::build(pg, make_redis_store(redis_port).await)
-        .await
-        .unwrap();
+    let mut runtime = ViewerRuntime::build(
+        ViewerStore::Postgres(pg),
+        StreamStore::Redis(make_redis_store(redis_port).await),
+    )
+    .await
+    .unwrap();
 
     // 両 viewer の初期 entries が 0 件であることを確認
     for (_, state) in runtime.viewers() {
@@ -487,9 +508,12 @@ async fn test_snapshot_upsert_after_diff_update() {
     pg.insert_viewer_definition(&def).await.unwrap();
 
     let pg2 = make_postgres_store(pg_port).await;
-    let mut runtime = ViewerRuntime::build(pg, make_redis_store(redis_port).await)
-        .await
-        .unwrap();
+    let mut runtime = ViewerRuntime::build(
+        ViewerStore::Postgres(pg),
+        StreamStore::Redis(make_redis_store(redis_port).await),
+    )
+    .await
+    .unwrap();
 
     // Redis に 3 件追加して diff batch
     let mut redis_write = make_redis_store(redis_port).await;
@@ -516,8 +540,8 @@ async fn test_snapshot_upsert_after_diff_update() {
 
     // 3. 再起動後に snapshot から resume (追加エントリなし → diff 0件)
     let runtime2 = ViewerRuntime::build(
-        make_postgres_store(pg_port).await,
-        make_redis_store(redis_port).await,
+        ViewerStore::Postgres(make_postgres_store(pg_port).await),
+        StreamStore::Redis(make_redis_store(redis_port).await),
     )
     .await
     .unwrap();
@@ -554,9 +578,12 @@ async fn test_diff_update_prunes_entries_outside_lookback() {
     let def = make_viewer_def(Signal::Traces.into(), 60_000, 1);
     pg.insert_viewer_definition(&def).await.unwrap();
 
-    let mut runtime = ViewerRuntime::build(pg, make_redis_store(redis_port).await)
-        .await
-        .unwrap();
+    let mut runtime = ViewerRuntime::build(
+        ViewerStore::Postgres(pg),
+        StreamStore::Redis(make_redis_store(redis_port).await),
+    )
+    .await
+    .unwrap();
 
     // 2. 古いエントリ (90s前) と新しいエントリ (10s前) を Redis に追加
     let mut redis_write = make_redis_store(redis_port).await;
@@ -602,7 +629,7 @@ async fn test_ingest_traces_via_otlp_http() {
     let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
 
     let redis = make_redis_store(redis_port).await;
-    let app = build_app(redis);
+    let app = build_app(StreamStore::Redis(redis));
 
     // 2. POST /v1/traces
     let request = Request::builder()
@@ -888,7 +915,7 @@ async fn test_ingest_metrics_via_otlp_http() {
     let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
 
     let redis = make_redis_store(redis_port).await;
-    let app = build_app(redis);
+    let app = build_app(StreamStore::Redis(redis));
 
     let request = Request::builder()
         .method("POST")
@@ -920,7 +947,7 @@ async fn test_ingest_logs_via_otlp_http() {
     let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
 
     let redis = make_redis_store(redis_port).await;
-    let app = build_app(redis);
+    let app = build_app(StreamStore::Redis(redis));
 
     let request = Request::builder()
         .method("POST")
@@ -952,7 +979,7 @@ async fn test_ingest_unsupported_content_type_returns_415() {
     let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
 
     let redis = make_redis_store(redis_port).await;
-    let app = build_app(redis);
+    let app = build_app(StreamStore::Redis(redis));
 
     let request = Request::builder()
         .method("POST")
@@ -1096,7 +1123,7 @@ async fn test_get_viewer_by_id_without_runtime_returns_503() {
     let redis_container = Redis::default().start().await.unwrap();
     let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
 
-    let app = build_app(make_redis_store(redis_port).await);
+    let app = build_app(StreamStore::Redis(make_redis_store(redis_port).await));
 
     let viewer_id = Uuid::new_v4();
     let request = Request::builder()
@@ -1406,4 +1433,927 @@ async fn test_metric_entries_contain_metric_name_and_value() {
         entry["metric_value"], 150.0,
         "metric_value should be extracted as f64"
     );
+}
+
+// ─── Memory ストア (Docker 不要) ─────────────────────────────────────────────
+
+struct MemoryViewerTestEnv {
+    app: axum::Router,
+}
+
+async fn setup_memory_viewer_app() -> MemoryViewerTestEnv {
+    let stream_store = MemoryStreamStore::new(100_000);
+    let viewer_store = MemoryViewerStore::new();
+
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Memory(viewer_store.clone()),
+        StreamStore::Memory(stream_store.clone()),
+    )
+    .await
+    .unwrap();
+    let runtime = Arc::new(Mutex::new(runtime));
+
+    let app = build_app_with_services(
+        StreamStore::Memory(stream_store.clone()),
+        Some(ViewerStore::Memory(viewer_store.clone())),
+        Some(runtime),
+    );
+
+    MemoryViewerTestEnv { app }
+}
+
+// ─── startup resume (memory) ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_startup_resume_from_snapshot_memory() {
+    let stream_store = MemoryStreamStore::new(100_000);
+    let viewer_store = MemoryViewerStore::new();
+
+    let def = make_viewer_def(Signal::Traces.into(), 300_000, 1);
+    let def_id = def.id;
+    viewer_store.insert_viewer_definition(&def).await.unwrap();
+
+    let mut stream_write = stream_store.clone();
+    for _ in 0..5 {
+        stream_write
+            .append_entry(&make_traces_entry(10_000))
+            .await
+            .unwrap();
+    }
+    let snapshot_entries = stream_write
+        .read_entries_since(Signal::Traces, None, 5)
+        .await
+        .unwrap();
+    let cursor_id = snapshot_entries.last().unwrap().0.clone();
+
+    let mut cursor = StreamCursor::default();
+    cursor.set(Signal::Traces, cursor_id.clone());
+    let snapshot = ViewerSnapshotRow {
+        viewer_id: def_id,
+        revision: 1,
+        last_cursor_json: serde_json::to_value(&cursor).unwrap(),
+        status: litelemetry::domain::viewer::ViewerStatus::Ok,
+        generated_at: Utc::now(),
+    };
+    viewer_store.upsert_snapshot(&snapshot).await.unwrap();
+
+    for _ in 0..3 {
+        stream_write
+            .append_entry(&make_traces_entry(5_000))
+            .await
+            .unwrap();
+    }
+
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Memory(viewer_store),
+        StreamStore::Memory(stream_store),
+    )
+    .await
+    .unwrap();
+
+    let viewers = runtime.viewers();
+    assert_eq!(viewers.len(), 1);
+    let (_, state) = &viewers[0];
+    assert_eq!(
+        state.entries.len(),
+        3,
+        "snapshot cursor 以降の 3 件だけが取り込まれること"
+    );
+    assert!(state.last_cursor.traces.is_some());
+    assert_ne!(
+        state.last_cursor.traces.as_deref(),
+        Some(cursor_id.as_str()),
+        "カーソルが snapshot cursor より先に進んでいること"
+    );
+}
+
+#[tokio::test]
+async fn test_startup_resume_no_snapshot_falls_back_to_replay_memory() {
+    let stream_store = MemoryStreamStore::new(100_000);
+    let viewer_store = MemoryViewerStore::new();
+
+    let def = make_viewer_def(Signal::Traces.into(), 300_000, 1);
+    viewer_store.insert_viewer_definition(&def).await.unwrap();
+
+    let mut stream_write = stream_store.clone();
+    for _ in 0..4 {
+        stream_write
+            .append_entry(&make_traces_entry(10_000))
+            .await
+            .unwrap();
+    }
+
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Memory(viewer_store),
+        StreamStore::Memory(stream_store),
+    )
+    .await
+    .unwrap();
+
+    let viewers = runtime.viewers();
+    assert_eq!(viewers.len(), 1);
+    let (_, state) = &viewers[0];
+    assert_eq!(
+        state.entries.len(),
+        4,
+        "スナップショットなし → メモリ全量 4 件が replay されること"
+    );
+}
+
+#[tokio::test]
+async fn test_startup_resume_revision_mismatch_falls_back_to_replay_memory() {
+    let stream_store = MemoryStreamStore::new(100_000);
+    let viewer_store = MemoryViewerStore::new();
+
+    let def = make_viewer_def(Signal::Traces.into(), 300_000, 2);
+    let def_id = def.id;
+    viewer_store.insert_viewer_definition(&def).await.unwrap();
+
+    // revision=1 の古い snapshot (未来の cursor → 0 件になる)
+    let mut cursor = StreamCursor::default();
+    cursor.set(Signal::Traces, "9999999999999-0".to_string());
+    let snapshot = ViewerSnapshotRow {
+        viewer_id: def_id,
+        revision: 1,
+        last_cursor_json: serde_json::to_value(&cursor).unwrap(),
+        status: litelemetry::domain::viewer::ViewerStatus::Ok,
+        generated_at: Utc::now(),
+    };
+    viewer_store.upsert_snapshot(&snapshot).await.unwrap();
+
+    let mut stream_write = stream_store.clone();
+    for _ in 0..3 {
+        stream_write
+            .append_entry(&make_traces_entry(10_000))
+            .await
+            .unwrap();
+    }
+
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Memory(viewer_store),
+        StreamStore::Memory(stream_store),
+    )
+    .await
+    .unwrap();
+
+    let viewers = runtime.viewers();
+    assert_eq!(viewers.len(), 1);
+    let (_, state) = &viewers[0];
+    assert_eq!(
+        state.entries.len(),
+        3,
+        "revision mismatch → カーソルをリセットして全量 3 件が replay されること"
+    );
+}
+
+// ─── diff update (memory) ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_diff_update_one_pass_fan_out_to_multiple_viewers_memory() {
+    let stream_store = MemoryStreamStore::new(100_000);
+    let viewer_store = MemoryViewerStore::new();
+
+    let def1 = make_viewer_def(Signal::Traces.into(), 300_000, 1);
+    let def2 = make_viewer_def(Signal::Traces.into(), 300_000, 1);
+    viewer_store.insert_viewer_definition(&def1).await.unwrap();
+    viewer_store.insert_viewer_definition(&def2).await.unwrap();
+
+    let mut runtime = ViewerRuntime::build(
+        ViewerStore::Memory(viewer_store),
+        StreamStore::Memory(stream_store.clone()),
+    )
+    .await
+    .unwrap();
+
+    for (_, state) in runtime.viewers() {
+        assert_eq!(state.entries.len(), 0);
+    }
+
+    let mut stream_write = stream_store.clone();
+    for _ in 0..5 {
+        stream_write
+            .append_entry(&make_traces_entry(10_000))
+            .await
+            .unwrap();
+    }
+
+    runtime.apply_diff_batch().await.unwrap();
+
+    for (_, state) in runtime.viewers() {
+        assert_eq!(state.entries.len(), 5, "両 viewer に 5 件が反映されること");
+    }
+}
+
+#[tokio::test]
+async fn test_snapshot_upsert_after_diff_update_memory() {
+    let stream_store = MemoryStreamStore::new(100_000);
+    let viewer_store = MemoryViewerStore::new();
+
+    let def = make_viewer_def(Signal::Traces.into(), 300_000, 1);
+    let def_id = def.id;
+    viewer_store.insert_viewer_definition(&def).await.unwrap();
+
+    let mut runtime = ViewerRuntime::build(
+        ViewerStore::Memory(viewer_store.clone()),
+        StreamStore::Memory(stream_store.clone()),
+    )
+    .await
+    .unwrap();
+
+    let mut stream_write = stream_store.clone();
+    for _ in 0..3 {
+        stream_write
+            .append_entry(&make_traces_entry(10_000))
+            .await
+            .unwrap();
+    }
+    runtime.apply_diff_batch().await.unwrap();
+
+    // snapshot が memory viewer_store に upsert されていることを確認
+    let snapshots = viewer_store.load_snapshots(&[def_id]).await.unwrap();
+    assert!(!snapshots.is_empty(), "snapshot が保存されていること");
+    let snapshot = &snapshots[0];
+    assert_eq!(snapshot.revision, 1);
+    assert!(
+        snapshot.last_cursor_json.get("traces").is_some(),
+        "traces カーソルが snapshot に保存されていること"
+    );
+
+    // 再起動後に snapshot から resume (追加エントリなし → diff 0件)
+    let runtime2 = ViewerRuntime::build(
+        ViewerStore::Memory(viewer_store),
+        StreamStore::Memory(stream_store),
+    )
+    .await
+    .unwrap();
+    let (_, state2) = &runtime2.viewers()[0];
+    assert_eq!(state2.entries.len(), 0, "snapshot cursor 以降の差分 (0 件)");
+}
+
+#[tokio::test]
+async fn test_diff_update_prunes_entries_outside_lookback_memory() {
+    let stream_store = MemoryStreamStore::new(100_000);
+    let viewer_store = MemoryViewerStore::new();
+
+    let def = make_viewer_def(Signal::Traces.into(), 60_000, 1);
+    viewer_store.insert_viewer_definition(&def).await.unwrap();
+
+    let mut runtime = ViewerRuntime::build(
+        ViewerStore::Memory(viewer_store),
+        StreamStore::Memory(stream_store.clone()),
+    )
+    .await
+    .unwrap();
+
+    let mut stream_write = stream_store.clone();
+    stream_write
+        .append_entry(&make_traces_entry(90_000))
+        .await
+        .unwrap(); // 古い
+    stream_write
+        .append_entry(&make_traces_entry(10_000))
+        .await
+        .unwrap(); // 新しい
+
+    runtime.apply_diff_batch().await.unwrap();
+
+    let viewers = runtime.viewers();
+    assert_eq!(viewers.len(), 1);
+    let (_, state) = &viewers[0];
+    assert_eq!(
+        state.entries.len(),
+        1,
+        "lookback 外の古いエントリが prune されて 1 件だけ残ること"
+    );
+}
+
+// ─── OTLP ingest (memory) ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_ingest_traces_via_otlp_http_memory() {
+    let stream_store = MemoryStreamStore::new(100_000);
+    let app = build_app(StreamStore::Memory(stream_store.clone()));
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/traces")
+        .header("content-type", "application/x-protobuf")
+        .body(axum::body::Body::from(Bytes::from_static(b"\x0a\x0b\x0c")))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let entries = stream_store
+        .clone()
+        .read_entries_since(Signal::Traces, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].1.signal, Signal::Traces);
+}
+
+#[tokio::test]
+async fn test_ingest_metrics_via_otlp_http_memory() {
+    let stream_store = MemoryStreamStore::new(100_000);
+    let app = build_app(StreamStore::Memory(stream_store.clone()));
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/metrics")
+        .header("content-type", "application/x-protobuf")
+        .body(axum::body::Body::from(Bytes::from_static(b"\x0a\x0b")))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let entries = stream_store
+        .clone()
+        .read_entries_since(Signal::Metrics, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+}
+
+#[tokio::test]
+async fn test_ingest_logs_via_otlp_http_memory() {
+    let stream_store = MemoryStreamStore::new(100_000);
+    let app = build_app(StreamStore::Memory(stream_store.clone()));
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/logs")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(Bytes::from_static(b"{}")))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let entries = stream_store
+        .clone()
+        .read_entries_since(Signal::Logs, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+}
+
+#[tokio::test]
+async fn test_ingest_unsupported_content_type_returns_415_memory() {
+    let app = build_app(StreamStore::Memory(MemoryStreamStore::new(100_000)));
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/traces")
+        .header("content-type", "text/plain")
+        .body(axum::body::Body::from(Bytes::from_static(b"hello")))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+}
+
+// ─── viewer API (memory) ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_create_viewer_then_trace_is_reflected_in_viewer_api_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let trace_req = Request::builder()
+        .method("POST")
+        .uri("/v1/traces")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(make_trace_payload(
+            "checkout-ui",
+            "render-checkout",
+        )))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(trace_req).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let create_req = Request::builder()
+        .method("POST")
+        .uri("/api/viewers")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "Checkout traces", "signal": "traces" }).to_string(),
+        ))
+        .unwrap();
+    let create_resp = app.clone().oneshot(create_req).await.unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let list_body = axum::body::to_bytes(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/viewers")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&list_body).unwrap();
+    assert_eq!(payload["viewers"].as_array().unwrap().len(), 1);
+    assert_eq!(payload["viewers"][0]["entry_count"], 1);
+
+    let get_body = axum::body::to_bytes(
+        app.oneshot(
+            Request::builder()
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let viewer: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+    assert_eq!(viewer["entries"][0]["signal"], "traces");
+    assert_eq!(viewer["entries"][0]["service_name"], "checkout-ui");
+    let preview = viewer["entries"][0]["payload_preview"].as_str().unwrap();
+    assert!(preview.contains("render-checkout"));
+}
+
+#[tokio::test]
+async fn test_create_viewer_then_metric_is_reflected_in_viewer_api_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let metric_req = Request::builder()
+        .method("POST")
+        .uri("/v1/metrics")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(make_metric_payload(
+            "orders-api",
+            "http.server.requests",
+            42,
+        )))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(metric_req).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let create_req = Request::builder()
+        .method("POST")
+        .uri("/api/viewers")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "Orders metrics", "signal": "metrics" }).to_string(),
+        ))
+        .unwrap();
+    let create_resp = app.clone().oneshot(create_req).await.unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let get_body = axum::body::to_bytes(
+        app.oneshot(
+            Request::builder()
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let viewer: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+    assert_eq!(viewer["entry_count"], 1);
+    assert_eq!(viewer["entries"][0]["signal"], "metrics");
+    assert_eq!(viewer["entries"][0]["service_name"], "orders-api");
+}
+
+#[tokio::test]
+async fn test_create_viewer_then_log_is_reflected_in_viewer_api_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let log_req = Request::builder()
+        .method("POST")
+        .uri("/v1/logs")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(make_log_payload(
+            "worker-billing",
+            "INFO",
+            "payment authorized",
+        )))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(log_req).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let create_req = Request::builder()
+        .method("POST")
+        .uri("/api/viewers")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "Billing logs", "signal": "logs" }).to_string(),
+        ))
+        .unwrap();
+    let create_resp = app.clone().oneshot(create_req).await.unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let get_body = axum::body::to_bytes(
+        app.oneshot(
+            Request::builder()
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let viewer: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+    assert_eq!(viewer["entries"][0]["signal"], "logs");
+    assert_eq!(viewer["entries"][0]["service_name"], "worker-billing");
+    let preview = viewer["entries"][0]["payload_preview"].as_str().unwrap();
+    assert!(preview.contains("payment authorized"));
+}
+
+#[tokio::test]
+async fn test_get_viewer_by_id_returns_viewer_summary_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let trace_req = Request::builder()
+        .method("POST")
+        .uri("/v1/traces")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(make_trace_payload(
+            "detail-svc",
+            "render-detail",
+        )))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(trace_req).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let create_req = Request::builder()
+        .method("POST")
+        .uri("/api/viewers")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "Detail Traces Viewer", "signal": "traces" }).to_string(),
+        ))
+        .unwrap();
+    let create_resp = app.clone().oneshot(create_req).await.unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let get_resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(get_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["name"], "Detail Traces Viewer");
+    assert_eq!(payload["signals"][0], "traces");
+    assert_eq!(payload["entry_count"], 1);
+    assert_eq!(payload["entries"][0]["service_name"], "detail-svc");
+}
+
+#[tokio::test]
+async fn test_get_viewer_by_id_not_found_returns_404_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/viewers/{}", Uuid::new_v4()))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_get_viewer_by_id_without_runtime_returns_503_memory() {
+    let app = build_app(StreamStore::Memory(MemoryStreamStore::new(100_000)));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/viewers/{}", Uuid::new_v4()))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn test_get_viewer_by_id_invalid_uuid_returns_400_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/viewers/not-a-uuid")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ─── chart_type & PATCH (memory) ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_create_viewer_with_chart_type_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let create_req = Request::builder()
+        .method("POST")
+        .uri("/api/viewers")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "Metrics bar", "signal": "metrics", "chart_type": "stacked_bar" })
+                .to_string(),
+        ))
+        .unwrap();
+    let create_resp = app.clone().oneshot(create_req).await.unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let get_body = axum::body::to_bytes(
+        app.oneshot(
+            Request::builder()
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+    assert_eq!(payload["chart_type"], "stacked_bar");
+}
+
+#[tokio::test]
+async fn test_create_viewer_default_chart_type_is_table_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let create_req = Request::builder()
+        .method("POST")
+        .uri("/api/viewers")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "Default chart", "signal": "traces" }).to_string(),
+        ))
+        .unwrap();
+    let create_resp = app.clone().oneshot(create_req).await.unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let get_body = axum::body::to_bytes(
+        app.oneshot(
+            Request::builder()
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+    assert_eq!(payload["chart_type"], "table");
+}
+
+#[tokio::test]
+async fn test_patch_viewer_chart_type_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let create_req = Request::builder()
+        .method("POST")
+        .uri("/api/viewers")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "Patch test", "signal": "metrics" }).to_string(),
+        ))
+        .unwrap();
+    let create_resp = app.clone().oneshot(create_req).await.unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let patch_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "chart_type": "line" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(patch_resp.status(), StatusCode::OK);
+
+    let get_body = axum::body::to_bytes(
+        app.oneshot(
+            Request::builder()
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+    assert_eq!(payload["chart_type"], "line");
+}
+
+#[tokio::test]
+async fn test_create_viewer_invalid_chart_type_returns_400_memory() {
+    let env = setup_memory_viewer_app().await;
+    let resp = env
+        .app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/viewers")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "name": "Bad chart", "signal": "metrics", "chart_type": "pie" })
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_patch_nonexistent_viewer_returns_404_memory() {
+    let env = setup_memory_viewer_app().await;
+    let resp = env
+        .app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/viewers/{}", Uuid::new_v4()))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "chart_type": "line" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_metric_entries_contain_metric_name_and_value_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let metric_req = Request::builder()
+        .method("POST")
+        .uri("/v1/metrics")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(make_metric_payload(
+            "web-api",
+            "http.request.duration",
+            150,
+        )))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(metric_req).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let create_req = Request::builder()
+        .method("POST")
+        .uri("/api/viewers")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "Duration metrics", "signal": "metrics", "chart_type": "line" })
+                .to_string(),
+        ))
+        .unwrap();
+    let create_resp = app.clone().oneshot(create_req).await.unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let get_body = axum::body::to_bytes(
+        app.oneshot(
+            Request::builder()
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+    assert_eq!(payload["entry_count"], 1);
+    assert_eq!(
+        payload["entries"][0]["metric_name"],
+        "http.request.duration"
+    );
+    assert_eq!(payload["entries"][0]["metric_value"], 150.0);
 }

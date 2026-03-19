@@ -1,7 +1,8 @@
 use crate::domain::telemetry::Signal;
 use crate::domain::viewer::ViewerDefinition;
-use crate::storage::postgres::{PostgresStore, ViewerSnapshotRow};
-use crate::storage::redis::{RedisStore, cmp_stream_id};
+use crate::storage::postgres::ViewerSnapshotRow;
+use crate::storage::redis::cmp_stream_id;
+use crate::storage::{StorageError, StreamStore, ViewerStore};
 use crate::viewer_runtime::compiler::{CompileError, CompiledViewer, compile};
 use crate::viewer_runtime::reducer::{apply_entry, prune_stale_buckets};
 use crate::viewer_runtime::state::{StreamCursor, ViewerState};
@@ -13,36 +14,34 @@ use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
-    #[error("redis error: {0}")]
-    Redis(#[from] redis::RedisError),
-    #[error("postgres error: {0}")]
-    Postgres(#[from] sqlx::Error),
+    #[error("storage error: {0}")]
+    Storage(#[from] StorageError),
     #[error("compile error: {0}")]
     Compile(#[from] CompileError),
 }
 
 /// viewer のインメモリランタイム。
-/// - `build()` で PG 定義 + PG snapshot + Redis 差分から初期状態を構築する。
-/// - `apply_diff_batch()` で Redis から差分を取得し全 viewer にファンアウトする (1 signal につき 1 回の Redis 走査)。
+/// - `build()` でストア定義 + snapshot + stream 差分から初期状態を構築する。
+/// - `apply_diff_batch()` でストリームから差分を取得し全 viewer にファンアウトする。
 pub struct ViewerRuntime {
     viewers: Vec<(CompiledViewer, ViewerState)>,
-    redis: RedisStore,
-    postgres: PostgresStore,
+    stream_store: StreamStore,
+    viewer_store: ViewerStore,
 }
 
 impl ViewerRuntime {
-    /// PG + Redis から初期状態を構築する。
+    /// ストア + ストリームから初期状態を構築する。
     ///
-    /// signal ごとに Redis XREAD を 1 回だけ行い、全 viewer にファンアウトする。
+    /// signal ごとに 1 回だけストリームを読み、全 viewer にファンアウトする。
     pub async fn build(
-        postgres: PostgresStore,
-        mut redis: RedisStore,
+        viewer_store: ViewerStore,
+        mut stream_store: StreamStore,
     ) -> Result<Self, RuntimeError> {
-        let definitions = postgres.load_viewer_definitions().await?;
+        let definitions = viewer_store.load_viewer_definitions().await?;
 
         // 全 viewer の snapshot を一括取得して HashMap に格納 (N+1 クエリ回避)
         let def_ids: Vec<_> = definitions.iter().map(|d| d.id).collect();
-        let snapshots: HashMap<_, _> = postgres
+        let snapshots: HashMap<_, _> = viewer_store
             .load_snapshots(&def_ids)
             .await?
             .into_iter()
@@ -84,10 +83,10 @@ impl ViewerRuntime {
             viewers.push((viewer, state));
         }
 
-        // signal ごとに 1 回だけ Redis を読み、全 viewer にファンアウト
+        // signal ごとに 1 回だけストリームを読み、全 viewer にファンアウト
         let now = Utc::now();
         for signal in Signal::all() {
-            fan_out_signal_entries(&mut viewers, &mut redis, signal).await?;
+            fan_out_signal_entries(&mut viewers, &mut stream_store, signal).await?;
         }
 
         // lookback を超えたエントリを prune
@@ -97,15 +96,15 @@ impl ViewerRuntime {
 
         Ok(Self {
             viewers,
-            redis,
-            postgres,
+            stream_store,
+            viewer_store,
         })
     }
 
-    /// 全 viewer の差分を Redis から取得して更新する。
+    /// 全 viewer の差分をストリームから取得して更新する。
     ///
-    /// 同じ signal を監視する複数の viewer には、1 回の XRANGE 結果をファンアウトする。
-    /// snapshot は更新後に PG へ upsert する。
+    /// 同じ signal を監視する複数の viewer には、1 回の読み出し結果をファンアウトする。
+    /// snapshot は更新後にストアへ upsert する。
     pub async fn apply_diff_batch(&mut self) -> Result<(), RuntimeError> {
         let now = Utc::now();
 
@@ -117,7 +116,7 @@ impl ViewerRuntime {
             .collect();
 
         for signal in Signal::all() {
-            fan_out_signal_entries(&mut self.viewers, &mut self.redis, signal).await?;
+            fan_out_signal_entries(&mut self.viewers, &mut self.stream_store, signal).await?;
         }
 
         // lookback を超えたエントリを prune
@@ -138,7 +137,7 @@ impl ViewerRuntime {
                 status: state.status.clone(),
                 generated_at: now,
             };
-            if let Err(e) = self.postgres.upsert_snapshot(&snapshot).await {
+            if let Err(e) = self.viewer_store.upsert_snapshot(&snapshot).await {
                 tracing::error!("viewer {}: snapshot upsert failed: {e}", state.viewer_id);
             }
         }
@@ -158,7 +157,10 @@ impl ViewerRuntime {
                 continue;
             }
 
-            let entries = self.redis.read_entries_since(signal, None, 100_000).await?;
+            let entries = self
+                .stream_store
+                .read_entries_since(signal, None, 100_000)
+                .await?;
             for (entry_id, entry) in entries {
                 apply_entry(&mut state, &viewer, entry);
                 state.last_cursor.set(signal, entry_id);
@@ -191,19 +193,18 @@ impl ViewerRuntime {
     }
 }
 
-/// 指定 signal について Redis XREAD を 1 回行い、全 viewer にエントリをファンアウトする。
+/// 指定 signal についてストリームを 1 回読み、全 viewer にエントリをファンアウトする。
 async fn fan_out_signal_entries(
     viewers: &mut [(CompiledViewer, ViewerState)],
-    redis: &mut RedisStore,
+    stream_store: &mut StreamStore,
     signal: Signal,
 ) -> Result<(), RuntimeError> {
     if !viewers.iter().any(|(v, _)| v.matches_signal(signal)) {
         return Ok(());
     }
 
-    // 全 viewer の中で最も古いカーソル (= 最も多くのエントリを読む必要がある) を使って XREAD。
+    // 全 viewer の中で最も古いカーソル (= 最も多くのエントリを読む必要がある) を使って読み出す。
     // None = 先頭から読む必要がある viewer が存在するため最小値として扱う。
-    // Stream ID は文字列辞書順ではなく数値比較が必要 (seq が 2 桁以上になると "10" < "9" になる)。
     let min_cursor: Option<String> = viewers
         .iter()
         .filter(|(v, _)| v.matches_signal(signal))
@@ -217,7 +218,7 @@ async fn fan_out_signal_entries(
         .flatten()
         .map(str::to_string);
 
-    let entries = redis
+    let entries = stream_store
         .read_entries_since(signal, min_cursor.as_deref(), 100_000)
         .await?;
 

@@ -7,8 +7,11 @@
 //!   cargo test --test e2e -- --include-ignored
 
 use litelemetry::domain::telemetry::{NormalizedEntry, Signal};
-use litelemetry::server::build_app;
+use litelemetry::server::{build_app, build_app_with_services};
+use litelemetry::storage::memory::{MemoryStreamStore, MemoryViewerStore};
 use litelemetry::storage::redis::RedisStore;
+use litelemetry::storage::{StreamStore, ViewerStore};
+use litelemetry::viewer_runtime::runtime::ViewerRuntime;
 use opentelemetry::logs::{AnyValue, LogRecord as _, Logger, LoggerProvider as _, Severity};
 use opentelemetry::metrics::MeterProvider as _;
 use opentelemetry::trace::{SpanKind, TraceContextExt, Tracer, TracerProvider as _};
@@ -16,8 +19,10 @@ use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::trace::SdkTracerProvider;
+use std::sync::Arc;
 use testcontainers::{ContainerAsync, runners::AsyncRunner};
 use testcontainers_modules::redis::Redis;
+use tokio::sync::Mutex;
 use tokio::{
     net::{TcpListener, TcpStream},
     task,
@@ -114,7 +119,7 @@ async fn make_redis_store(port: u16) -> RedisStore {
 /// litelemetry サーバーをランダムポートで起動して、そのポート番号を返す
 async fn start_app_server(redis_port: u16) -> u16 {
     let redis = make_redis_store(redis_port).await;
-    let app = build_app(redis);
+    let app = build_app(StreamStore::Redis(redis));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
@@ -402,6 +407,240 @@ async fn test_e2e_all_signals_routed_correctly() {
     .await;
 
     // 各シグナルの Redis stream にデータが格納されていることを確認
+    let traces = app.wait_for_entries(Signal::Traces, 10, 1).await;
+    assert!(!traces.is_empty(), "traces stream にデータがあること");
+
+    let metrics = app.wait_for_entries(Signal::Metrics, 10, 1).await;
+    assert!(!metrics.is_empty(), "metrics stream にデータがあること");
+
+    let logs = app.wait_for_entries(Signal::Logs, 10, 1).await;
+    assert!(!logs.is_empty(), "logs stream にデータがあること");
+}
+
+// ─── Memory ストア (Docker 不要) ─────────────────────────────────────────────
+
+struct MemoryTestApp {
+    stream_store: MemoryStreamStore,
+    app_port: u16,
+}
+
+impl MemoryTestApp {
+    async fn start() -> Self {
+        let stream_store = MemoryStreamStore::new(100_000);
+        let viewer_store = MemoryViewerStore::new();
+        let runtime = ViewerRuntime::build(
+            ViewerStore::Memory(viewer_store.clone()),
+            StreamStore::Memory(stream_store.clone()),
+        )
+        .await
+        .unwrap();
+        let runtime = Arc::new(Mutex::new(runtime));
+        let app = build_app_with_services(
+            StreamStore::Memory(stream_store.clone()),
+            Some(ViewerStore::Memory(viewer_store)),
+            Some(runtime),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        wait_for_app_server(port).await;
+        MemoryTestApp {
+            stream_store,
+            app_port: port,
+        }
+    }
+
+    async fn read_entries(&self, signal: Signal, count: usize) -> Vec<(String, NormalizedEntry)> {
+        let store = self.stream_store.clone();
+        store.read_entries_since(signal, None, count).await.unwrap()
+    }
+
+    async fn wait_for_entries(
+        &self,
+        signal: Signal,
+        count: usize,
+        min_entries: usize,
+    ) -> Vec<(String, NormalizedEntry)> {
+        let mut entries = Vec::new();
+        for _ in 0..REDIS_POLL_ATTEMPTS {
+            entries = self.read_entries(signal, count).await;
+            if entries.len() >= min_entries {
+                return entries;
+            }
+            sleep(REDIS_POLL_INTERVAL).await;
+        }
+        entries
+    }
+
+    async fn assert_signal_has_payload(&self, signal: Signal) {
+        let entries = self.wait_for_entries(signal, 10, 1).await;
+        assert!(
+            !entries.is_empty(),
+            "memory の {} stream にデータが格納されること",
+            signal_name(signal)
+        );
+        assert_eq!(entries[0].1.signal, signal);
+        assert!(
+            !entries[0].1.payload.is_empty(),
+            "{} ペイロードが空でないこと",
+            signal_name(signal)
+        );
+    }
+}
+
+/// Memory: OTel SDK から span を送信してメモリストアに格納されることを確認
+#[tokio::test]
+async fn test_e2e_trace_stored_in_memory() {
+    let app = MemoryTestApp::start().await;
+    let app_port = app.app_port;
+
+    run_blocking_otel(move || {
+        let provider = build_tracer_provider(app_port);
+        {
+            let tracer = provider.tracer(E2E_INSTRUMENTATION_NAME);
+            let _span = tracer.start("test-operation");
+        }
+        provider.shutdown().unwrap();
+    })
+    .await;
+
+    app.assert_signal_has_payload(Signal::Traces).await;
+}
+
+/// Memory: 複数 span をメモリストアに格納
+#[tokio::test]
+async fn test_e2e_multiple_spans_each_stored_separately_memory() {
+    let app = MemoryTestApp::start().await;
+    let app_port = app.app_port;
+
+    run_blocking_otel(move || {
+        let provider = build_tracer_provider(app_port);
+        {
+            let tracer = provider.tracer(E2E_INSTRUMENTATION_NAME);
+            for i in 0..3_u32 {
+                let _span = tracer.start(format!("operation-{i}"));
+            }
+        }
+        provider.shutdown().unwrap();
+    })
+    .await;
+
+    let entries = app.wait_for_entries(Signal::Traces, 10, 3).await;
+    assert_eq!(
+        entries.len(),
+        3,
+        "SimpleSpanProcessor は span 1 件ごとに 1 リクエスト送るため 3 エントリになること"
+    );
+}
+
+/// Memory: ネストした span をメモリストアに格納
+#[tokio::test]
+async fn test_e2e_nested_spans_stored_memory() {
+    let app = MemoryTestApp::start().await;
+    let app_port = app.app_port;
+
+    run_blocking_otel(move || {
+        let provider = build_tracer_provider(app_port);
+        {
+            let tracer = provider.tracer(E2E_INSTRUMENTATION_NAME);
+            let parent_span = tracer
+                .span_builder("http-request")
+                .with_kind(SpanKind::Server)
+                .start(&tracer);
+            {
+                let cx = opentelemetry::Context::current_with_span(parent_span);
+                let _child = tracer
+                    .span_builder("db-query")
+                    .with_kind(SpanKind::Client)
+                    .start_with_context(&tracer, &cx);
+            }
+        }
+        provider.shutdown().unwrap();
+    })
+    .await;
+
+    let entries = app.wait_for_entries(Signal::Traces, 10, 2).await;
+    assert_eq!(
+        entries.len(),
+        2,
+        "親 span と子 span の 2 件が格納されること"
+    );
+}
+
+/// Memory: メトリクスをメモリストアに格納
+#[tokio::test]
+async fn test_e2e_metrics_stored_in_memory() {
+    let app = MemoryTestApp::start().await;
+    let app_port = app.app_port;
+
+    run_blocking_otel(move || {
+        let provider = build_meter_provider(app_port);
+        {
+            let meter = provider.meter(E2E_INSTRUMENTATION_NAME);
+            let counter = meter
+                .u64_counter("http.server.requests")
+                .with_description("HTTP リクエスト数")
+                .build();
+            counter.add(42, &[]);
+        }
+        provider.shutdown().unwrap();
+    })
+    .await;
+
+    app.assert_signal_has_payload(Signal::Metrics).await;
+}
+
+/// Memory: ログをメモリストアに格納
+#[tokio::test]
+async fn test_e2e_logs_stored_in_memory() {
+    let app = MemoryTestApp::start().await;
+    let app_port = app.app_port;
+
+    run_blocking_otel(move || {
+        let provider = build_logger_provider(app_port);
+        emit_log(&provider, Severity::Info, "INFO", "memory test log message");
+        provider.shutdown().unwrap();
+    })
+    .await;
+
+    app.assert_signal_has_payload(Signal::Logs).await;
+}
+
+/// Memory: traces/metrics/logs を同時送信してシグナルごとに振り分けられることを確認
+#[tokio::test]
+async fn test_e2e_all_signals_routed_correctly_memory() {
+    let app = MemoryTestApp::start().await;
+    let app_port = app.app_port;
+
+    run_blocking_otel(move || {
+        let trace_provider = build_tracer_provider(app_port);
+        {
+            let tracer = trace_provider.tracer(E2E_INSTRUMENTATION_NAME);
+            let _span = tracer.start("mixed-signal-memory");
+        }
+        trace_provider.shutdown().unwrap();
+
+        let meter_provider = build_meter_provider(app_port);
+        {
+            let meter = meter_provider.meter(E2E_INSTRUMENTATION_NAME);
+            let counter = meter.u64_counter("test.count.memory").build();
+            counter.add(1, &[]);
+        }
+        meter_provider.shutdown().unwrap();
+
+        let logger_provider = build_logger_provider(app_port);
+        emit_log(
+            &logger_provider,
+            Severity::Warn,
+            "WARN",
+            "mixed signal memory",
+        );
+        logger_provider.shutdown().unwrap();
+    })
+    .await;
+
     let traces = app.wait_for_entries(Signal::Traces, 10, 1).await;
     assert!(!traces.is_empty(), "traces stream にデータがあること");
 
