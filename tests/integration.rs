@@ -2357,3 +2357,867 @@ async fn test_metric_entries_contain_metric_name_and_value_memory() {
     );
     assert_eq!(payload["entries"][0]["metric_value"], 150.0);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ─── Dashboard CRUD テスト (Memory — Docker 不要) ────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn test_create_dashboard_and_list_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // viewer を 1件作成
+    let create_viewer_req = Request::builder()
+        .method("POST")
+        .uri("/api/viewers")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "Test Viewer", "signal": "traces" }).to_string(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(create_viewer_req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // ダッシュボード作成
+    let create_req = Request::builder()
+        .method("POST")
+        .uri("/api/dashboards")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "My Dashboard", "viewer_ids": [viewer_id], "columns": 2 }).to_string(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(create_req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let dash_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // ダッシュボード一覧確認
+    let list_resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/dashboards")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list_resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(list_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let dashboards = payload["dashboards"].as_array().unwrap();
+    assert!(dashboards.iter().any(|d| d["id"] == dash_id));
+}
+
+#[tokio::test]
+async fn test_create_dashboard_with_viewers_then_get_detail_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // trace データを ingest
+    let trace_req = Request::builder()
+        .method("POST")
+        .uri("/v1/traces")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(make_trace_payload("svc-a", "op-a")))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(trace_req).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    // viewer を作成
+    let create_viewer_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/viewers")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "name": "Traces", "signal": "traces" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_viewer_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_viewer_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // ダッシュボード作成
+    let create_dash_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/dashboards")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "name": "Trace Dashboard", "viewer_ids": [viewer_id] }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_dash_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_dash_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let dash_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // ダッシュボード詳細取得
+    let get_resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/dashboards/{dash_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(get_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["name"], "Trace Dashboard");
+    let panels = payload["panels"].as_array().unwrap();
+    assert_eq!(panels.len(), 1);
+    assert_eq!(panels[0]["viewer_id"], viewer_id);
+    assert!(panels[0]["viewer"].is_object());
+    assert_eq!(panels[0]["viewer"]["name"], "Traces");
+}
+
+#[tokio::test]
+async fn test_get_dashboard_not_found_returns_404_memory() {
+    let env = setup_memory_viewer_app().await;
+    let resp = env
+        .app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/dashboards/{}", Uuid::new_v4()))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_get_dashboard_invalid_uuid_returns_400_memory() {
+    let env = setup_memory_viewer_app().await;
+    let resp = env
+        .app
+        .oneshot(
+            Request::builder()
+                .uri("/api/dashboards/not-a-uuid")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_patch_dashboard_name_and_columns_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // 作成
+    let create_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/dashboards")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "name": "Original Name", "columns": 2 }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let dash_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // PATCH
+    let patch_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/dashboards/{dash_id}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "name": "Updated Name", "columns": 3 }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(patch_resp.status(), StatusCode::OK);
+
+    // GET で確認
+    let get_resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/dashboards/{dash_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(get_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["name"], "Updated Name");
+    assert_eq!(payload["columns"], 3);
+}
+
+#[tokio::test]
+async fn test_patch_dashboard_viewer_ids_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // viewer 1
+    let resp1 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/viewers")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "name": "V1", "signal": "traces" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body1 = axum::body::to_bytes(resp1.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let id1 = serde_json::from_slice::<serde_json::Value>(&body1).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // viewer 2
+    let resp2 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/viewers")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "name": "V2", "signal": "logs" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body2 = axum::body::to_bytes(resp2.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let id2 = serde_json::from_slice::<serde_json::Value>(&body2).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // ダッシュボード作成 (id1 のみ)
+    let create_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/dashboards")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "name": "D", "viewer_ids": [id1] }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let dash_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // PATCH で id2 に変更
+    let patch_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/dashboards/{dash_id}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "viewer_ids": [id2] }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(patch_resp.status(), StatusCode::OK);
+
+    // GET で確認
+    let get_resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/dashboards/{dash_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(get_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let viewer_ids: Vec<&str> = payload["panels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["viewer_id"].as_str().unwrap())
+        .collect();
+    assert!(viewer_ids.contains(&id2.as_str()));
+    assert!(!viewer_ids.contains(&id1.as_str()));
+}
+
+#[tokio::test]
+async fn test_patch_nonexistent_dashboard_returns_404_memory() {
+    let env = setup_memory_viewer_app().await;
+    let resp = env
+        .app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/dashboards/{}", Uuid::new_v4()))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(json!({ "name": "X" }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_delete_dashboard_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // 作成
+    let create_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/dashboards")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "name": "To Delete" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let dash_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // DELETE
+    let del_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/dashboards/{dash_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(del_resp.status(), StatusCode::NO_CONTENT);
+
+    // GET で 404
+    let get_resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/dashboards/{dash_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_delete_nonexistent_dashboard_returns_404_memory() {
+    let env = setup_memory_viewer_app().await;
+    let resp = env
+        .app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/dashboards/{}", Uuid::new_v4()))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_dashboard_skips_missing_viewers_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // 存在しない viewer_id を含むダッシュボードを作成
+    let nonexistent_viewer_id = Uuid::new_v4().to_string();
+    let create_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/dashboards")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "name": "Sparse Dashboard", "viewer_ids": [nonexistent_viewer_id] })
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let dash_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // GET detail — panels は空 (存在しない viewer_id はスキップ)
+    let get_resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/dashboards/{dash_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(get_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    // 存在しない viewer_id はスキップされるので panels は空
+    let panels = payload["panels"].as_array().unwrap();
+    assert!(panels.is_empty());
+}
+
+#[tokio::test]
+async fn test_create_dashboard_without_runtime_returns_503_memory() {
+    // ingest-only モード (viewer_store なし)
+    let app = build_app(StreamStore::Memory(MemoryStreamStore::new(100_000)));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/dashboards")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(json!({ "name": "D" }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ─── Dashboard CRUD テスト (Docker — requires Docker) ─────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_create_dashboard_and_list() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    // viewer を作成
+    let create_viewer_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/viewers")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "name": "Docker Viewer", "signal": "traces" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_viewer_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_viewer_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // ダッシュボード作成
+    let create_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/dashboards")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "name": "Docker Dashboard", "viewer_ids": [viewer_id], "columns": 2 })
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let dash_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 一覧確認
+    let list_resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/dashboards")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list_resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(list_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let dashboards = payload["dashboards"].as_array().unwrap();
+    assert!(dashboards.iter().any(|d| d["id"] == dash_id));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_get_dashboard_not_found_returns_404() {
+    let env = setup_viewer_app().await;
+    let resp = env
+        .app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/dashboards/{}", Uuid::new_v4()))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_get_dashboard_invalid_uuid_returns_400() {
+    let env = setup_viewer_app().await;
+    let resp = env
+        .app
+        .oneshot(
+            Request::builder()
+                .uri("/api/dashboards/not-a-uuid")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_patch_dashboard_name_and_columns() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    let create_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/dashboards")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "name": "Original", "columns": 2 }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let dash_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let patch_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/dashboards/{dash_id}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "name": "Patched", "columns": 4 }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(patch_resp.status(), StatusCode::OK);
+
+    let get_resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/dashboards/{dash_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(get_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["name"], "Patched");
+    assert_eq!(payload["columns"], 4);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_patch_nonexistent_dashboard_returns_404() {
+    let env = setup_viewer_app().await;
+    let resp = env
+        .app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/dashboards/{}", Uuid::new_v4()))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(json!({ "name": "X" }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_delete_dashboard() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    let create_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/dashboards")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "name": "To Delete" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let dash_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let del_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/dashboards/{dash_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(del_resp.status(), StatusCode::NO_CONTENT);
+
+    let get_resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/dashboards/{dash_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_delete_nonexistent_dashboard_returns_404() {
+    let env = setup_viewer_app().await;
+    let resp = env
+        .app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/dashboards/{}", Uuid::new_v4()))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_dashboard_skips_missing_viewers() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    let nonexistent_viewer_id = Uuid::new_v4().to_string();
+    let create_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/dashboards")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "name": "Sparse", "viewer_ids": [nonexistent_viewer_id] }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let dash_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let get_resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/dashboards/{dash_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(get_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(payload["panels"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_create_dashboard_without_runtime_returns_503() {
+    // ingest-only モード
+    let redis_container = testcontainers_modules::redis::Redis::default()
+        .start()
+        .await
+        .unwrap();
+    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
+    let redis = make_redis_store(redis_port).await;
+    let app = build_app(StreamStore::Redis(redis));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/dashboards")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(json!({ "name": "D" }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}

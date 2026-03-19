@@ -1,3 +1,14 @@
+CREATE TABLE IF NOT EXISTS dashboard_definitions (
+    id UUID PRIMARY KEY,
+    slug TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    layout_json JSONB NOT NULL DEFAULT '{}',
+    revision BIGINT NOT NULL,
+    enabled BOOLEAN NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS viewer_definitions (
     id UUID PRIMARY KEY,
     slug TEXT NOT NULL UNIQUE,
@@ -83,6 +94,15 @@ INSERT INTO viewer_definitions (
     2,
     '{"kind":"line","signal":"metrics"}'::jsonb,
     '{"default_view":"table"}'::jsonb,
+    1,
+    true
+) ON CONFLICT DO NOTHING;
+
+INSERT INTO dashboard_definitions (id, slug, name, layout_json, revision, enabled) VALUES (
+    'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+    'compose-seed-overview',
+    'Overview',
+    '{"columns":2,"panels":[{"viewer_id":"5d03b66e-e580-4ba2-af5c-2c25d4bb2f17","position":0},{"viewer_id":"ab419eb2-2f02-40e9-8cde-4e0e9d858e11","position":1},{"viewer_id":"2b146a3b-0dd6-4671-a5db-bc2cd2de6d5e","position":2}]}'::jsonb,
     1,
     true
 ) ON CONFLICT DO NOTHING;

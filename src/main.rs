@@ -1,6 +1,6 @@
 use litelemetry::server::{SharedViewerRuntime, build_app_with_services};
 use litelemetry::storage::memory::{
-    MemoryStreamStore, MemoryViewerStore, default_viewer_definitions,
+    MemoryStreamStore, MemoryViewerStore, default_dashboard_definitions, default_viewer_definitions,
 };
 use litelemetry::storage::postgres::PostgresStore;
 use litelemetry::storage::redis::RedisStore;
@@ -43,11 +43,19 @@ async fn main() {
             .unwrap_or(DEFAULT_MEMORY_STREAM_MAX_ENTRIES);
 
         let memory_viewer_store = MemoryViewerStore::new();
-        for def in default_viewer_definitions() {
+        let viewer_defs = default_viewer_definitions();
+        let viewer_ids: Vec<uuid::Uuid> = viewer_defs.iter().map(|d| d.id).collect();
+        for def in &viewer_defs {
             memory_viewer_store
-                .insert_viewer_definition(&def)
+                .insert_viewer_definition(def)
                 .await
                 .expect("failed to insert default viewer definition");
+        }
+        for dash in default_dashboard_definitions(&viewer_ids) {
+            memory_viewer_store
+                .insert_dashboard(&dash)
+                .await
+                .expect("failed to insert default dashboard");
         }
 
         let stream_store = StreamStore::Memory(MemoryStreamStore::new(max_entries));

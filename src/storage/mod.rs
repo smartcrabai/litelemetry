@@ -2,6 +2,7 @@ pub mod memory;
 pub mod postgres;
 pub mod redis;
 
+use crate::domain::dashboard::DashboardDefinition;
 use crate::domain::telemetry::{NormalizedEntry, Signal};
 use crate::domain::viewer::ViewerDefinition;
 use postgres::ViewerSnapshotRow;
@@ -116,6 +117,62 @@ impl ViewerStore {
                 .await
                 .map_err(StorageError::Postgres),
             ViewerStore::Memory(s) => s.upsert_snapshot(snapshot).await,
+        }
+    }
+
+    // ─── ダッシュボード CRUD ────────────────────────────────────────────────────
+
+    pub async fn insert_dashboard(
+        &self,
+        dashboard: &DashboardDefinition,
+    ) -> Result<(), StorageError> {
+        match self {
+            ViewerStore::Postgres(s) => s
+                .insert_dashboard(dashboard)
+                .await
+                .map_err(StorageError::Postgres),
+            ViewerStore::Memory(s) => s.insert_dashboard(dashboard).await,
+        }
+    }
+
+    pub async fn load_dashboards(&self) -> Result<Vec<DashboardDefinition>, StorageError> {
+        match self {
+            ViewerStore::Postgres(s) => s.load_dashboards().await.map_err(StorageError::Postgres),
+            ViewerStore::Memory(s) => s.load_dashboards().await,
+        }
+    }
+
+    pub async fn load_dashboard(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<DashboardDefinition>, StorageError> {
+        match self {
+            ViewerStore::Postgres(s) => s.load_dashboard(id).await.map_err(StorageError::Postgres),
+            ViewerStore::Memory(s) => s.load_dashboard(id).await,
+        }
+    }
+
+    pub async fn update_dashboard(
+        &self,
+        id: Uuid,
+        name: &str,
+        layout_json: &Value,
+    ) -> Result<bool, StorageError> {
+        match self {
+            ViewerStore::Postgres(s) => s
+                .update_dashboard(id, name, layout_json)
+                .await
+                .map_err(StorageError::Postgres),
+            ViewerStore::Memory(s) => s.update_dashboard(id, name, layout_json).await,
+        }
+    }
+
+    pub async fn delete_dashboard(&self, id: Uuid) -> Result<bool, StorageError> {
+        match self {
+            ViewerStore::Postgres(s) => {
+                s.delete_dashboard(id).await.map_err(StorageError::Postgres)
+            }
+            ViewerStore::Memory(s) => s.delete_dashboard(id).await,
         }
     }
 }
