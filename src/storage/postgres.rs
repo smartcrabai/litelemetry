@@ -1,3 +1,4 @@
+use crate::domain::dashboard::DashboardDefinition;
 use crate::domain::telemetry::SignalMask;
 use crate::domain::viewer::{ViewerDefinition, ViewerStatus};
 use serde_json::Value;
@@ -43,6 +44,18 @@ CREATE TABLE IF NOT EXISTS viewer_snapshots (
     generated_at TIMESTAMPTZ NOT NULL
 )";
 
+const CREATE_DASHBOARD_DEFINITIONS_SQL: &str = "
+CREATE TABLE IF NOT EXISTS dashboard_definitions (
+    id UUID PRIMARY KEY,
+    slug TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    layout_json JSONB NOT NULL DEFAULT '{}',
+    revision BIGINT NOT NULL,
+    enabled BOOLEAN NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+)";
+
 impl PostgresStore {
     pub async fn new(url: &str) -> Result<Self, sqlx::Error> {
         let pool = PgPool::connect(url).await?;
@@ -55,6 +68,9 @@ impl PostgresStore {
             .execute(&self.pool)
             .await?;
         sqlx::query(CREATE_VIEWER_SNAPSHOTS_SQL)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(CREATE_DASHBOARD_DEFINITIONS_SQL)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -214,5 +230,112 @@ impl PostgresStore {
         .await?;
 
         Ok(())
+    }
+
+    // ─── ダッシュボード CRUD ────────────────────────────────────────────────────
+
+    /// dashboard_definitions にレコードを挿入する
+    pub async fn insert_dashboard(
+        &self,
+        dashboard: &DashboardDefinition,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO dashboard_definitions
+             (id, slug, name, layout_json, revision, enabled)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(dashboard.id)
+        .bind(&dashboard.slug)
+        .bind(&dashboard.name)
+        .bind(&dashboard.layout_json)
+        .bind(dashboard.revision)
+        .bind(dashboard.enabled)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// 有効なダッシュボード定義を全件取得する
+    pub async fn load_dashboards(&self) -> Result<Vec<DashboardDefinition>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id, slug, name, layout_json, revision, enabled
+             FROM dashboard_definitions
+             WHERE enabled = true
+             ORDER BY created_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        use sqlx::Row;
+        Ok(rows
+            .into_iter()
+            .map(|row| DashboardDefinition {
+                id: row.get("id"),
+                slug: row.get("slug"),
+                name: row.get("name"),
+                layout_json: row.get("layout_json"),
+                revision: row.get("revision"),
+                enabled: row.get("enabled"),
+            })
+            .collect())
+    }
+
+    /// ダッシュボードを ID で取得する
+    pub async fn load_dashboard(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<DashboardDefinition>, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT id, slug, name, layout_json, revision, enabled
+             FROM dashboard_definitions
+             WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        use sqlx::Row;
+        Ok(row.map(|row| DashboardDefinition {
+            id: row.get("id"),
+            slug: row.get("slug"),
+            name: row.get("name"),
+            layout_json: row.get("layout_json"),
+            revision: row.get("revision"),
+            enabled: row.get("enabled"),
+        }))
+    }
+
+    /// ダッシュボードの name と layout_json を更新する (revision も +1)
+    pub async fn update_dashboard(
+        &self,
+        id: Uuid,
+        name: &str,
+        layout_json: &Value,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE dashboard_definitions
+             SET name = $1,
+                 layout_json = $2,
+                 revision = revision + 1,
+                 updated_at = NOW()
+             WHERE id = $3",
+        )
+        .bind(name)
+        .bind(layout_json)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// ダッシュボードを削除する
+    pub async fn delete_dashboard(&self, id: Uuid) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM dashboard_definitions WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(result.rows_affected() > 0)
     }
 }

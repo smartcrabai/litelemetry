@@ -1,3 +1,4 @@
+use crate::domain::dashboard::DashboardDefinition;
 use crate::domain::telemetry::{Signal, SignalMask};
 use crate::domain::viewer::{ViewerDefinition, ViewerStatus};
 use crate::ingest::decode::DecodeError;
@@ -194,6 +195,15 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         background: rgba(255, 255, 255, 0.82);
       }
 
+      input[type="checkbox"],
+      input[type="radio"] {
+        width: auto;
+        min-height: auto;
+        padding: 0;
+        border-radius: 4px;
+        flex-shrink: 0;
+      }
+
       input:focus-visible,
       select:focus-visible,
       button:focus-visible {
@@ -365,6 +375,231 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           width: 100%;
         }
       }
+      /* ─── Sidebar ─── */
+      .sidebar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 260px;
+        height: 100vh;
+        background: var(--panel-strong);
+        border-right: 1px solid var(--line);
+        backdrop-filter: blur(14px);
+        display: flex;
+        flex-direction: column;
+        z-index: 100;
+        overflow-y: auto;
+      }
+
+      .sidebar-brand {
+        padding: 20px 20px 12px;
+        font-family: "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+        font-size: 1.1rem;
+        font-weight: 700;
+        color: var(--accent);
+        border-bottom: 1px solid var(--line);
+      }
+
+      .sidebar-nav {
+        padding: 12px 0;
+        flex: 1;
+      }
+
+      .sidebar-item {
+        display: block;
+        padding: 9px 20px;
+        font-size: 0.9rem;
+        color: var(--ink);
+        text-decoration: none;
+        border-radius: 0;
+        cursor: pointer;
+        transition: background 0.12s;
+      }
+
+      .sidebar-item:hover {
+        background: var(--accent-soft);
+      }
+
+      .sidebar-item.active {
+        background: var(--teal-soft);
+        color: var(--teal);
+        font-weight: 600;
+      }
+
+      .sidebar-section-label {
+        padding: 12px 20px 4px;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .sidebar-dashboard-item {
+        display: block;
+        padding: 7px 20px 7px 28px;
+        font-size: 0.88rem;
+        color: var(--ink);
+        text-decoration: none;
+        cursor: pointer;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .sidebar-dashboard-item:hover {
+        background: var(--accent-soft);
+      }
+
+      .sidebar-dashboard-item.active {
+        background: var(--teal-soft);
+        color: var(--teal);
+        font-weight: 600;
+      }
+
+      .sidebar-new-btn {
+        margin: 8px 20px;
+        width: calc(100% - 40px);
+        font-size: 0.85rem;
+      }
+
+      .sidebar-toggle {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        z-index: 200;
+        display: none;
+        min-height: 36px;
+        padding: 0 12px;
+        font-size: 1.1rem;
+        line-height: 36px;
+      }
+
+      main.with-sidebar {
+        margin-left: 260px;
+      }
+
+      /* ─── Dashboard page ─── */
+      .dashboard-page-header {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        padding: 24px 0 8px;
+      }
+
+      .dashboard-page-header h2 {
+        font-size: clamp(1.4rem, 2vw, 2rem);
+        flex: 1;
+      }
+
+      .dashboard-grid {
+        display: grid;
+        grid-template-columns: repeat(var(--dash-cols, 2), 1fr);
+        gap: 18px;
+        padding-bottom: 44px;
+      }
+
+      .dashboard-panel {
+        padding: 20px;
+        border-radius: 24px;
+        border: 1px solid var(--line);
+        background: var(--panel);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(14px);
+        min-height: 200px;
+        display: grid;
+        gap: 12px;
+        align-content: start;
+      }
+
+      .dashboard-panel-title {
+        margin: 0;
+        font-size: 0.95rem;
+        font-weight: 700;
+        color: var(--accent);
+      }
+
+      .dashboard-panel-empty {
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+
+      .dashboard-panel table {
+        width: 100%;
+        font-size: 0.82rem;
+      }
+
+      @media (max-width: 640px) {
+        .sidebar {
+          transform: translateX(-100%);
+          transition: transform 0.22s ease;
+        }
+
+        .sidebar.open {
+          transform: translateX(0);
+        }
+
+        .sidebar-toggle {
+          display: block;
+        }
+
+        main.with-sidebar {
+          margin-left: 0;
+        }
+
+        .dashboard-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      /* ─── Modal ─── */
+      .modal-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(22, 35, 47, 0.38);
+        z-index: 300;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .modal-box {
+        background: var(--panel-strong);
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        padding: 28px;
+        width: min(480px, calc(100vw - 32px));
+        display: grid;
+        gap: 16px;
+        box-shadow: var(--shadow);
+      }
+
+      .modal-box h3 {
+        margin: 0;
+        font-size: 1.2rem;
+      }
+
+      .modal-actions {
+        display: flex;
+        gap: 10px;
+        justify-content: flex-end;
+      }
+
+      .viewer-checkbox-list {
+        display: grid;
+        gap: 6px;
+        max-height: 260px;
+        overflow-y: auto;
+        padding: 4px;
+      }
+
+      .viewer-checkbox-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 0.88rem;
+      }
+
       .chart-section {
         display: none;
       }
@@ -567,7 +802,18 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
   </head>
   <body>
-    <main>
+    <button id="sidebar-toggle" class="sidebar-toggle secondary" type="button">&#9776;</button>
+    <aside id="sidebar" class="sidebar">
+      <div class="sidebar-brand">litelemetry</div>
+      <nav class="sidebar-nav">
+        <a id="nav-viewers" class="sidebar-item active" href="#" data-page="viewers">Viewers</a>
+        <div class="sidebar-section-label">Dashboards</div>
+        <div id="dashboard-list"></div>
+        <button id="new-dashboard-button" class="secondary sidebar-new-btn" type="button">+ New Dashboard</button>
+      </nav>
+    </aside>
+    <main class="with-sidebar">
+      <div id="page-viewers">
       <section class="toolbar panel panel-strong">
         <div class="toolbar-row">
           <select id="viewer-signal-select" data-testid="viewer-signal-select" name="viewer-signal">
@@ -661,6 +907,15 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           </div>
         </div>
       </section>
+      </div><!-- #page-viewers -->
+
+      <div id="page-dashboard" hidden>
+        <div class="dashboard-page-header">
+          <h2 id="dashboard-title"></h2>
+          <button id="dashboard-settings-button" class="secondary" type="button" hidden>Settings</button>
+        </div>
+        <div id="dashboard-grid" class="dashboard-grid"></div>
+      </div><!-- #page-dashboard -->
     </main>
 
     <script>
@@ -1255,7 +1510,484 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
       syncCreateForm();
       refreshViewers({ silent: true });
-      window.setInterval(() => refreshViewers({ silent: true }), 1500);
+      window.setInterval(() => refreshViewers({ silent: true }), 5000);
+
+      // ─── Sidebar & Navigation ────────────────────────────────────────────
+      const sidebarToggle = document.getElementById('sidebar-toggle');
+      const sidebar = document.getElementById('sidebar');
+      const navViewers = document.getElementById('nav-viewers');
+      const newDashboardButton = document.getElementById('new-dashboard-button');
+      const dashboardListEl = document.getElementById('dashboard-list');
+      const pageViewers = document.getElementById('page-viewers');
+      const pageDashboard = document.getElementById('page-dashboard');
+      const dashboardTitle = document.getElementById('dashboard-title');
+      const dashboardGrid = document.getElementById('dashboard-grid');
+      const dashboardSettingsButton = document.getElementById('dashboard-settings-button');
+
+      let currentPage = 'viewers';
+      let currentDashboardId = null;
+      let dashboardPanelCharts = [];
+
+      sidebarToggle.addEventListener('click', () => {
+        sidebar.classList.toggle('open');
+      });
+
+      document.addEventListener('click', (e) => {
+        if (sidebar.classList.contains('open') &&
+            !sidebar.contains(e.target) &&
+            e.target !== sidebarToggle) {
+          sidebar.classList.remove('open');
+        }
+      });
+
+      function navigateTo(page, dashboardId) {
+        currentPage = page;
+        currentDashboardId = dashboardId || null;
+
+        pageViewers.hidden = page !== 'viewers';
+        pageDashboard.hidden = page !== 'dashboard';
+
+        navViewers.classList.toggle('active', page === 'viewers');
+
+        document.querySelectorAll('.sidebar-dashboard-item').forEach(el => {
+          el.classList.toggle('active', el.dataset.id === dashboardId);
+        });
+
+        if (page === 'dashboard' && dashboardId) {
+          loadDashboard(dashboardId);
+        }
+
+        sidebar.classList.remove('open');
+      }
+
+      navViewers.addEventListener('click', (e) => {
+        e.preventDefault();
+        navigateTo('viewers');
+      });
+
+      // ─── Dashboard list in sidebar ───────────────────────────────────────
+
+      async function refreshDashboardList() {
+        try {
+          const resp = await fetch('/api/dashboards', { headers: { accept: 'application/json' } });
+          if (!resp.ok) return;
+          const data = await resp.json();
+          renderDashboardList(data.dashboards);
+        } catch (_) { /* silent */ }
+      }
+
+      function renderDashboardList(dashboards) {
+        dashboardListEl.replaceChildren();
+        for (const d of dashboards) {
+          const a = document.createElement('a');
+          a.className = 'sidebar-dashboard-item';
+          a.href = '#';
+          a.dataset.id = d.id;
+          a.textContent = d.name;
+          if (d.id === currentDashboardId) a.classList.add('active');
+          a.addEventListener('click', (e) => {
+            e.preventDefault();
+            navigateTo('dashboard', d.id);
+          });
+          dashboardListEl.appendChild(a);
+        }
+      }
+
+      // ─── Dashboard detail ────────────────────────────────────────────────
+
+      function destroyPanelCharts() {
+        for (const c of dashboardPanelCharts) {
+          try { c.destroy(); } catch (_) {}
+        }
+        dashboardPanelCharts = [];
+      }
+
+      async function loadDashboard(id, { refresh = false } = {}) {
+        if (!refresh) {
+          destroyPanelCharts();
+          dashboardGrid.replaceChildren();
+          dashboardTitle.textContent = 'Loading...';
+          dashboardSettingsButton.hidden = true;
+        }
+
+        try {
+          const resp = await fetch(`/api/dashboards/${id}`, { headers: { accept: 'application/json' } });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const data = await resp.json();
+
+          const sorted = [...data.panels].sort((a, b) => a.position - b.position);
+
+          destroyPanelCharts();
+          dashboardGrid.replaceChildren();
+          dashboardTitle.textContent = data.name;
+          dashboardSettingsButton.hidden = false;
+          dashboardGrid.style.setProperty('--dash-cols', String(data.columns || 2));
+
+          for (const panel of sorted) {
+            dashboardGrid.appendChild(buildPanelEl(panel));
+          }
+
+          if (!sorted.length) {
+            const empty = document.createElement('div');
+            empty.className = 'dashboard-panel';
+            empty.innerHTML = '<p class="dashboard-panel-empty">No viewers in this dashboard yet. Use Settings to add viewers.</p>';
+            dashboardGrid.appendChild(empty);
+          }
+        } catch (err) {
+          if (!refresh) {
+            dashboardTitle.textContent = 'Error';
+            const errEl = document.createElement('div');
+            errEl.className = 'dashboard-panel';
+            const msgEl = document.createElement('p');
+            msgEl.className = 'dashboard-panel-empty';
+            msgEl.textContent = `Failed to load: ${err.message}`;
+            errEl.appendChild(msgEl);
+            dashboardGrid.appendChild(errEl);
+          }
+        }
+      }
+
+      function buildPanelEl(panel) {
+        const div = document.createElement('div');
+        div.className = 'dashboard-panel';
+
+        const title = document.createElement('h4');
+        title.className = 'dashboard-panel-title';
+
+        if (!panel.viewer) {
+          title.textContent = truncateId(panel.viewer_id);
+          div.appendChild(title);
+          const msg = document.createElement('p');
+          msg.className = 'dashboard-panel-empty';
+          msg.textContent = 'Viewer not found.';
+          div.appendChild(msg);
+          return div;
+        }
+
+        const v = panel.viewer;
+        title.textContent = v.name;
+        div.appendChild(title);
+
+        const chartType = v.chart_type || 'table';
+        const isTraces = v.signals.includes('traces');
+        const isMetrics = v.signals.includes('metrics');
+
+        if (chartType !== 'table' && isMetrics && v.entries.length) {
+          const canvas = document.createElement('canvas');
+          canvas.style.maxHeight = '220px';
+          div.appendChild(canvas);
+          const chart = renderPanelChart(chartType, v.entries, v.lookback_ms, canvas);
+          if (chart) dashboardPanelCharts.push(chart);
+        } else if (isTraces && v.traces && v.traces.length) {
+          renderPanelTraceTable(div, v.traces);
+        } else {
+          renderPanelEntriesTable(div, v.entries);
+        }
+
+        return div;
+      }
+
+      function renderPanelChart(chartType, entries, lookbackMs, canvas) {
+        const data = buildChartData(entries, lookbackMs);
+        if (!data.datasets.length) return null;
+        const isStacked = chartType === 'stacked_bar';
+        return new Chart(canvas, {
+          type: isStacked ? 'bar' : 'line',
+          data,
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10 } } } },
+            scales: {
+              x: { stacked: isStacked, ticks: { font: { size: 9 } } },
+              y: { stacked: isStacked, beginAtZero: true, ticks: { font: { size: 9 } } },
+            },
+          },
+        });
+      }
+
+      function buildScrollablePanelTable(container, headHtml, renderRows) {
+        const wrap = document.createElement('div');
+        wrap.style.overflow = 'auto';
+        wrap.style.maxHeight = '220px';
+        const table = document.createElement('table');
+        table.style.width = '100%';
+        table.style.fontSize = '0.8rem';
+        const thead = document.createElement('thead');
+        thead.innerHTML = headHtml;
+        const tbody = document.createElement('tbody');
+        renderRows(tbody);
+        table.appendChild(thead);
+        table.appendChild(tbody);
+        wrap.appendChild(table);
+        container.appendChild(wrap);
+      }
+
+      function renderPanelTraceTable(container, traces) {
+        if (!traces.length) {
+          const p = document.createElement('p');
+          p.className = 'dashboard-panel-empty';
+          p.textContent = 'No traces.';
+          container.appendChild(p);
+          return;
+        }
+        buildScrollablePanelTable(container,
+          '<tr><th>Trace ID</th><th>Root Span</th><th>Spans</th><th>Status</th></tr>',
+          (tbody) => {
+            for (const t of traces.slice(0, 20)) {
+              const row = document.createElement('tr');
+              if (t.has_error) row.style.background = 'var(--danger-soft)';
+              appendTableCell(row, truncateId(t.trace_id));
+              appendTableCell(row, t.root_span_name || '-');
+              appendTableCell(row, String(t.span_count));
+              const sc = document.createElement('td');
+              sc.textContent = t.has_error ? 'error' : 'ok';
+              if (t.has_error) sc.className = 'error-inline';
+              row.appendChild(sc);
+              tbody.appendChild(row);
+            }
+          });
+      }
+
+      function renderPanelEntriesTable(container, entries) {
+        if (!entries.length) {
+          const p = document.createElement('p');
+          p.className = 'dashboard-panel-empty';
+          p.textContent = 'No entries.';
+          container.appendChild(p);
+          return;
+        }
+        buildScrollablePanelTable(container,
+          '<tr><th>Time</th><th>Signal</th><th>Service</th><th>Preview</th></tr>',
+          (tbody) => {
+            for (const e of entries.slice(0, 20)) {
+              const row = document.createElement('tr');
+              appendTableCell(row, new Date(e.observed_at).toLocaleTimeString());
+              appendTableCell(row, e.signal);
+              appendTableCell(row, e.service_name || '-');
+              const td = document.createElement('td');
+              const code = document.createElement('code');
+              code.style.fontSize = '0.75rem';
+              code.textContent = e.payload_preview;
+              td.appendChild(code);
+              row.appendChild(td);
+              tbody.appendChild(row);
+            }
+          });
+      }
+
+      // ─── Dashboard settings modal ────────────────────────────────────────
+
+      dashboardSettingsButton.addEventListener('click', () => {
+        if (!currentDashboardId) return;
+        openDashboardSettings(currentDashboardId);
+      });
+
+      async function openDashboardSettings(dashboardId) {
+        // Fetch current dashboard and all viewers
+        const [dashResp, viewersResp] = await Promise.all([
+          fetch(`/api/dashboards/${dashboardId}`, { headers: { accept: 'application/json' } }),
+          fetch('/api/viewers', { headers: { accept: 'application/json' } }),
+        ]);
+        if (!dashResp.ok || !viewersResp.ok) return;
+        const dash = await dashResp.json();
+        const { viewers } = await viewersResp.json();
+        const currentViewerIds = new Set(dash.panels.map(p => p.viewer_id));
+
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+
+        const box = document.createElement('div');
+        box.className = 'modal-box';
+        box.innerHTML = `<h3>Dashboard Settings</h3>`;
+
+        const nameLabel = document.createElement('label');
+        nameLabel.textContent = 'Name';
+        const nameInput = document.createElement('input');
+        nameInput.value = dash.name;
+        nameInput.maxLength = 80;
+        nameLabel.appendChild(nameInput);
+        box.appendChild(nameLabel);
+
+        const colLabel = document.createElement('label');
+        colLabel.textContent = 'Columns';
+        const colInput = document.createElement('input');
+        colInput.type = 'number';
+        colInput.min = '1';
+        colInput.max = '4';
+        colInput.value = String(dash.columns || 2);
+        colLabel.appendChild(colInput);
+        box.appendChild(colLabel);
+
+        const checkLabel = document.createElement('div');
+        checkLabel.textContent = 'Viewers';
+        box.appendChild(checkLabel);
+
+        const checkList = document.createElement('div');
+        checkList.className = 'viewer-checkbox-list';
+        for (const v of viewers) {
+          const item = document.createElement('label');
+          item.className = 'viewer-checkbox-item';
+          const cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.value = v.id;
+          cb.checked = currentViewerIds.has(v.id);
+          item.appendChild(cb);
+          item.appendChild(document.createTextNode(v.name));
+          checkList.appendChild(item);
+        }
+        box.appendChild(checkList);
+
+        const actions = document.createElement('div');
+        actions.className = 'modal-actions';
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'secondary';
+        cancelBtn.type = 'button';
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.addEventListener('click', () => overlay.remove());
+
+        const saveBtn = document.createElement('button');
+        saveBtn.className = 'primary';
+        saveBtn.type = 'button';
+        saveBtn.textContent = 'Save';
+        saveBtn.addEventListener('click', async () => {
+          const name = nameInput.value.trim();
+          const columns = parseInt(colInput.value, 10);
+          const viewer_ids = [...checkList.querySelectorAll('input:checked')].map(cb => cb.value);
+          if (!name) { nameInput.focus(); return; }
+          saveBtn.disabled = true;
+          try {
+            const r = await fetch(`/api/dashboards/${dashboardId}`, {
+              method: 'PATCH',
+              headers: { 'content-type': 'application/json', accept: 'application/json' },
+              body: JSON.stringify({ name, columns, viewer_ids }),
+            });
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            overlay.remove();
+            await refreshDashboardList();
+            loadDashboard(dashboardId);
+          } catch (err) {
+            saveBtn.disabled = false;
+          }
+        });
+
+        actions.appendChild(cancelBtn);
+        actions.appendChild(saveBtn);
+        box.appendChild(actions);
+        overlay.appendChild(box);
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+        document.body.appendChild(overlay);
+      }
+
+      // ─── New Dashboard modal ─────────────────────────────────────────────
+
+      newDashboardButton.addEventListener('click', () => openNewDashboardModal());
+
+      async function openNewDashboardModal() {
+        const viewersResp = await fetch('/api/viewers', { headers: { accept: 'application/json' } });
+        const { viewers } = viewersResp.ok ? await viewersResp.json() : { viewers: [] };
+
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+
+        const box = document.createElement('div');
+        box.className = 'modal-box';
+        box.innerHTML = '<h3>New Dashboard</h3>';
+
+        const nameLabel = document.createElement('label');
+        nameLabel.textContent = 'Name';
+        const nameInput = document.createElement('input');
+        nameInput.placeholder = 'My Dashboard';
+        nameInput.maxLength = 80;
+        nameLabel.appendChild(nameInput);
+        box.appendChild(nameLabel);
+
+        const colLabel = document.createElement('label');
+        colLabel.textContent = 'Columns';
+        const colInput = document.createElement('input');
+        colInput.type = 'number';
+        colInput.min = '1';
+        colInput.max = '4';
+        colInput.value = '2';
+        colLabel.appendChild(colInput);
+        box.appendChild(colLabel);
+
+        let checkList = null;
+        if (viewers.length) {
+          const checkLabel = document.createElement('div');
+          checkLabel.textContent = 'Viewers (optional)';
+          box.appendChild(checkLabel);
+
+          checkList = document.createElement('div');
+          checkList.className = 'viewer-checkbox-list';
+          for (const v of viewers) {
+            const item = document.createElement('label');
+            item.className = 'viewer-checkbox-item';
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.value = v.id;
+            item.appendChild(cb);
+            item.appendChild(document.createTextNode(v.name));
+            checkList.appendChild(item);
+          }
+          box.appendChild(checkList);
+        }
+
+        const actions = document.createElement('div');
+        actions.className = 'modal-actions';
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'secondary';
+        cancelBtn.type = 'button';
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.addEventListener('click', () => overlay.remove());
+
+        const createBtn = document.createElement('button');
+        createBtn.className = 'primary';
+        createBtn.type = 'button';
+        createBtn.textContent = 'Create';
+        createBtn.addEventListener('click', async () => {
+          const name = nameInput.value.trim();
+          const columns = parseInt(colInput.value, 10);
+          const viewer_ids = checkList ? [...checkList.querySelectorAll('input:checked')].map(cb => cb.value) : [];
+          if (!name) { nameInput.focus(); return; }
+          createBtn.disabled = true;
+          try {
+            const r = await fetch('/api/dashboards', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json', accept: 'application/json' },
+              body: JSON.stringify({ name, columns, viewer_ids }),
+            });
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const { id } = await r.json();
+            overlay.remove();
+            await refreshDashboardList();
+            navigateTo('dashboard', id);
+          } catch (err) {
+            createBtn.disabled = false;
+          }
+        });
+
+        actions.appendChild(cancelBtn);
+        actions.appendChild(createBtn);
+        box.appendChild(actions);
+
+        overlay.appendChild(box);
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+        document.body.appendChild(overlay);
+        nameInput.focus();
+      }
+
+      // ─── Polling ─────────────────────────────────────────────────────────
+
+      refreshDashboardList();
+      window.setInterval(() => {
+        refreshDashboardList();
+        if (currentPage === 'dashboard' && currentDashboardId) {
+          loadDashboard(currentDashboardId, { refresh: true });
+        }
+      }, 30000);
     </script>
   </body>
 </html>
@@ -1277,6 +2009,12 @@ pub type SharedViewerRuntime = Arc<Mutex<ViewerRuntime>>;
 impl AppState {
     fn require_viewer_runtime(&self) -> Result<&SharedViewerRuntime, StatusCode> {
         self.viewer_runtime
+            .as_ref()
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)
+    }
+
+    fn require_viewer_store(&self) -> Result<&crate::storage::ViewerStore, StatusCode> {
+        self.viewer_store
             .as_ref()
             .ok_or(StatusCode::SERVICE_UNAVAILABLE)
     }
@@ -1387,6 +2125,16 @@ pub fn build_app_with_services(
         .route("/healthz", get(healthz))
         .route("/api/viewers", get(list_viewers).post(create_viewer))
         .route("/api/viewers/{id}", get(get_viewer).patch(patch_viewer))
+        .route(
+            "/api/dashboards",
+            get(list_dashboards).post(create_dashboard),
+        )
+        .route(
+            "/api/dashboards/{id}",
+            get(get_dashboard)
+                .patch(patch_dashboard)
+                .delete(delete_dashboard),
+        )
         .route("/v1/traces", post(ingest_traces))
         .route("/v1/metrics", post(ingest_metrics))
         .route("/v1/logs", post(ingest_logs))
@@ -1551,6 +2299,280 @@ async fn patch_viewer(
 
     Ok(StatusCode::OK)
 }
+
+// ─── ダッシュボード API ─────────────────────────────────────────────────────
+
+fn default_columns() -> u32 {
+    2
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateDashboardRequest {
+    name: String,
+    #[serde(default)]
+    viewer_ids: Vec<Uuid>,
+    #[serde(default = "default_columns")]
+    columns: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateDashboardResponse {
+    id: Uuid,
+}
+
+#[derive(Debug, Serialize)]
+struct DashboardListItem {
+    id: Uuid,
+    slug: String,
+    name: String,
+    panel_count: usize,
+    viewer_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+struct DashboardListResponse {
+    dashboards: Vec<DashboardListItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct DashboardPanel {
+    viewer_id: Uuid,
+    position: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    viewer: Option<ViewerSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct DashboardDetailResponse {
+    id: Uuid,
+    slug: String,
+    name: String,
+    columns: u32,
+    panels: Vec<DashboardPanel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchDashboardRequest {
+    name: Option<String>,
+    viewer_ids: Option<Vec<Uuid>>,
+    columns: Option<u32>,
+}
+
+fn dashboard_panels_from_layout(layout_json: &serde_json::Value) -> Vec<(Uuid, usize)> {
+    let Some(panels) = layout_json.get("panels").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    panels
+        .iter()
+        .filter_map(|p| {
+            let viewer_id = p
+                .get("viewer_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<Uuid>().ok())?;
+            let position = p.get("position").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            Some((viewer_id, position))
+        })
+        .collect()
+}
+
+use crate::domain::dashboard::build_layout_json;
+
+async fn list_dashboards(
+    State(state): State<AppState>,
+) -> Result<Json<DashboardListResponse>, StatusCode> {
+    let store = state.require_viewer_store()?;
+    let dashboards = store.load_dashboards().await.map_err(|error| {
+        tracing::error!("load_dashboards failed: {error}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let items = dashboards
+        .into_iter()
+        .map(|d| {
+            let panels = dashboard_panels_from_layout(&d.layout_json);
+            let viewer_ids: Vec<Uuid> = panels.iter().map(|(id, _)| *id).collect();
+            DashboardListItem {
+                id: d.id,
+                slug: d.slug,
+                name: d.name,
+                panel_count: viewer_ids.len(),
+                viewer_ids,
+            }
+        })
+        .collect();
+
+    Ok(Json(DashboardListResponse { dashboards: items }))
+}
+
+async fn create_dashboard(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateDashboardRequest>,
+) -> Result<(StatusCode, Json<CreateDashboardResponse>), StatusCode> {
+    let store = state.require_viewer_store()?;
+
+    let name = payload.name.trim();
+    if name.is_empty() || name.chars().count() > 80 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let id = Uuid::new_v4();
+    let layout_json = build_layout_json(&payload.viewer_ids, payload.columns);
+    let dashboard = DashboardDefinition {
+        id,
+        slug: format!("dashboard-{}", id.simple()),
+        name: name.to_string(),
+        layout_json,
+        revision: 1,
+        enabled: true,
+    };
+
+    store.insert_dashboard(&dashboard).await.map_err(|error| {
+        tracing::error!("insert_dashboard failed: {error}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok((StatusCode::CREATED, Json(CreateDashboardResponse { id })))
+}
+
+async fn get_dashboard(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<DashboardDetailResponse>, StatusCode> {
+    let store = state.require_viewer_store()?;
+
+    let dashboard = store
+        .load_dashboard(id)
+        .await
+        .map_err(|error| {
+            tracing::error!("load_dashboard failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let columns = dashboard
+        .layout_json
+        .get("columns")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(2) as u32;
+
+    let panel_entries = dashboard_panels_from_layout(&dashboard.layout_json);
+
+    // ViewerRuntime からパネルの viewer データを取得 (runtime がない場合は空)
+    let panels = if let Some(runtime) = state.viewer_runtime.as_ref() {
+        let rt = runtime.lock().await;
+        let viewers = rt.viewers();
+        panel_entries
+            .into_iter()
+            .map(|(viewer_id, position)| {
+                let viewer = viewers
+                    .iter()
+                    .find(|(v, _)| v.definition().id == viewer_id)
+                    .map(|(v, state)| viewer_summary(v, state, true));
+                DashboardPanel {
+                    viewer_id,
+                    position,
+                    viewer,
+                }
+            })
+            .collect()
+    } else {
+        panel_entries
+            .into_iter()
+            .map(|(viewer_id, position)| DashboardPanel {
+                viewer_id,
+                position,
+                viewer: None,
+            })
+            .collect()
+    };
+
+    Ok(Json(DashboardDetailResponse {
+        id: dashboard.id,
+        slug: dashboard.slug,
+        name: dashboard.name,
+        columns,
+        panels,
+    }))
+}
+
+async fn patch_dashboard(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<PatchDashboardRequest>,
+) -> Result<StatusCode, StatusCode> {
+    let store = state.require_viewer_store()?;
+
+    let current = store
+        .load_dashboard(id)
+        .await
+        .map_err(|error| {
+            tracing::error!("load_dashboard failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let new_name = payload
+        .name
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or(&current.name);
+    if new_name.is_empty() || new_name.chars().count() > 80 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let new_layout = if payload.viewer_ids.is_some() || payload.columns.is_some() {
+        let current_columns = current
+            .layout_json
+            .get("columns")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(2) as u32;
+        let columns = payload.columns.unwrap_or(current_columns);
+
+        let current_panels = dashboard_panels_from_layout(&current.layout_json);
+        let viewer_ids: Vec<Uuid> = if let Some(ids) = payload.viewer_ids {
+            ids
+        } else {
+            current_panels.into_iter().map(|(id, _)| id).collect()
+        };
+        build_layout_json(&viewer_ids, columns)
+    } else {
+        current.layout_json.clone()
+    };
+
+    let updated = store
+        .update_dashboard(id, new_name, &new_layout)
+        .await
+        .map_err(|error| {
+            tracing::error!("update_dashboard failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    if !updated {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    Ok(StatusCode::OK)
+}
+
+async fn delete_dashboard(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, StatusCode> {
+    let store = state.require_viewer_store()?;
+
+    let deleted = store.delete_dashboard(id).await.map_err(|error| {
+        tracing::error!("delete_dashboard failed: {error}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    if !deleted {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ─── Ingest ─────────────────────────────────────────────────────────────────
 
 async fn ingest_traces(
     State(state): State<AppState>,
@@ -2247,6 +3269,26 @@ mod tests {
         assert!(html.contains("Loading viewers"));
         assert!(html.contains("status-box"));
         assert!(html.contains("viewer-table"));
+    }
+
+    #[tokio::test]
+    async fn test_root_returns_dashboard_elements() {
+        let app = Router::new().route("/", get(index));
+
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(html.contains("sidebar"));
+        assert!(html.contains("nav-viewers"));
+        assert!(html.contains("new-dashboard-button"));
+        assert!(html.contains("page-dashboard"));
+        assert!(html.contains("dashboard-grid"));
+        assert!(html.contains("sidebar-toggle"));
     }
 
     #[tokio::test]

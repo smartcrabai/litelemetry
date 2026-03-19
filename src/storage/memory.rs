@@ -1,3 +1,4 @@
+use crate::domain::dashboard::DashboardDefinition;
 use crate::domain::telemetry::{NormalizedEntry, Signal};
 use crate::domain::viewer::ViewerDefinition;
 use crate::storage::StorageError;
@@ -87,6 +88,7 @@ impl MemoryStreamStore {
 struct MemoryViewerData {
     definitions: Vec<ViewerDefinition>,
     snapshots: HashMap<Uuid, ViewerSnapshotRow>,
+    dashboards: Vec<DashboardDefinition>,
 }
 
 impl MemoryViewerData {
@@ -94,6 +96,7 @@ impl MemoryViewerData {
         Self {
             definitions: Vec::new(),
             snapshots: HashMap::new(),
+            dashboards: Vec::new(),
         }
     }
 }
@@ -170,6 +173,59 @@ impl MemoryViewerStore {
         guard.snapshots.insert(snapshot.viewer_id, snapshot.clone());
         Ok(())
     }
+
+    // ─── ダッシュボード CRUD ────────────────────────────────────────────────────
+
+    pub async fn insert_dashboard(
+        &self,
+        dashboard: &DashboardDefinition,
+    ) -> Result<(), StorageError> {
+        let mut guard = self.inner.lock().await;
+        guard.dashboards.push(dashboard.clone());
+        Ok(())
+    }
+
+    pub async fn load_dashboards(&self) -> Result<Vec<DashboardDefinition>, StorageError> {
+        let guard = self.inner.lock().await;
+        Ok(guard
+            .dashboards
+            .iter()
+            .filter(|d| d.enabled)
+            .cloned()
+            .collect())
+    }
+
+    pub async fn load_dashboard(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<DashboardDefinition>, StorageError> {
+        let guard = self.inner.lock().await;
+        Ok(guard.dashboards.iter().find(|d| d.id == id).cloned())
+    }
+
+    pub async fn update_dashboard(
+        &self,
+        id: Uuid,
+        name: &str,
+        layout_json: &Value,
+    ) -> Result<bool, StorageError> {
+        let mut guard = self.inner.lock().await;
+        if let Some(d) = guard.dashboards.iter_mut().find(|d| d.id == id) {
+            d.name = name.to_string();
+            d.layout_json = layout_json.clone();
+            d.revision += 1;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub async fn delete_dashboard(&self, id: Uuid) -> Result<bool, StorageError> {
+        let mut guard = self.inner.lock().await;
+        let before = guard.dashboards.len();
+        guard.dashboards.retain(|d| d.id != id);
+        Ok(guard.dashboards.len() < before)
+    }
 }
 
 /// スタンドアロンモードで起動時に挿入するデフォルト viewer 定義
@@ -213,4 +269,16 @@ pub fn default_viewer_definitions() -> Vec<ViewerDefinition> {
             enabled: true,
         },
     ]
+}
+
+/// スタンドアロンモードで起動時に挿入するデフォルトダッシュボード定義
+pub fn default_dashboard_definitions(viewer_ids: &[Uuid]) -> Vec<DashboardDefinition> {
+    vec![DashboardDefinition {
+        id: Uuid::new_v4(),
+        slug: "overview".to_string(),
+        name: "Overview".to_string(),
+        layout_json: crate::domain::dashboard::build_layout_json(viewer_ids, 2),
+        revision: 1,
+        enabled: true,
+    }]
 }
