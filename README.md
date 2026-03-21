@@ -15,13 +15,13 @@ A lightweight, OpenTelemetry (OTLP/HTTP) compatible telemetry collection and vis
 ```
 OTLP/HTTP Client
        │
-       ▼
+       v
   ┌─────────┐     ┌───────────────┐     ┌──────────────┐
   │  Axum   │────▶│ Redis Streams │────▶│ViewerRuntime │
   │ Server  │     │ (per signal)  │     │  (fan-out)   │
   └─────────┘     └───────────────┘     └──────┬───────┘
                                                │
-                                        ┌──────▼───────┐
+                                        ┌──────v───────┐
                                         │  PostgreSQL   │
                                         │ (definitions, │
                                         │  snapshots)   │
