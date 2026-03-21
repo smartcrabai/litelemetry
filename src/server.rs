@@ -55,6 +55,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         --teal-soft: rgba(13, 109, 98, 0.12);
         --danger-soft: rgba(184, 64, 52, 0.14);
         --shadow: 0 28px 70px rgba(22, 35, 47, 0.12);
+        --sidebar-width: 260px;
       }
 
       * {
@@ -380,7 +381,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         position: fixed;
         top: 0;
         left: 0;
-        width: 260px;
+        width: var(--sidebar-width);
         height: 100vh;
         background: var(--panel-strong);
         border-right: 1px solid var(--line);
@@ -476,7 +477,8 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       }
 
       main.with-sidebar {
-        margin-left: 260px;
+        margin-left: var(--sidebar-width);
+        width: min(1200px, calc(100% - var(--sidebar-width) - 32px));
       }
 
       /* --- Dashboard page --- */
@@ -545,6 +547,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
         main.with-sidebar {
           margin-left: 0;
+          width: min(1200px, calc(100% - 32px));
         }
 
         .dashboard-grid {
@@ -1012,6 +1015,31 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
       const VIEWER_PLACEHOLDERS = { traces: 'checkout traces', metrics: 'orders metrics', logs: 'billing logs' };
       const CHART_TYPE_LABELS = { table: 'Table', stacked_bar: 'Stacked Bar', line: 'Line' };
+      const MIN_DASHBOARD_COLUMNS = 1;
+      const MAX_DASHBOARD_COLUMNS = 4;
+
+      function readViewerChartType(viewer) {
+        const chartType = viewer.chart_type;
+        if (typeof chartType !== 'string' || !(chartType in CHART_TYPE_LABELS)) {
+          throw new Error('Viewer payload is missing a valid chart type.');
+        }
+        return chartType;
+      }
+
+      function readDashboardColumns(value) {
+        if (!Number.isInteger(value) || value < MIN_DASHBOARD_COLUMNS || value > MAX_DASHBOARD_COLUMNS) {
+          throw new Error(`Dashboard columns must be between ${MIN_DASHBOARD_COLUMNS} and ${MAX_DASHBOARD_COLUMNS}.`);
+        }
+        return value;
+      }
+
+      function parseDashboardColumnsInput(input) {
+        const value = Number(input.value);
+        if (!Number.isInteger(value) || value < MIN_DASHBOARD_COLUMNS || value > MAX_DASHBOARD_COLUMNS) {
+          return null;
+        }
+        return value;
+      }
 
       function formatStatus(status) {
         if (!status) return JSON.stringify(status);
@@ -1088,13 +1116,14 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           const chartCell = document.createElement('td');
           const isMetrics = viewer.signals.includes('metrics');
           if (isMetrics) {
+            const currentChartType = readViewerChartType(viewer);
             const sel = document.createElement('select');
             sel.className = 'chart-type-select';
             for (const [val, label] of Object.entries(CHART_TYPE_LABELS)) {
               const opt = document.createElement('option');
               opt.value = val;
               opt.textContent = label;
-              if (val === (viewer.chart_type || 'table')) opt.selected = true;
+              if (val === currentChartType) opt.selected = true;
               sel.appendChild(opt);
             }
             sel.addEventListener('change', (e) => {
@@ -1392,11 +1421,11 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
           const viewer = await response.json();
-          viewerDetailTitle.textContent = `${viewer.name} (${viewer.chart_type || 'table'})`;
+          const chartType = readViewerChartType(viewer);
+          viewerDetailTitle.textContent = `${viewer.name} (${chartType})`;
           viewerDetailSection.classList.add('visible');
           hideAllDetailPanels();
 
-          const chartType = viewer.chart_type || 'table';
           const isTraceViewer = viewer.signals.includes('traces');
           if (chartType !== 'table' && viewer.signals.includes('metrics')) {
             renderChart(chartType, viewer.entries, viewer.lookback_ms);
@@ -1616,12 +1645,13 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           const data = await resp.json();
 
           const sorted = [...data.panels].sort((a, b) => a.position - b.position);
+          const columns = readDashboardColumns(data.columns);
 
           destroyPanelCharts();
           dashboardGrid.replaceChildren();
           dashboardTitle.textContent = data.name;
           dashboardSettingsButton.hidden = false;
-          dashboardGrid.style.setProperty('--dash-cols', String(data.columns || 2));
+          dashboardGrid.style.setProperty('--dash-cols', String(columns));
 
           for (const panel of sorted) {
             dashboardGrid.appendChild(buildPanelEl(panel));
@@ -1668,7 +1698,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         title.textContent = v.name;
         div.appendChild(title);
 
-        const chartType = v.chart_type || 'table';
+        const chartType = readViewerChartType(v);
         const isTraces = v.signals.includes('traces');
         const isMetrics = v.signals.includes('metrics');
 
@@ -1815,7 +1845,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         colInput.type = 'number';
         colInput.min = '1';
         colInput.max = '4';
-        colInput.value = String(dash.columns || 2);
+        colInput.value = String(readDashboardColumns(dash.columns));
         colLabel.appendChild(colInput);
         box.appendChild(colLabel);
 
@@ -1853,9 +1883,10 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         saveBtn.textContent = 'Save';
         saveBtn.addEventListener('click', async () => {
           const name = nameInput.value.trim();
-          const columns = parseInt(colInput.value, 10);
+          const columns = parseDashboardColumnsInput(colInput);
           const viewer_ids = [...checkList.querySelectorAll('input:checked')].map(cb => cb.value);
           if (!name) { nameInput.focus(); return; }
+          if (columns === null) { colInput.focus(); return; }
           saveBtn.disabled = true;
           try {
             const r = await fetch(`/api/dashboards/${dashboardId}`, {
@@ -1949,9 +1980,10 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         createBtn.textContent = 'Create';
         createBtn.addEventListener('click', async () => {
           const name = nameInput.value.trim();
-          const columns = parseInt(colInput.value, 10);
+          const columns = parseDashboardColumnsInput(colInput);
           const viewer_ids = checkList ? [...checkList.querySelectorAll('input:checked')].map(cb => cb.value) : [];
           if (!name) { nameInput.focus(); return; }
+          if (columns === null) { colInput.focus(); return; }
           createBtn.disabled = true;
           try {
             const r = await fetch('/api/dashboards', {
@@ -2026,6 +2058,49 @@ fn default_chart_type() -> String {
 
 fn is_valid_chart_type(chart_type: &str) -> bool {
     matches!(chart_type, "table" | "stacked_bar" | "line")
+}
+
+fn chart_type_from_definition(definition_json: &serde_json::Value) -> Result<&str, &'static str> {
+    let Some(kind_value) = definition_json.get("kind") else {
+        return Ok("table");
+    };
+    let chart_type = kind_value
+        .as_str()
+        .ok_or("viewer definition chart type is not a string")?;
+
+    if !is_valid_chart_type(chart_type) {
+        return Err("viewer definition contains invalid chart type");
+    }
+
+    Ok(chart_type)
+}
+
+const MIN_DASHBOARD_COLUMNS: u32 = 1;
+const MAX_DASHBOARD_COLUMNS: u32 = 4;
+const DEFAULT_DASHBOARD_COLUMNS: u32 = 2;
+
+fn default_dashboard_columns() -> u32 {
+    DEFAULT_DASHBOARD_COLUMNS
+}
+
+fn is_valid_dashboard_columns(columns: u32) -> bool {
+    (MIN_DASHBOARD_COLUMNS..=MAX_DASHBOARD_COLUMNS).contains(&columns)
+}
+
+fn dashboard_columns_from_layout(layout_json: &serde_json::Value) -> Result<u32, &'static str> {
+    let Some(columns_value) = layout_json.get("columns") else {
+        return Ok(DEFAULT_DASHBOARD_COLUMNS);
+    };
+    let columns = columns_value
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or("dashboard layout columns are not a valid integer")?;
+
+    if !is_valid_dashboard_columns(columns) {
+        return Err("dashboard layout columns are out of range");
+    }
+
+    Ok(columns)
 }
 
 #[derive(Debug, Deserialize)]
@@ -2152,12 +2227,17 @@ async fn get_viewer(
 ) -> Result<Json<ViewerSummary>, StatusCode> {
     let runtime = state.require_viewer_runtime()?.lock().await;
 
-    runtime
+    let (viewer, viewer_state) = runtime
         .viewers()
         .iter()
         .find(|(viewer, _)| viewer.definition().id == id)
-        .map(|(viewer, viewer_state)| Json(viewer_summary(viewer, viewer_state, true)))
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let summary = viewer_summary(viewer, viewer_state, true).map_err(|error| {
+        tracing::error!("viewer {id}: {error}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(summary))
 }
 
 async fn healthz() -> &'static str {
@@ -2172,8 +2252,13 @@ async fn list_viewers(
     let viewers = runtime
         .viewers()
         .iter()
-        .map(|(viewer, viewer_state)| viewer_summary(viewer, viewer_state, false))
-        .collect();
+        .map(|(viewer, viewer_state)| {
+            viewer_summary(viewer, viewer_state, false).map_err(|error| {
+                tracing::error!("viewer {}: {error}", viewer.definition().id);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(Json(ViewerListResponse { viewers }))
 }
@@ -2263,12 +2348,11 @@ async fn patch_viewer(
             .find(|(viewer, _)| viewer.definition().id == id)
             .ok_or(StatusCode::NOT_FOUND)?;
 
-        let current_kind = viewer
-            .definition()
-            .definition_json
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .unwrap_or("table");
+        let current_kind = chart_type_from_definition(&viewer.definition().definition_json)
+            .map_err(|error| {
+                tracing::error!("viewer {id}: {error}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
         if current_kind == payload.chart_type {
             return Ok(StatusCode::OK);
         }
@@ -2302,16 +2386,12 @@ async fn patch_viewer(
 
 // --- Dashboard API ----------------------------------------------------------
 
-fn default_columns() -> u32 {
-    2
-}
-
 #[derive(Debug, Deserialize)]
 struct CreateDashboardRequest {
     name: String,
     #[serde(default)]
     viewer_ids: Vec<Uuid>,
-    #[serde(default = "default_columns")]
+    #[serde(default = "default_dashboard_columns")]
     columns: u32,
 }
 
@@ -2369,7 +2449,10 @@ fn dashboard_panels_from_layout(layout_json: &serde_json::Value) -> Vec<(Uuid, u
                 .get("viewer_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse::<Uuid>().ok())?;
-            let position = p.get("position").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let position = p
+                .get("position")
+                .and_then(|v| v.as_u64())
+                .and_then(|v| usize::try_from(v).ok())?;
             Some((viewer_id, position))
         })
         .collect()
@@ -2414,6 +2497,9 @@ async fn create_dashboard(
     if name.is_empty() || name.chars().count() > 80 {
         return Err(StatusCode::BAD_REQUEST);
     }
+    if !is_valid_dashboard_columns(payload.columns) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let id = Uuid::new_v4();
     let layout_json = build_layout_json(&payload.viewer_ids, payload.columns);
@@ -2449,11 +2535,10 @@ async fn get_dashboard(
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let columns = dashboard
-        .layout_json
-        .get("columns")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(2) as u32;
+    let columns = dashboard_columns_from_layout(&dashboard.layout_json).map_err(|error| {
+        tracing::error!("dashboard {id}: {error}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     let panel_entries = dashboard_panels_from_layout(&dashboard.layout_json);
 
@@ -2461,21 +2546,26 @@ async fn get_dashboard(
     let panels = if let Some(runtime) = state.viewer_runtime.as_ref() {
         let rt = runtime.lock().await;
         let viewers = rt.viewers();
-        panel_entries
-            .into_iter()
-            .filter_map(|(viewer_id, position)| {
-                let viewer = viewers
-                    .iter()
-                    .find(|(v, _)| v.definition().id == viewer_id)
-                    .map(|(v, state)| viewer_summary(v, state, true));
-                viewer.as_ref()?; // Skip viewers that do not exist
-                Some(DashboardPanel {
-                    viewer_id,
-                    position,
-                    viewer,
-                })
-            })
-            .collect()
+        let mut panels = Vec::with_capacity(panel_entries.len());
+
+        for (viewer_id, position) in panel_entries {
+            let Some((viewer, state)) =
+                viewers.iter().find(|(v, _)| v.definition().id == viewer_id)
+            else {
+                continue;
+            };
+            let viewer = viewer_summary(viewer, state, true).map_err(|error| {
+                tracing::error!("viewer {viewer_id}: {error}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+            panels.push(DashboardPanel {
+                viewer_id,
+                position,
+                viewer: Some(viewer),
+            });
+        }
+
+        panels
     } else {
         panel_entries
             .into_iter()
@@ -2520,13 +2610,18 @@ async fn patch_dashboard(
     if new_name.is_empty() || new_name.chars().count() > 80 {
         return Err(StatusCode::BAD_REQUEST);
     }
+    if let Some(columns) = payload.columns
+        && !is_valid_dashboard_columns(columns)
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let new_layout = if payload.viewer_ids.is_some() || payload.columns.is_some() {
-        let current_columns = current
-            .layout_json
-            .get("columns")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(2) as u32;
+        let current_columns =
+            dashboard_columns_from_layout(&current.layout_json).map_err(|error| {
+                tracing::error!("dashboard {id}: {error}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
         let columns = payload.columns.unwrap_or(current_columns);
 
         let current_panels = dashboard_panels_from_layout(&current.layout_json);
@@ -2624,14 +2719,9 @@ fn viewer_summary(
     viewer: &CompiledViewer,
     viewer_state: &ViewerState,
     include_entries: bool,
-) -> ViewerSummary {
+) -> Result<ViewerSummary, &'static str> {
     let definition = viewer.definition();
-    let chart_type = definition
-        .definition_json
-        .get("kind")
-        .and_then(|v| v.as_str())
-        .unwrap_or("table")
-        .to_string();
+    let chart_type = chart_type_from_definition(&definition.definition_json)?.to_string();
 
     let entries = if include_entries {
         viewer_state
@@ -2670,7 +2760,7 @@ fn viewer_summary(
         vec![]
     };
 
-    ViewerSummary {
+    Ok(ViewerSummary {
         id: definition.id,
         slug: definition.slug.clone(),
         name: definition.name.clone(),
@@ -2686,7 +2776,7 @@ fn viewer_summary(
         } else {
             vec![]
         },
-    }
+    })
 }
 
 fn signal_name(signal: Signal) -> &'static str {
@@ -3250,19 +3340,71 @@ mod tests {
     };
     use tower::ServiceExt;
 
-    #[tokio::test]
-    async fn test_root_returns_viewer_page() {
-        let app = Router::new().route("/", get(index));
+    #[test]
+    fn test_chart_type_from_definition_defaults_to_table_when_kind_is_missing() {
+        assert_eq!(
+            chart_type_from_definition(&serde_json::json!({})).unwrap(),
+            "table"
+        );
+    }
 
+    #[test]
+    fn test_chart_type_from_definition_requires_valid_kind_when_present() {
+        assert_eq!(
+            chart_type_from_definition(&serde_json::json!({ "kind": "line" })).unwrap(),
+            "line"
+        );
+        assert!(chart_type_from_definition(&serde_json::json!({ "kind": 1 })).is_err());
+        assert!(chart_type_from_definition(&serde_json::json!({ "kind": "heatmap" })).is_err());
+    }
+
+    #[test]
+    fn test_dashboard_columns_from_layout_defaults_to_two_when_missing() {
+        assert_eq!(
+            dashboard_columns_from_layout(&serde_json::json!({})).unwrap(),
+            DEFAULT_DASHBOARD_COLUMNS
+        );
+    }
+
+    #[test]
+    fn test_dashboard_columns_from_layout_requires_in_range_columns() {
+        assert_eq!(
+            dashboard_columns_from_layout(&serde_json::json!({ "columns": 3 })).unwrap(),
+            3
+        );
+        assert!(dashboard_columns_from_layout(&serde_json::json!({ "columns": "2" })).is_err());
+        assert!(dashboard_columns_from_layout(&serde_json::json!({ "columns": 0 })).is_err());
+        assert!(dashboard_columns_from_layout(&serde_json::json!({ "columns": 5 })).is_err());
+    }
+
+    #[test]
+    fn test_dashboard_panels_from_layout_skips_panels_without_position() {
+        let panels = dashboard_panels_from_layout(&serde_json::json!({
+            "panels": [
+                { "viewer_id": Uuid::nil().to_string() },
+                { "viewer_id": Uuid::max().to_string(), "position": 2 }
+            ]
+        }));
+
+        assert_eq!(panels, vec![(Uuid::max(), 2)]);
+    }
+
+    async fn index_html() -> (StatusCode, String) {
+        let app = Router::new().route("/", get(index));
         let response = app
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await
             .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-
+        let status = response.status();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let html = String::from_utf8(body.to_vec()).unwrap();
+        (status, String::from_utf8(body.into()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn test_root_returns_viewer_page() {
+        let (status, html) = index_html().await;
+
+        assert_eq!(status, StatusCode::OK);
 
         assert!(html.contains("litelemetry viewer"));
         assert!(html.contains("Create viewer"));
@@ -3274,15 +3416,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_root_returns_dashboard_elements() {
-        let app = Router::new().route("/", get(index));
-
-        let response = app
-            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let html = String::from_utf8(body.to_vec()).unwrap();
+        let (_, html) = index_html().await;
 
         assert!(html.contains("sidebar"));
         assert!(html.contains("nav-viewers"));
@@ -3395,5 +3529,28 @@ mod tests {
         assert!(preview.contains("worker-billing"));
         assert!(preview.contains("INFO"));
         assert!(preview.contains("payment authorized"));
+    }
+
+    #[tokio::test]
+    async fn test_main_with_sidebar_width_accounts_for_sidebar() {
+        let (_, html) = index_html().await;
+        assert!(
+            html.contains("width: min(1200px, calc(100% - var(--sidebar-width) - 32px))"),
+            "main.with-sidebar must constrain width to viewport minus sidebar (var(--sidebar-width)) and right gap (32px)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_root_does_not_hide_invalid_dashboard_or_chart_type_values_with_fallbacks() {
+        let (_, html) = index_html().await;
+
+        assert!(html.contains("readViewerChartType(viewer)"));
+        assert!(html.contains("readDashboardColumns(data.columns)"));
+        assert!(html.contains("const value = Number(input.value);"));
+        assert!(!html.contains("viewer.chart_type || 'table'"));
+        assert!(!html.contains("v.chart_type || 'table'"));
+        assert!(!html.contains("data.columns || 2"));
+        assert!(!html.contains("dash.columns || 2"));
+        assert!(!html.contains("Number.parseInt(input.value, 10)"));
     }
 }

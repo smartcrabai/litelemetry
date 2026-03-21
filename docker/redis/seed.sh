@@ -73,8 +73,8 @@ add_log() {
   redis_cli XADD "$LOGS_STREAM_KEY" '*' observed_at "$observed_at" service_name "$service_name" payload "$payload" >/dev/null
 }
 
-# ─── Trace 1: frontend → customer-api → mysql (正常系) ─────────────────
-# タイムスタンプはすべて同一時刻ベース。base = now - 30 秒 (ナノ秒)
+# ─── Trace 1: frontend → customer-api → mysql (happy path) ─────────────────
+# Timestamps all share the same base. base = now - 30 seconds (nanoseconds)
 now_epoch="$(date +%s)"
 base_ns="$(( (now_epoch - 30) * 1000000000 ))"
 
@@ -164,7 +164,7 @@ add_trace frontend    "HTTP GET"               "$TRACE1" a000000000000014 a00000
 add_trace route       "HTTP GET /route"        "$TRACE1" a000000000000015 a000000000000014 \
   "$((base_ns + 603000000))" "$((base_ns + 645000000))"
 
-# ─── Trace 2: checkout-api → payment (簡潔な正常トレース) ─────────────
+# ─── Trace 2: checkout-api → payment (concise normal trace) ─────────────
 TRACE2="aaaaaaaaaaaaaaaaaaaaaaaaaaaa0002"
 
 add_trace checkout-api "POST /checkout"        "$TRACE2" b000000000000001 "" \
@@ -180,7 +180,7 @@ add_trace payment-svc  "gateway_call"         "$TRACE2" b000000000000005 b000000
 add_trace checkout-api "send_confirmation"    "$TRACE2" b000000000000006 b000000000000001 \
   "$((base_ns + 390000000))" "$((base_ns + 440000000))"
 
-# ─── Trace 3: worker-billing (エラー含む) ─────────────────────────────
+# ─── Trace 3: worker-billing (with errors) ─────────────────────────────
 TRACE3="aaaaaaaaaaaaaaaaaaaaaaaaaaaa0003"
 
 add_trace worker-billing "process_receipt"    "$TRACE3" c000000000000001 "" \
@@ -200,8 +200,8 @@ add_metric checkout-api queue.depth 7
 add_log worker-billing INFO payment_authorized
 add_log frontend-web WARN checkout_latency_high
 
-# ─── チャート用メトリクスデータ (直近5分間に分散) ─────────────────────────
-# http.server.requests — 3サービス × 6ポイント (30秒間隔)
+# ─── Metrics data for charts (spread over the last 5 minutes) ─────────────────────────
+# http.server.requests --- 3 services x 6 points (30s interval)
 add_metric_at orders-api    http.server.requests 120 270
 add_metric_at orders-api    http.server.requests 135 240
 add_metric_at orders-api    http.server.requests 148 210
@@ -223,7 +223,7 @@ add_metric_at frontend-web  http.server.requests 220 180
 add_metric_at frontend-web  http.server.requests 240 150
 add_metric_at frontend-web  http.server.requests 230 120
 
-# http.server.duration_ms — レイテンシ推移 (折れ線向き)
+# http.server.duration_ms --- latency trend (for line chart)
 add_metric_at orders-api    http.server.duration_ms  45 270
 add_metric_at orders-api    http.server.duration_ms  52 240
 add_metric_at orders-api    http.server.duration_ms  48 210
