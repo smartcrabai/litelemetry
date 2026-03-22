@@ -1,7 +1,7 @@
-//! E2E tests -- sends data using the real OpenTelemetry SDK
+//! E2E tests -- send data using real OpenTelemetry SDK
 //!
-//! Sends data from a real OTLP client (opentelemetry-otlp),
-//! and verifies that the server receives and stores it in Redis.
+//! Send data from real OTLP client (opentelemetry-otlp),
+//! and verify the server receives and stores it in Redis.
 //!
 //! Requires Docker to run:
 //!   cargo test --test e2e -- --include-ignored
@@ -29,7 +29,7 @@ use tokio::{
     time::{Duration, sleep},
 };
 
-// --- Helpers -----------------------------------------------------------------
+// --- Helpers -----------------------------------------------------------------------
 
 const E2E_INSTRUMENTATION_NAME: &str = "e2e-test";
 const APP_CONNECT_ATTEMPTS: usize = 20;
@@ -116,7 +116,7 @@ async fn make_redis_store(port: u16) -> RedisStore {
     panic!("Redis connection failed: {}", last_error.unwrap())
 }
 
-/// Starts litelemetry server on a random port and returns the port number.
+/// Start litelemetry server on a random port and return the port number
 async fn start_app_server(redis_port: u16) -> u16 {
     let redis = make_redis_store(redis_port).await;
     let app = build_app(StreamStore::Redis(redis));
@@ -142,47 +142,47 @@ async fn wait_for_app_server(port: u16) {
         }
     }
 
-    panic!("app server failed to start: {addr}")
+    panic!("App server failed to start: {addr}")
 }
 
-/// Builds a SdkTracerProvider using SimpleSpanProcessor.
+/// Build SdkTracerProvider using SimpleSpanProcessor
 ///
-/// SimpleSpanProcessor exports immediately on span end,
-/// which is suitable for test verification.
+/// SimpleSpanProcessor exports immediately on span end, making it
+/// suitable for verifying behavior in tests.
 fn build_tracer_provider(app_port: u16) -> SdkTracerProvider {
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_http()
         .with_endpoint(format!("http://127.0.0.1:{app_port}/v1/traces"))
         .build()
-        .expect("SpanExporter build failed");
+        .expect("failed to build SpanExporter");
 
     SdkTracerProvider::builder()
         .with_simple_exporter(exporter)
         .build()
 }
 
-/// Builds a SdkMeterProvider using PeriodicReader.
+/// Build SdkMeterProvider using PeriodicReader
 ///
-/// Final export is executed on shutdown().
+/// Final export is triggered on shutdown().
 fn build_meter_provider(app_port: u16) -> SdkMeterProvider {
     let exporter = opentelemetry_otlp::MetricExporter::builder()
         .with_http()
         .with_endpoint(format!("http://127.0.0.1:{app_port}/v1/metrics"))
         .build()
-        .expect("MetricExporter build failed");
+        .expect("failed to build MetricExporter");
 
     SdkMeterProvider::builder()
         .with_reader(PeriodicReader::builder(exporter).build())
         .build()
 }
 
-/// Builds a SdkLoggerProvider using SimpleLogProcessor.
+/// Build SdkLoggerProvider using SimpleLogProcessor
 fn build_logger_provider(app_port: u16) -> SdkLoggerProvider {
     let exporter = opentelemetry_otlp::LogExporter::builder()
         .with_http()
         .with_endpoint(format!("http://127.0.0.1:{app_port}/v1/logs"))
         .build()
-        .expect("LogExporter build failed");
+        .expect("failed to build LogExporter");
 
     SdkLoggerProvider::builder()
         .with_simple_exporter(exporter)
@@ -219,14 +219,14 @@ where
     task::spawn_blocking(operation).await.unwrap()
 }
 
-// --- E2E: Traces -------------------------------------------------------------
+// --- E2E: Traces ------------------------------------------------------------------
 
-/// E2E: Sends a span from the OTel SDK and verifies it is stored in Redis.
+/// E2E: Send span from OTel SDK and verify it is stored in Redis
 ///
 /// Scenario:
 ///   1. Start litelemetry server on a random port
-///   2. Send a span using opentelemetry_sdk + opentelemetry-otlp
-///   3. Verify one entry is stored in the Redis traces stream
+///   2. Send span via opentelemetry_sdk + opentelemetry-otlp
+///   3. Verify 1 entry is stored in Redis traces stream
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_e2e_trace_stored_in_redis() {
@@ -247,9 +247,9 @@ async fn test_e2e_trace_stored_in_redis() {
     app.assert_signal_has_payload(Signal::Traces).await;
 }
 
-/// E2E: Sends multiple spans and verifies each is stored separately in Redis.
+/// E2E: Send multiple spans and verify each is stored in Redis
 ///
-/// SimpleSpanProcessor sends one HTTP request per span,
+/// SimpleSpanProcessor sends 1 HTTP request per span,
 /// so 3 spans -> 3 Redis entries.
 #[tokio::test]
 #[ignore = "requires Docker"]
@@ -274,11 +274,11 @@ async fn test_e2e_multiple_spans_each_stored_separately() {
     assert_eq!(
         entries.len(),
         3,
-        "SimpleSpanProcessor sends one request per span, so there should be 3 entries"
+        "SimpleSpanProcessor sends 1 request per span, so 3 spans -> 3 entries"
     );
 }
 
-/// E2E: Sends a trace with child spans and verifies each is stored.
+/// E2E: Send trace with child spans and verify each is stored
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_e2e_nested_spans_stored() {
@@ -296,15 +296,15 @@ async fn test_e2e_nested_spans_stored() {
                 .with_kind(SpanKind::Server)
                 .start(&tracer);
 
-            // create child span (propagating parent context)
+            // create child span (propagate parent context)
             {
                 let cx = opentelemetry::Context::current_with_span(parent_span);
                 let _child = tracer
                     .span_builder("db-query")
                     .with_kind(SpanKind::Client)
                     .start_with_context(&tracer, &cx);
-                // dropping _child -> child span exported
-                // dropping cx -> parent span exported
+                // drop _child -> child span export
+                // drop cx -> parent span export
             }
         }
         provider.shutdown().unwrap();
@@ -317,13 +317,13 @@ async fn test_e2e_nested_spans_stored() {
     assert_eq!(
         entries.len(),
         2,
-        "parent span and child span should each be stored (2 entries)"
+        "2 entries (parent + child span) should be stored"
     );
 }
 
-// --- E2E: Metrics ------------------------------------------------------------
+// --- E2E: Metrics -----------------------------------------------------------------
 
-/// E2E: Sends metrics from the OTel SDK and verifies they are stored in Redis.
+/// E2E: Send metrics from OTel SDK and verify they are stored in Redis
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_e2e_metrics_stored_in_redis() {
@@ -348,9 +348,9 @@ async fn test_e2e_metrics_stored_in_redis() {
     app.assert_signal_has_payload(Signal::Metrics).await;
 }
 
-// --- E2E: Logs ---------------------------------------------------------------
+// --- E2E: Logs --------------------------------------------------------------------
 
-/// E2E: Sends logs from the OTel SDK and verifies they are stored in Redis.
+/// E2E: Send logs from OTel SDK and verify they are stored in Redis
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_e2e_logs_stored_in_redis() {
@@ -367,9 +367,9 @@ async fn test_e2e_logs_stored_in_redis() {
     app.assert_signal_has_payload(Signal::Logs).await;
 }
 
-// --- E2E: All signals mixed --------------------------------------------------
+// --- E2E: All signals mixed -------------------------------------------------------
 
-/// E2E: Sends traces/metrics/logs simultaneously and verifies correct routing per signal.
+/// E2E: Send traces/metrics/logs simultaneously and verify correct routing per signal
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_e2e_all_signals_routed_correctly() {
@@ -406,7 +406,7 @@ async fn test_e2e_all_signals_routed_correctly() {
     })
     .await;
 
-    // verify data is stored in each signal's Redis stream
+    // Verify data is stored in each signal's Redis stream
     let traces = app.wait_for_entries(Signal::Traces, 10, 1).await;
     assert!(!traces.is_empty(), "traces stream should have data");
 
@@ -417,7 +417,7 @@ async fn test_e2e_all_signals_routed_correctly() {
     assert!(!logs.is_empty(), "logs stream should have data");
 }
 
-// --- Memory store (no Docker required) --------------------------------------
+// --- Memory store (no Docker required) --------------------------------------------
 
 struct MemoryTestApp {
     stream_store: MemoryStreamStore,
@@ -490,7 +490,7 @@ impl MemoryTestApp {
     }
 }
 
-/// Memory: Sends a span from the OTel SDK and verifies it is stored in memory.
+/// Memory: Send span from OTel SDK and verify it is stored in memory store
 #[tokio::test]
 async fn test_e2e_trace_stored_in_memory() {
     let app = MemoryTestApp::start().await;
@@ -509,7 +509,7 @@ async fn test_e2e_trace_stored_in_memory() {
     app.assert_signal_has_payload(Signal::Traces).await;
 }
 
-/// Memory: Stores multiple spans in memory.
+/// Memory: Store multiple spans in memory store
 #[tokio::test]
 async fn test_e2e_multiple_spans_each_stored_separately_memory() {
     let app = MemoryTestApp::start().await;
@@ -531,11 +531,11 @@ async fn test_e2e_multiple_spans_each_stored_separately_memory() {
     assert_eq!(
         entries.len(),
         3,
-        "SimpleSpanProcessor sends one request per span, so there should be 3 entries"
+        "SimpleSpanProcessor sends 1 request per span, so 3 spans -> 3 entries"
     );
 }
 
-/// Memory: Stores nested spans in memory.
+/// Memory: Store nested spans in memory store
 #[tokio::test]
 async fn test_e2e_nested_spans_stored_memory() {
     let app = MemoryTestApp::start().await;
@@ -565,11 +565,11 @@ async fn test_e2e_nested_spans_stored_memory() {
     assert_eq!(
         entries.len(),
         2,
-        "parent span and child span should each be stored (2 entries)"
+        "2 entries (parent + child span) should be stored"
     );
 }
 
-/// Memory: Stores metrics in memory.
+/// Memory: Store metrics in memory store
 #[tokio::test]
 async fn test_e2e_metrics_stored_in_memory() {
     let app = MemoryTestApp::start().await;
@@ -592,7 +592,7 @@ async fn test_e2e_metrics_stored_in_memory() {
     app.assert_signal_has_payload(Signal::Metrics).await;
 }
 
-/// Memory: Stores logs in memory.
+/// Memory: Store logs in memory store
 #[tokio::test]
 async fn test_e2e_logs_stored_in_memory() {
     let app = MemoryTestApp::start().await;
@@ -608,7 +608,7 @@ async fn test_e2e_logs_stored_in_memory() {
     app.assert_signal_has_payload(Signal::Logs).await;
 }
 
-/// Memory: Sends traces/metrics/logs simultaneously and verifies routing per signal.
+/// Memory: Send traces/metrics/logs simultaneously and verify routing per signal
 #[tokio::test]
 async fn test_e2e_all_signals_routed_correctly_memory() {
     let app = MemoryTestApp::start().await;

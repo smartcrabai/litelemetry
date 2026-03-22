@@ -1,11 +1,11 @@
 //! Integration tests -- requires Redis and PostgreSQL
 //!
-//! Starts real Redis / PostgreSQL instances via testcontainers and verifies behavior.
+//! Starts real Redis / PostgreSQL instances via testcontainers and validates.
 //! Requires Docker to run:
 //!   cargo test --test integration -- --include-ignored
 //!
-//! In normal CI these are skipped via `#[ignore]`,
-//! and can be run with `cargo test --test integration -- --include-ignored`.
+//! Skipped in normal CI with `#[ignore]`,
+//! run with `cargo test --test integration -- --include-ignored`.
 
 use axum::http::{Request, StatusCode};
 use bytes::Bytes;
@@ -28,7 +28,7 @@ use tokio::sync::Mutex;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-// --- Helpers ---------------------------------------------------------------
+// --- Helpers ----------------------------------------------------------------
 
 async fn make_redis_store(port: u16) -> RedisStore {
     let url = format!("redis://127.0.0.1:{port}");
@@ -227,14 +227,14 @@ fn make_log_payload(service_name: &str, severity_text: &str, message: &str) -> B
     )
 }
 
-// --- startup resume --------------------------------------------------------
+// --- startup resume ---------------------------------------------------------
 
-/// Startup resume: restores state from PostgreSQL snapshot + Redis diff
+/// Startup resume: restore state from PostgreSQL snapshot + Redis diff
 ///
 /// Scenario:
 ///   1. Insert viewer definition into PG
-///   2. Save snapshot (revision matches) into PG
-///   3. Add telemetry to Redis after the snapshot cursor
+///   2. Save snapshot (revision match) to PG
+///   3. Add telemetry after snapshot to Redis
 ///   4. Start viewer runtime
 ///   5. Verify state is correctly built from "snapshot + Redis diff"
 #[tokio::test]
@@ -248,12 +248,12 @@ async fn test_startup_resume_from_snapshot_and_redis_diff() {
     let pg = make_postgres_store(pg_port).await;
     pg.create_schema().await.unwrap();
 
-    // 1. insert viewer definition into PG
+    // 1. Insert viewer definition into PG
     let def = make_viewer_def(Signal::Traces.into(), 300_000, 1);
     let def_id = def.id;
     pg.insert_viewer_definition(&def).await.unwrap();
 
-    // 2. add 5 entries to Redis and get cursor
+    // 2. Add 5 entries to Redis and get cursor
     let mut redis_write = make_redis_store(redis_port).await;
     for _ in 0..5 {
         redis_write
@@ -261,14 +261,14 @@ async fn test_startup_resume_from_snapshot_and_redis_diff() {
             .await
             .unwrap();
     }
-    // cursor: get the ID of the 5th entry (last ID from XRANGE)
+    // Cursor: get the 5th entry ID (last ID via XRANGE)
     let snapshot_entries = redis_write
         .read_entries_since(Signal::Traces, None, 5)
         .await
         .unwrap();
     let snapshot_cursor_id = snapshot_entries.last().unwrap().0.clone();
 
-    // save snapshot (cursor = 5th entry ID) to PG
+    // Save snapshot to PG (cursor = ID of 5th entry)
     let mut cursor = StreamCursor::default();
     cursor.set(Signal::Traces, snapshot_cursor_id.clone());
     let snapshot = ViewerSnapshotRow {
@@ -280,7 +280,7 @@ async fn test_startup_resume_from_snapshot_and_redis_diff() {
     };
     pg.upsert_snapshot(&snapshot).await.unwrap();
 
-    // 3. add 3 more entries to Redis (after snapshot cursor)
+    // 3. Add 3 more entries to Redis (after snapshot cursor)
     for _ in 0..3 {
         redis_write
             .append_entry(&make_traces_entry(5_000))
@@ -288,7 +288,7 @@ async fn test_startup_resume_from_snapshot_and_redis_diff() {
             .unwrap();
     }
 
-    // 4. start viewer runtime
+    // 4. Start viewer runtime
     let runtime = ViewerRuntime::build(
         ViewerStore::Postgres(pg),
         StreamStore::Redis(make_redis_store(redis_port).await),
@@ -296,14 +296,14 @@ async fn test_startup_resume_from_snapshot_and_redis_diff() {
     .await
     .unwrap();
 
-    // 5. verify state is built with 3 entries after snapshot cursor
+    // 5. Verify state is built with "3 entries after snapshot cursor"
     let viewers = runtime.viewers();
-    assert_eq!(viewers.len(), 1, "there should be 1 viewer");
+    assert_eq!(viewers.len(), 1, "should have 1 viewer");
     let (_, state) = &viewers[0];
     assert_eq!(
         state.entries.len(),
         3,
-        "only 3 entries after snapshot cursor should be ingested (got: {})",
+        "only the 3 entries after snapshot cursor should be loaded (got: {})",
         state.entries.len()
     );
     assert!(
@@ -313,7 +313,7 @@ async fn test_startup_resume_from_snapshot_and_redis_diff() {
     assert_ne!(
         state.last_cursor.traces.as_deref(),
         Some(snapshot_cursor_id.as_str()),
-        "cursor should be advanced past the snapshot cursor"
+        "cursor should have advanced past the snapshot cursor"
     );
 }
 
@@ -335,11 +335,11 @@ async fn test_startup_resume_no_snapshot_falls_back_to_replay() {
     let pg = make_postgres_store(pg_port).await;
     pg.create_schema().await.unwrap();
 
-    // 1. viewer definition only (no snapshot)
+    // 1. Viewer definition only (no snapshot)
     let def = make_viewer_def(Signal::Traces.into(), 300_000, 1);
     pg.insert_viewer_definition(&def).await.unwrap();
 
-    // 2. add 4 entries to Redis
+    // 2. Add 4 entries to Redis
     let mut redis_write = make_redis_store(redis_port).await;
     for _ in 0..4 {
         redis_write
@@ -348,7 +348,7 @@ async fn test_startup_resume_no_snapshot_falls_back_to_replay() {
             .unwrap();
     }
 
-    // 3. start viewer runtime
+    // 3. Start viewer runtime
     let runtime = ViewerRuntime::build(
         ViewerStore::Postgres(pg),
         StreamStore::Redis(make_redis_store(redis_port).await),
@@ -356,14 +356,14 @@ async fn test_startup_resume_no_snapshot_falls_back_to_replay() {
     .await
     .unwrap();
 
-    // 4. verify state is built from full replay (4 entries)
+    // 4. Verify state is built with 4 entries via full replay
     let viewers = runtime.viewers();
     assert_eq!(viewers.len(), 1);
     let (_, state) = &viewers[0];
     assert_eq!(
         state.entries.len(),
         4,
-        "no snapshot -> 4 entries should be replayed from full Redis"
+        "no snapshot -> all 4 entries from Redis should be replayed"
     );
 }
 
@@ -371,9 +371,9 @@ async fn test_startup_resume_no_snapshot_falls_back_to_replay() {
 ///
 /// Scenario:
 ///   1. Insert viewer definition with revision=2 into PG
-///   2. Save old snapshot with revision=1 into PG
+///   2. Save stale snapshot with revision=1 to PG
 ///   3. Start viewer runtime
-///   4. Verify revision mismatch is detected and replay fallback occurs
+///   4. Verify revision mismatch is detected and falls back to replay
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_startup_resume_revision_mismatch_falls_back_to_replay() {
@@ -385,14 +385,14 @@ async fn test_startup_resume_revision_mismatch_falls_back_to_replay() {
     let pg = make_postgres_store(pg_port).await;
     pg.create_schema().await.unwrap();
 
-    // 1. viewer definition revision=2
+    // 1. Viewer definition revision=2
     let def = make_viewer_def(Signal::Traces.into(), 300_000, 2);
     let def_id = def.id;
     pg.insert_viewer_definition(&def).await.unwrap();
 
-    // 2. save snapshot with revision=1 (with cursor)
+    // 2. Save snapshot with revision=1 (with cursor)
     let mut cursor = StreamCursor::default();
-    cursor.set(Signal::Traces, "9999999999999-0".to_string()); // future ID -> results in 0 entries
+    cursor.set(Signal::Traces, "9999999999999-0".to_string()); // future ID -> results in 0 entries if used
     let snapshot = ViewerSnapshotRow {
         viewer_id: def_id,
         revision: 1, // mismatch!
@@ -402,7 +402,7 @@ async fn test_startup_resume_revision_mismatch_falls_back_to_replay() {
     };
     pg.upsert_snapshot(&snapshot).await.unwrap();
 
-    // add 3 entries to Redis
+    // Add 3 entries to Redis
     let mut redis_write = make_redis_store(redis_port).await;
     for _ in 0..3 {
         redis_write
@@ -411,7 +411,7 @@ async fn test_startup_resume_revision_mismatch_falls_back_to_replay() {
             .unwrap();
     }
 
-    // 3. start viewer runtime
+    // 3. Start viewer runtime
     let runtime = ViewerRuntime::build(
         ViewerStore::Postgres(pg),
         StreamStore::Redis(make_redis_store(redis_port).await),
@@ -426,19 +426,19 @@ async fn test_startup_resume_revision_mismatch_falls_back_to_replay() {
     assert_eq!(
         state.entries.len(),
         3,
-        "revision mismatch -> reset cursor and replay all 3 entries from Redis"
+        "revision mismatch -> cursor reset, all 3 Redis entries should be replayed"
     );
 }
 
-// --- diff update -----------------------------------------------------------
+// --- diff update ------------------------------------------------------------
 
-/// Diff update: updates multiple viewers in a single Redis scan
+/// Diff update: update multiple viewers in a single Redis scan
 ///
 /// Scenario:
 ///   1. Register 2 viewers targeting traces
 ///   2. Add traces telemetry to Redis
 ///   3. Fire diff batch
-///   4. Verify 2 viewers are updated from a single Redis read
+///   4. Verify 2 viewers' state is updated with a single Redis read
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_diff_update_one_pass_fan_out_to_multiple_viewers() {
@@ -450,13 +450,13 @@ async fn test_diff_update_one_pass_fan_out_to_multiple_viewers() {
     let pg = make_postgres_store(pg_port).await;
     pg.create_schema().await.unwrap();
 
-    // 1. register 2 viewers targeting traces
+    // 1. Register 2 viewers targeting traces
     let def1 = make_viewer_def(Signal::Traces.into(), 300_000, 1);
     let def2 = make_viewer_def(Signal::Traces.into(), 300_000, 1);
     pg.insert_viewer_definition(&def1).await.unwrap();
     pg.insert_viewer_definition(&def2).await.unwrap();
 
-    // start runtime with empty state
+    // Start empty runtime
     let mut runtime = ViewerRuntime::build(
         ViewerStore::Postgres(pg),
         StreamStore::Redis(make_redis_store(redis_port).await),
@@ -464,12 +464,12 @@ async fn test_diff_update_one_pass_fan_out_to_multiple_viewers() {
     .await
     .unwrap();
 
-    // verify both viewers have 0 initial entries
+    // Verify both viewers initially have 0 entries
     for (_, state) in runtime.viewers() {
         assert_eq!(state.entries.len(), 0);
     }
 
-    // 2. add 5 entries to Redis
+    // 2. Add 5 entries to Redis
     let mut redis_write = make_redis_store(redis_port).await;
     for _ in 0..5 {
         redis_write
@@ -478,15 +478,15 @@ async fn test_diff_update_one_pass_fan_out_to_multiple_viewers() {
             .unwrap();
     }
 
-    // 3. fire diff batch
+    // 3. Fire diff batch
     runtime.apply_diff_batch().await.unwrap();
 
-    // 4. verify 5 entries are reflected in both viewers
+    // 4. Verify 5 entries are reflected in each viewer
     for (_, state) in runtime.viewers() {
         assert_eq!(
             state.entries.len(),
             5,
-            "both viewers should have 5 entries reflected"
+            "5 entries should be reflected in each viewer"
         );
     }
 }
@@ -494,9 +494,9 @@ async fn test_diff_update_one_pass_fan_out_to_multiple_viewers() {
 /// Snapshot upsert after diff update
 ///
 /// Scenario:
-///   1. Register a viewer then fire a diff update
+///   1. Register viewer and fire diff update
 ///   2. Verify latest state is upserted into PG viewer_snapshots
-///   3. Verify resume from snapshot works after restart
+///   3. Verify snapshot can be resumed after restart
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_snapshot_upsert_after_diff_update() {
@@ -520,7 +520,7 @@ async fn test_snapshot_upsert_after_diff_update() {
     .await
     .unwrap();
 
-    // add 3 entries to Redis and run diff batch
+    // Add 3 entries to Redis and run diff batch
     let mut redis_write = make_redis_store(redis_port).await;
     for _ in 0..3 {
         redis_write
@@ -530,9 +530,9 @@ async fn test_snapshot_upsert_after_diff_update() {
     }
     runtime.apply_diff_batch().await.unwrap();
 
-    // 2. verify snapshot is upserted into PG
+    // 2. Verify snapshot is upserted in PG
     let mut snapshots = pg2.load_snapshots(&[def_id]).await.unwrap();
-    assert!(!snapshots.is_empty(), "snapshot should be upserted into PG");
+    assert!(!snapshots.is_empty(), "snapshot should be upserted in PG");
     let snapshot = snapshots.remove(0);
     assert_eq!(snapshot.revision, 1);
     assert!(
@@ -540,7 +540,7 @@ async fn test_snapshot_upsert_after_diff_update() {
         "traces cursor should be saved in snapshot"
     );
 
-    // 3. resume from snapshot after restart (no new entries -> diff 0)
+    // 3. Resume from snapshot after restart (no new entries -> diff 0)
     let runtime2 = ViewerRuntime::build(
         ViewerStore::Postgres(make_postgres_store(pg_port).await),
         StreamStore::Redis(make_redis_store(redis_port).await),
@@ -550,21 +550,21 @@ async fn test_snapshot_upsert_after_diff_update() {
     let viewers2 = runtime2.viewers();
     assert_eq!(viewers2.len(), 1);
     let (_, state2) = &viewers2[0];
-    // snapshot cursor is set so Redis diff is 0 entries
+    // Snapshot cursor is set so Redis diff is 0 entries
     assert_eq!(
         state2.entries.len(),
         0,
-        "after restart only entries after snapshot cursor should be ingested (0 entries)"
+        "after restart, only diff after snapshot cursor (0 entries) should be loaded"
     );
 }
 
-/// Old entries beyond the viewer lookback window are pruned
+/// Old entries outside viewer lookback are pruned
 ///
 /// Scenario:
 ///   1. Register viewer (lookback=60s)
 ///   2. Add old telemetry (90s ago) and new telemetry (10s ago) to Redis
 ///   3. Fire diff update
-///   4. Verify old entries are not in state
+///   4. Verify state does not contain old entries
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_diff_update_prunes_entries_outside_lookback() {
@@ -576,7 +576,7 @@ async fn test_diff_update_prunes_entries_outside_lookback() {
     let pg = make_postgres_store(pg_port).await;
     pg.create_schema().await.unwrap();
 
-    // 1. register viewer with lookback=60s
+    // 1. Register viewer with lookback=60s
     let def = make_viewer_def(Signal::Traces.into(), 60_000, 1);
     pg.insert_viewer_definition(&def).await.unwrap();
 
@@ -587,42 +587,42 @@ async fn test_diff_update_prunes_entries_outside_lookback() {
     .await
     .unwrap();
 
-    // 2. add old entry (90s ago) and new entry (10s ago) to Redis
+    // 2. Add old entries (90s ago) and new entries (10s ago) to Redis
     let mut redis_write = make_redis_store(redis_port).await;
-    // old (90s ago -> exceeds lookback of 60s)
+    // Old (90s ago -> exceeds lookback of 60s)
     redis_write
         .append_entry(&make_traces_entry(90_000))
         .await
         .unwrap();
-    // new (10s ago -> within lookback)
+    // New (10s ago -> within lookback)
     redis_write
         .append_entry(&make_traces_entry(10_000))
         .await
         .unwrap();
 
-    // 3. fire diff update
+    // 3. Fire diff update
     runtime.apply_diff_batch().await.unwrap();
 
-    // 4. verify old entry is pruned and only 1 new entry remains
+    // 4. Verify old entries are pruned and only 1 new entry remains
     let viewers = runtime.viewers();
     assert_eq!(viewers.len(), 1);
     let (_, state) = &viewers[0];
     assert_eq!(
         state.entries.len(),
         1,
-        "old entry outside lookback should be pruned, only 1 entry should remain (got: {})",
+        "old entries outside lookback should be pruned, leaving 1 entry (got: {})",
         state.entries.len()
     );
 }
 
-// --- OTLP/HTTP ingest endpoint ---------------------------------------------
+// --- OTLP/HTTP ingest endpoint -----------------------------------------------
 
-/// OTLP/HTTP traces endpoint ingest
+/// Ingest via OTLP/HTTP traces endpoint
 ///
 /// Scenario:
 ///   1. Start server
-///   2. POST protobuf payload to /v1/traces
-///   3. Expect 200 OK
+///   2. Send protobuf payload to POST /v1/traces
+///   3. Returns 200 OK
 ///   4. Verify entry is added to Redis lt:stream:traces
 #[tokio::test]
 #[ignore = "requires Docker"]
@@ -650,7 +650,7 @@ async fn test_ingest_traces_via_otlp_http() {
         "traces ingest should return 200 OK"
     );
 
-    // 4. verify entry is added to Redis
+    // 4. Verify entry is added to Redis
     let mut redis_check = make_redis_store(redis_port).await;
     let entries = redis_check
         .read_entries_since(Signal::Traces, None, 10)
@@ -664,7 +664,7 @@ async fn test_ingest_traces_via_otlp_http() {
     assert_eq!(entries[0].1.signal, Signal::Traces);
 }
 
-/// Viewer UI API: verifies traces are reflected in list API after creating a viewer
+/// Viewer UI API: verify traces are reflected in list API after viewer is created
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_create_viewer_then_trace_is_reflected_in_viewer_api() {
@@ -702,7 +702,7 @@ async fn test_create_viewer_then_trace_is_reflected_in_viewer_api() {
     let create_payload: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
     let viewer_id = create_payload["id"].as_str().unwrap().to_string();
 
-    // verify entry_count via list API
+    // Check entry_count in list API
     let list_request = Request::builder()
         .method("GET")
         .uri("/api/viewers")
@@ -721,7 +721,7 @@ async fn test_create_viewer_then_trace_is_reflected_in_viewer_api() {
     assert_eq!(viewers.len(), 1, "1 viewer should be created");
     assert_eq!(viewers[0]["entry_count"], 1, "1 trace should be reflected");
 
-    // verify entries via individual viewer API
+    // Check entries via individual viewer API
     let get_request = Request::builder()
         .method("GET")
         .uri(format!("/api/viewers/{viewer_id}"))
@@ -782,7 +782,7 @@ async fn test_create_viewer_then_metric_is_reflected_in_viewer_api() {
     let create_payload: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
     let viewer_id = create_payload["id"].as_str().unwrap().to_string();
 
-    // verify entry_count via list API
+    // Check entry_count in list API
     let list_request = Request::builder()
         .method("GET")
         .uri("/api/viewers")
@@ -802,7 +802,7 @@ async fn test_create_viewer_then_metric_is_reflected_in_viewer_api() {
     assert_eq!(viewers[0]["signals"][0], "metrics");
     assert_eq!(viewers[0]["entry_count"], 1, "1 metric should be reflected");
 
-    // verify entries via individual viewer API
+    // Check entries via individual viewer API
     let get_request = Request::builder()
         .method("GET")
         .uri(format!("/api/viewers/{viewer_id}"))
@@ -863,7 +863,7 @@ async fn test_create_viewer_then_log_is_reflected_in_viewer_api() {
     let create_payload: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
     let viewer_id = create_payload["id"].as_str().unwrap().to_string();
 
-    // verify entry_count via list API
+    // Check entry_count in list API
     let list_request = Request::builder()
         .method("GET")
         .uri("/api/viewers")
@@ -883,7 +883,7 @@ async fn test_create_viewer_then_log_is_reflected_in_viewer_api() {
     assert_eq!(viewers[0]["signals"][0], "logs");
     assert_eq!(viewers[0]["entry_count"], 1, "1 log should be reflected");
 
-    // verify entries via individual viewer API
+    // Check entries via individual viewer API
     let get_request = Request::builder()
         .method("GET")
         .uri(format!("/api/viewers/{viewer_id}"))
@@ -906,7 +906,7 @@ async fn test_create_viewer_then_log_is_reflected_in_viewer_api() {
     );
 }
 
-/// OTLP/HTTP metrics endpoint ingest
+/// Ingest via OTLP/HTTP metrics endpoint
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_ingest_metrics_via_otlp_http() {
@@ -938,7 +938,7 @@ async fn test_ingest_metrics_via_otlp_http() {
     );
 }
 
-/// OTLP/HTTP logs endpoint ingest
+/// Ingest via OTLP/HTTP logs endpoint
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_ingest_logs_via_otlp_http() {
@@ -970,7 +970,7 @@ async fn test_ingest_logs_via_otlp_http() {
     );
 }
 
-/// Returns 415 Unsupported Media Type when sending an unsupported content-type
+/// Returns 415 Unsupported Media Type when sending unsupported content-type
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_ingest_unsupported_content_type_returns_415() {
@@ -995,7 +995,7 @@ async fn test_ingest_unsupported_content_type_returns_415() {
     );
 }
 
-// --- GET /api/viewers/:id --------------------------------------------------
+// --- GET /api/viewers/:id ----------------------------------------------------
 
 /// GET /api/viewers/:id returns the correct viewer summary.
 ///
@@ -1165,9 +1165,9 @@ async fn test_get_viewer_by_id_invalid_uuid_returns_400() {
     );
 }
 
-// --- chart_type & PATCH ----------------------------------------------------
+// --- chart_type & PATCH ------------------------------------------------------
 
-/// Creating a viewer with chart_type reflects the chart_type in the response
+/// Creating viewer with chart_type is reflected in response chart_type
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_create_viewer_with_chart_type() {
@@ -1193,7 +1193,7 @@ async fn test_create_viewer_with_chart_type() {
     let create_payload: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
     let viewer_id = create_payload["id"].as_str().unwrap().to_string();
 
-    // verify chart_type is stacked_bar via GET /api/viewers/:id
+    // Verify chart_type is stacked_bar via GET /api/viewers/:id
     let get_request = Request::builder()
         .method("GET")
         .uri(format!("/api/viewers/{viewer_id}"))
@@ -1213,7 +1213,7 @@ async fn test_create_viewer_with_chart_type() {
     );
 }
 
-/// When chart_type is omitted, the default is "table"
+/// Omitting chart_type defaults to "table"
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_create_viewer_default_chart_type_is_table() {
@@ -1255,14 +1255,14 @@ async fn test_create_viewer_default_chart_type_is_table() {
     );
 }
 
-/// PATCH /api/viewers/:id changes chart_type and re-fetch reflects it
+/// Change chart_type via PATCH /api/viewers/:id -> reflected in subsequent GET
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_patch_viewer_chart_type() {
     let env = setup_viewer_app().await;
     let app = env.app;
 
-    // create metrics viewer with "table"
+    // Create metrics viewer with "table"
     let create_request = Request::builder()
         .method("POST")
         .uri("/api/viewers")
@@ -1281,7 +1281,7 @@ async fn test_patch_viewer_chart_type() {
     let create_payload: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
     let viewer_id = create_payload["id"].as_str().unwrap().to_string();
 
-    // PATCH to change to "line"
+    // Change to "line" via PATCH
     let patch_request = Request::builder()
         .method("PATCH")
         .uri(format!("/api/viewers/{viewer_id}"))
@@ -1298,7 +1298,7 @@ async fn test_patch_viewer_chart_type() {
         "PATCH should return 200 OK"
     );
 
-    // verify "line" is reflected via GET
+    // Verify changed to "line" via GET
     let get_request = Request::builder()
         .method("GET")
         .uri(format!("/api/viewers/{viewer_id}"))
@@ -1316,7 +1316,7 @@ async fn test_patch_viewer_chart_type() {
     );
 }
 
-/// Creating with invalid chart_type -> 400 BAD REQUEST
+/// Create with invalid chart_type -> 400 BAD REQUEST
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_create_viewer_invalid_chart_type_returns_400() {
@@ -1340,7 +1340,7 @@ async fn test_create_viewer_invalid_chart_type_returns_400() {
     );
 }
 
-/// PATCH to non-existent ID -> 404
+/// PATCH to nonexistent ID -> 404
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_patch_nonexistent_viewer_returns_404() {
@@ -1372,7 +1372,7 @@ async fn test_metric_entries_contain_metric_name_and_value() {
     let env = setup_viewer_app().await;
     let app = env.app;
 
-    // ingest metrics
+    // Ingest metrics
     let metric_request = Request::builder()
         .method("POST")
         .uri("/v1/metrics")
@@ -1387,7 +1387,7 @@ async fn test_metric_entries_contain_metric_name_and_value() {
     let metric_response = app.clone().oneshot(metric_request).await.unwrap();
     assert_eq!(metric_response.status(), StatusCode::OK);
 
-    // create metrics viewer
+    // Create metrics viewer
     let create_request = Request::builder()
         .method("POST")
         .uri("/api/viewers")
@@ -1407,7 +1407,7 @@ async fn test_metric_entries_contain_metric_name_and_value() {
     let create_payload: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
     let viewer_id = create_payload["id"].as_str().unwrap().to_string();
 
-    // verify entries contain metric_name / metric_value via GET /api/viewers/:id
+    // Verify entries contain metric_name / metric_value via GET /api/viewers/:id
     let get_request = Request::builder()
         .method("GET")
         .uri(format!("/api/viewers/{viewer_id}"))
@@ -1434,7 +1434,7 @@ async fn test_metric_entries_contain_metric_name_and_value() {
     );
 }
 
-// --- Memory store (no Docker required) ------------------------------------
+// --- Memory store (no Docker required) -------------------------------------
 
 struct MemoryViewerTestEnv {
     app: axum::Router,
@@ -1461,7 +1461,7 @@ async fn setup_memory_viewer_app() -> MemoryViewerTestEnv {
     MemoryViewerTestEnv { app }
 }
 
-// --- startup resume (memory) -----------------------------------------------
+// --- startup resume (memory) -------------------------------------------------
 
 #[tokio::test]
 async fn test_startup_resume_from_snapshot_memory() {
@@ -1516,13 +1516,13 @@ async fn test_startup_resume_from_snapshot_memory() {
     assert_eq!(
         state.entries.len(),
         3,
-        "only 3 entries after snapshot cursor should be ingested"
+        "only the 3 entries after snapshot cursor should be loaded"
     );
     assert!(state.last_cursor.traces.is_some());
     assert_ne!(
         state.last_cursor.traces.as_deref(),
         Some(cursor_id.as_str()),
-        "cursor should be advanced past the snapshot cursor"
+        "cursor should have advanced past the snapshot cursor"
     );
 }
 
@@ -1555,7 +1555,7 @@ async fn test_startup_resume_no_snapshot_falls_back_to_replay_memory() {
     assert_eq!(
         state.entries.len(),
         4,
-        "no snapshot -> 4 entries should be replayed from full memory store"
+        "no snapshot -> all 4 memory entries should be replayed"
     );
 }
 
@@ -1568,7 +1568,7 @@ async fn test_startup_resume_revision_mismatch_falls_back_to_replay_memory() {
     let def_id = def.id;
     viewer_store.insert_viewer_definition(&def).await.unwrap();
 
-    // old snapshot with revision=1 (future cursor -> 0 entries)
+    // Old snapshot with revision=1 (future cursor -> results in 0 entries)
     let mut cursor = StreamCursor::default();
     cursor.set(Signal::Traces, "9999999999999-0".to_string());
     let snapshot = ViewerSnapshotRow {
@@ -1601,11 +1601,11 @@ async fn test_startup_resume_revision_mismatch_falls_back_to_replay_memory() {
     assert_eq!(
         state.entries.len(),
         3,
-        "revision mismatch -> reset cursor and replay all 3 entries"
+        "revision mismatch -> cursor reset, all 3 entries should be replayed"
     );
 }
 
-// --- diff update (memory) --------------------------------------------------
+// --- diff update (memory) -----------------------------------------------------
 
 #[tokio::test]
 async fn test_diff_update_one_pass_fan_out_to_multiple_viewers_memory() {
@@ -1642,7 +1642,7 @@ async fn test_diff_update_one_pass_fan_out_to_multiple_viewers_memory() {
         assert_eq!(
             state.entries.len(),
             5,
-            "both viewers should have 5 entries reflected"
+            "5 entries should be reflected in each viewer"
         );
     }
 }
@@ -1672,7 +1672,7 @@ async fn test_snapshot_upsert_after_diff_update_memory() {
     }
     runtime.apply_diff_batch().await.unwrap();
 
-    // verify snapshot is upserted into memory viewer_store
+    // Verify snapshot is upserted in memory viewer_store
     let snapshots = viewer_store.load_snapshots(&[def_id]).await.unwrap();
     assert!(!snapshots.is_empty(), "snapshot should be saved");
     let snapshot = &snapshots[0];
@@ -1682,7 +1682,7 @@ async fn test_snapshot_upsert_after_diff_update_memory() {
         "traces cursor should be saved in snapshot"
     );
 
-    // resume from snapshot after restart (no new entries -> diff 0)
+    // Resume from snapshot after restart (no new entries -> diff 0)
     let runtime2 = ViewerRuntime::build(
         ViewerStore::Memory(viewer_store),
         StreamStore::Memory(stream_store),
@@ -1730,11 +1730,11 @@ async fn test_diff_update_prunes_entries_outside_lookback_memory() {
     assert_eq!(
         state.entries.len(),
         1,
-        "old entry outside lookback should be pruned, only 1 entry should remain"
+        "old entries outside lookback should be pruned, leaving 1 entry"
     );
 }
 
-// --- OTLP ingest (memory) --------------------------------------------------
+// --- OTLP ingest (memory) ----------------------------------------------------
 
 #[tokio::test]
 async fn test_ingest_traces_via_otlp_http_memory() {
@@ -1817,7 +1817,7 @@ async fn test_ingest_unsupported_content_type_returns_415_memory() {
     assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
 }
 
-// --- viewer API (memory) ---------------------------------------------------
+// --- viewer API (memory) -----------------------------------------------------
 
 #[tokio::test]
 async fn test_create_viewer_then_trace_is_reflected_in_viewer_api_memory() {
@@ -2408,7 +2408,7 @@ async fn test_metric_entries_contain_metric_name_and_value_memory() {
 }
 
 // ===========================================================================
-// --- Dashboard CRUD tests (Memory -- no Docker required) -------------------
+// --- Dashboard CRUD tests (Memory -- no Docker required) ------------------------
 // ===========================================================================
 
 #[tokio::test]
@@ -2416,7 +2416,7 @@ async fn test_create_dashboard_and_list_memory() {
     let env = setup_memory_viewer_app().await;
     let app = env.app;
 
-    // create 1 viewer
+    // Create 1 viewer
     let create_viewer_req = Request::builder()
         .method("POST")
         .uri("/api/viewers")
@@ -2435,7 +2435,7 @@ async fn test_create_dashboard_and_list_memory() {
         .unwrap()
         .to_string();
 
-    // create dashboard
+    // Create dashboard
     let create_req = Request::builder()
         .method("POST")
         .uri("/api/dashboards")
@@ -2454,7 +2454,7 @@ async fn test_create_dashboard_and_list_memory() {
         .unwrap()
         .to_string();
 
-    // verify dashboard list
+    // Check dashboard list
     let list_resp = app
         .oneshot(
             Request::builder()
@@ -2557,7 +2557,7 @@ async fn test_create_dashboard_with_viewers_then_get_detail_memory() {
     let env = setup_memory_viewer_app().await;
     let app = env.app;
 
-    // ingest trace data
+    // Ingest trace data
     let trace_req = Request::builder()
         .method("POST")
         .uri("/v1/traces")
@@ -2569,7 +2569,7 @@ async fn test_create_dashboard_with_viewers_then_get_detail_memory() {
         StatusCode::OK
     );
 
-    // create viewer
+    // Create viewer
     let create_viewer_resp = app
         .clone()
         .oneshot(
@@ -2593,7 +2593,7 @@ async fn test_create_dashboard_with_viewers_then_get_detail_memory() {
         .unwrap()
         .to_string();
 
-    // create dashboard
+    // Create dashboard
     let create_dash_resp = app
         .clone()
         .oneshot(
@@ -2617,7 +2617,7 @@ async fn test_create_dashboard_with_viewers_then_get_detail_memory() {
         .unwrap()
         .to_string();
 
-    // get dashboard details
+    // Get dashboard detail
     let get_resp = app
         .oneshot(
             Request::builder()
@@ -2677,7 +2677,7 @@ async fn test_patch_dashboard_name_and_columns_memory() {
     let env = setup_memory_viewer_app().await;
     let app = env.app;
 
-    // create
+    // Create
     let create_resp = app
         .clone()
         .oneshot(
@@ -2718,7 +2718,7 @@ async fn test_patch_dashboard_name_and_columns_memory() {
         .unwrap();
     assert_eq!(patch_resp.status(), StatusCode::OK);
 
-    // verify via GET
+    // Verify via GET
     let get_resp = app
         .oneshot(
             Request::builder()
@@ -2839,7 +2839,7 @@ async fn test_patch_dashboard_viewer_ids_memory() {
         .unwrap()
         .to_string();
 
-    // create dashboard (id1 only)
+    // Create dashboard (id1 only)
     let create_resp = app
         .clone()
         .oneshot(
@@ -2862,7 +2862,7 @@ async fn test_patch_dashboard_viewer_ids_memory() {
         .unwrap()
         .to_string();
 
-    // PATCH to change to id2
+    // Change to id2 via PATCH
     let patch_resp = app
         .clone()
         .oneshot(
@@ -2879,7 +2879,7 @@ async fn test_patch_dashboard_viewer_ids_memory() {
         .unwrap();
     assert_eq!(patch_resp.status(), StatusCode::OK);
 
-    // verify via GET
+    // Verify via GET
     let get_resp = app
         .oneshot(
             Request::builder()
@@ -2926,7 +2926,7 @@ async fn test_delete_dashboard_memory() {
     let env = setup_memory_viewer_app().await;
     let app = env.app;
 
-    // create
+    // Create
     let create_resp = app
         .clone()
         .oneshot(
@@ -2999,7 +2999,7 @@ async fn test_dashboard_skips_missing_viewers_memory() {
     let env = setup_memory_viewer_app().await;
     let app = env.app;
 
-    // create dashboard with non-existent viewer_id
+    // Create dashboard with nonexistent viewer_id
     let nonexistent_viewer_id = Uuid::new_v4().to_string();
     let create_resp = app
         .clone()
@@ -3025,7 +3025,7 @@ async fn test_dashboard_skips_missing_viewers_memory() {
         .unwrap()
         .to_string();
 
-    // GET detail -- panels is empty (non-existent viewer_id is skipped)
+    // GET detail -- panels are empty (nonexistent viewer_id is skipped)
     let get_resp = app
         .oneshot(
             Request::builder()
@@ -3040,7 +3040,7 @@ async fn test_dashboard_skips_missing_viewers_memory() {
         .await
         .unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    // non-existent viewer_id is skipped so panels is empty
+    // Nonexistent viewer_id is skipped so panels are empty
     let panels = payload["panels"].as_array().unwrap();
     assert!(panels.is_empty());
 }
@@ -3064,6 +3064,211 @@ async fn test_create_dashboard_without_runtime_returns_503_memory() {
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
+// --- Dashboard Viewer order tests (memory -- no Docker required) ------------
+
+/// Given: a dashboard with 3 Viewers created in order [v1, v2, v3]
+/// When: fetching the dashboard via GET /api/dashboards/{id}
+/// Then: panels have positions 0, 1, 2 respectively
+#[tokio::test]
+async fn test_create_dashboard_panels_have_positions_in_order_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // Create 3 Viewers
+    let mut viewer_ids = Vec::new();
+    for name in ["V1", "V2", "V3"] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/viewers")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({ "name": name, "signal": "traces" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        viewer_ids.push(id);
+    }
+
+    // Create dashboard in order [v1, v2, v3]
+    let create_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/dashboards")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "name": "Order Test", "viewer_ids": viewer_ids }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let dash_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Verify positions via GET
+    let get_resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/dashboards/{dash_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(get_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let panels = payload["panels"].as_array().unwrap();
+    assert_eq!(panels.len(), 3);
+
+    // Sort by position and verify order
+    let mut sorted_panels = panels.clone();
+    sorted_panels.sort_by_key(|p| p["position"].as_u64().unwrap());
+    for (i, panel) in sorted_panels.iter().enumerate() {
+        assert_eq!(
+            panel["position"].as_u64().unwrap(),
+            i as u64,
+            "panel at sorted index {i} should have position {i}"
+        );
+        assert_eq!(
+            panel["viewer_id"].as_str().unwrap(),
+            viewer_ids[i],
+            "panel at position {i} should have viewer_ids[{i}]"
+        );
+    }
+}
+
+/// Given: a dashboard created with [v1, v2]
+/// When: changing viewer_ids to [v2, v1] (reversed) via PATCH
+/// Then: GET shows v2.position == 0, v1.position == 1
+#[tokio::test]
+async fn test_patch_dashboard_reorder_viewers_updates_positions_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // Create 2 Viewers
+    let mut viewer_ids = Vec::new();
+    for name in ["Alpha", "Beta"] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/viewers")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({ "name": name, "signal": "traces" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        viewer_ids.push(id);
+    }
+    let (id_alpha, id_beta) = (viewer_ids[0].clone(), viewer_ids[1].clone());
+
+    // Create dashboard in order [alpha, beta]
+    let create_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/dashboards")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "name": "Reorder Test", "viewer_ids": [&id_alpha, &id_beta] })
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let dash_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Change to reversed order [beta, alpha] via PATCH
+    let patch_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/dashboards/{dash_id}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "viewer_ids": [&id_beta, &id_alpha] }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(patch_resp.status(), StatusCode::OK);
+
+    // Verify positions are updated via GET
+    let get_resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/dashboards/{dash_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(get_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let panels = payload["panels"].as_array().unwrap();
+    assert_eq!(panels.len(), 2);
+
+    // Sort by position and verify beta comes first, alpha second
+    let mut sorted = panels.clone();
+    sorted.sort_by_key(|p| p["position"].as_u64().unwrap());
+    assert_eq!(
+        sorted[0]["viewer_id"].as_str().unwrap(),
+        id_beta,
+        "after reorder, beta (position 0) should come first"
+    );
+    assert_eq!(
+        sorted[1]["viewer_id"].as_str().unwrap(),
+        id_alpha,
+        "after reorder, alpha (position 1) should come second"
+    );
+}
+
 // ===========================================================================
 // --- Dashboard CRUD tests (Docker -- requires Docker) ----------------------
 // ===========================================================================
@@ -3074,7 +3279,7 @@ async fn test_create_dashboard_and_list() {
     let env = setup_viewer_app().await;
     let app = env.app;
 
-    // create viewer
+    // Create viewer
     let create_viewer_resp = app
         .clone()
         .oneshot(
@@ -3098,7 +3303,7 @@ async fn test_create_dashboard_and_list() {
         .unwrap()
         .to_string();
 
-    // create dashboard
+    // Create dashboard
     let create_resp = app
         .clone()
         .oneshot(
@@ -3123,7 +3328,7 @@ async fn test_create_dashboard_and_list() {
         .unwrap()
         .to_string();
 
-    // verify list
+    // Check list
     let list_resp = app
         .oneshot(
             Request::builder()
