@@ -2466,7 +2466,6 @@ async fn patch_viewer(
 
 // --- Dashboard API ----------------------------------------------------------
 
-
 #[derive(Debug, Deserialize)]
 struct CreateDashboardRequest {
     name: String,
