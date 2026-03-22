@@ -1,4 +1,4 @@
-use crate::domain::dashboard::DashboardDefinition;
+use crate::domain::dashboard::{DashboardDefinition, build_layout_json};
 use crate::domain::telemetry::{Signal, SignalMask};
 use crate::domain::viewer::{ViewerDefinition, ViewerStatus};
 use crate::ingest::decode::DecodeError;
@@ -593,11 +593,30 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         padding: 4px;
       }
 
-      .viewer-checkbox-item {
+      .viewer-drag-handle {
+        cursor: grab;
+        color: var(--muted);
+        user-select: none;
+        font-size: 1rem;
+        line-height: 1;
+      }
+
+      .viewer-sortable-item {
         display: flex;
         align-items: center;
         gap: 8px;
         font-size: 0.88rem;
+        padding: 3px 0;
+        border-radius: 6px;
+      }
+
+      .viewer-sortable-item.drag-over {
+        outline: 2px solid var(--teal);
+        background: var(--teal-soft);
+      }
+
+      .viewer-sortable-item.dragging {
+        opacity: 0.4;
       }
 
       .chart-section {
@@ -987,6 +1006,67 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
         element.textContent = text;
         return element;
+      }
+
+      function createViewerItem(v, checked) {
+        const item = document.createElement('div');
+        item.className = 'viewer-sortable-item';
+        item.draggable = true;
+        item.dataset.viewerId = v.id;
+        const handle = document.createElement('span');
+        handle.className = 'viewer-drag-handle';
+        handle.textContent = '\u22EE';
+        handle.setAttribute('aria-hidden', 'true');
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = checked;
+        const label = document.createElement('span');
+        label.textContent = v.name;
+        item.appendChild(handle);
+        item.appendChild(cb);
+        item.appendChild(label);
+        return item;
+      }
+
+      function attachSortableListeners(checkList) {
+        let dragSrc = null;
+        let prevTarget = null;
+        checkList.addEventListener('dragstart', e => {
+          const item = e.target.closest('.viewer-sortable-item');
+          if (!item) return;
+          if (e.target.tagName === 'INPUT') { e.preventDefault(); return; }
+          dragSrc = item;
+          item.classList.add('dragging');
+          e.dataTransfer.effectAllowed = 'move';
+        });
+        checkList.addEventListener('dragend', e => {
+          if (dragSrc) dragSrc.classList.remove('dragging');
+          if (prevTarget) prevTarget.classList.remove('drag-over');
+          dragSrc = null;
+          prevTarget = null;
+        });
+        checkList.addEventListener('dragover', e => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          const target = e.target.closest('.viewer-sortable-item');
+          if (!target || target === dragSrc || target === prevTarget) return;
+          if (prevTarget) prevTarget.classList.remove('drag-over');
+          target.classList.add('drag-over');
+          prevTarget = target;
+        });
+        checkList.addEventListener('dragleave', e => {
+          if (!checkList.contains(e.relatedTarget)) {
+            if (prevTarget) prevTarget.classList.remove('drag-over');
+            prevTarget = null;
+          }
+        });
+        checkList.addEventListener('drop', e => {
+          e.preventDefault();
+          const target = e.target.closest('.viewer-sortable-item');
+          if (!target || target === dragSrc || !dragSrc) return;
+          checkList.insertBefore(dragSrc, target);
+          target.classList.remove('drag-over');
+        });
       }
 
       function formatLookbackMs(lookbackMs) {
@@ -1825,17 +1905,21 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
         const checkList = document.createElement('div');
         checkList.className = 'viewer-checkbox-list';
-        for (const v of viewers) {
-          const item = document.createElement('label');
-          item.className = 'viewer-checkbox-item';
-          const cb = document.createElement('input');
-          cb.type = 'checkbox';
-          cb.value = v.id;
-          cb.checked = currentViewerIds.has(v.id);
-          item.appendChild(cb);
-          item.appendChild(document.createTextNode(v.name));
-          checkList.appendChild(item);
+
+        const orderedIds = [...dash.panels]
+          .sort((a, b) => a.position - b.position)
+          .map(p => p.viewer_id);
+        const viewerMap = Object.fromEntries(viewers.map(v => [v.id, v]));
+        const orderedViewers = [
+          ...orderedIds.filter(id => viewerMap[id]).map(id => viewerMap[id]),
+          ...viewers.filter(v => !currentViewerIds.has(v.id)),
+        ];
+
+        for (const v of orderedViewers) {
+          checkList.appendChild(createViewerItem(v, currentViewerIds.has(v.id)));
         }
+        attachSortableListeners(checkList);
+
         box.appendChild(checkList);
 
         const actions = document.createElement('div');
@@ -1854,7 +1938,8 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         saveBtn.addEventListener('click', async () => {
           const name = nameInput.value.trim();
           const columns = parseInt(colInput.value, 10);
-          const viewer_ids = [...checkList.querySelectorAll('input:checked')].map(cb => cb.value);
+          const viewer_ids = [...checkList.querySelectorAll('.viewer-sortable-item:has(input[type="checkbox"]:checked)')]
+            .map(item => item.dataset.viewerId);
           if (!name) { nameInput.focus(); return; }
           saveBtn.disabled = true;
           try {
@@ -1922,15 +2007,10 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           checkList = document.createElement('div');
           checkList.className = 'viewer-checkbox-list';
           for (const v of viewers) {
-            const item = document.createElement('label');
-            item.className = 'viewer-checkbox-item';
-            const cb = document.createElement('input');
-            cb.type = 'checkbox';
-            cb.value = v.id;
-            item.appendChild(cb);
-            item.appendChild(document.createTextNode(v.name));
-            checkList.appendChild(item);
+            checkList.appendChild(createViewerItem(v, false));
           }
+          attachSortableListeners(checkList);
+
           box.appendChild(checkList);
         }
 
@@ -1950,7 +2030,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         createBtn.addEventListener('click', async () => {
           const name = nameInput.value.trim();
           const columns = parseInt(colInput.value, 10);
-          const viewer_ids = checkList ? [...checkList.querySelectorAll('input:checked')].map(cb => cb.value) : [];
+          const viewer_ids = checkList ? [...checkList.querySelectorAll('.viewer-sortable-item:has(input[type="checkbox"]:checked)')].map(item => item.dataset.viewerId) : [];
           if (!name) { nameInput.focus(); return; }
           createBtn.disabled = true;
           try {
@@ -2306,6 +2386,13 @@ fn default_columns() -> u32 {
     2
 }
 
+fn columns_from_layout(layout_json: &serde_json::Value) -> u32 {
+    layout_json
+        .get("columns")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(2) as u32
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateDashboardRequest {
     name: String,
@@ -2374,8 +2461,6 @@ fn dashboard_panels_from_layout(layout_json: &serde_json::Value) -> Vec<(Uuid, u
         })
         .collect()
 }
-
-use crate::domain::dashboard::build_layout_json;
 
 async fn list_dashboards(
     State(state): State<AppState>,
@@ -2449,11 +2534,7 @@ async fn get_dashboard(
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let columns = dashboard
-        .layout_json
-        .get("columns")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(2) as u32;
+    let columns = columns_from_layout(&dashboard.layout_json);
 
     let panel_entries = dashboard_panels_from_layout(&dashboard.layout_json);
 
@@ -2467,12 +2548,11 @@ async fn get_dashboard(
                 let viewer = viewers
                     .iter()
                     .find(|(v, _)| v.definition().id == viewer_id)
-                    .map(|(v, state)| viewer_summary(v, state, true));
-                viewer.as_ref()?; // Skip viewers that do not exist
+                    .map(|(v, state)| viewer_summary(v, state, true))?;
                 Some(DashboardPanel {
                     viewer_id,
                     position,
-                    viewer,
+                    viewer: Some(viewer),
                 })
             })
             .collect()
@@ -2522,12 +2602,9 @@ async fn patch_dashboard(
     }
 
     let new_layout = if payload.viewer_ids.is_some() || payload.columns.is_some() {
-        let current_columns = current
-            .layout_json
-            .get("columns")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(2) as u32;
-        let columns = payload.columns.unwrap_or(current_columns);
+        let columns = payload
+            .columns
+            .unwrap_or_else(|| columns_from_layout(&current.layout_json));
 
         let current_panels = dashboard_panels_from_layout(&current.layout_json);
         let viewer_ids: Vec<Uuid> = if let Some(ids) = payload.viewer_ids {
@@ -3290,6 +3367,8 @@ mod tests {
         assert!(html.contains("page-dashboard"));
         assert!(html.contains("dashboard-grid"));
         assert!(html.contains("sidebar-toggle"));
+        assert!(html.contains("viewer-sortable-item"));
+        assert!(html.contains("viewer-drag-handle"));
     }
 
     #[tokio::test]
