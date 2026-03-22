@@ -10,6 +10,7 @@
 use axum::http::{Request, StatusCode};
 use bytes::Bytes;
 use chrono::{Duration, Utc};
+use litelemetry::domain::dashboard::DashboardDefinition;
 use litelemetry::domain::telemetry::{NormalizedEntry, Signal, SignalMask};
 use litelemetry::domain::viewer::ViewerDefinition;
 use litelemetry::server::{build_app, build_app_with_services};
@@ -2119,7 +2120,49 @@ async fn test_get_viewer_by_id_invalid_uuid_returns_400_memory() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-// --- chart_type & PATCH (memory) ---------------------------------------------
+#[tokio::test]
+async fn test_get_viewer_by_id_defaults_missing_chart_type_to_table_memory() {
+    let stream_store = MemoryStreamStore::new(100_000);
+    let viewer_store = MemoryViewerStore::new();
+
+    let def = make_viewer_def(Signal::Traces.into(), 300_000, 1);
+    let viewer_id = def.id;
+    viewer_store.insert_viewer_definition(&def).await.unwrap();
+
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Memory(viewer_store.clone()),
+        StreamStore::Memory(stream_store.clone()),
+    )
+    .await
+    .unwrap();
+    let runtime = Arc::new(Mutex::new(runtime));
+
+    let app = build_app_with_services(
+        StreamStore::Memory(stream_store),
+        Some(ViewerStore::Memory(viewer_store)),
+        Some(runtime),
+    );
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["chart_type"], "table");
+}
+
+// --- chart_type & PATCH (memory) -------------------------------------------
 
 #[tokio::test]
 async fn test_create_viewer_with_chart_type_memory() {
@@ -2431,6 +2474,85 @@ async fn test_create_dashboard_and_list_memory() {
 }
 
 #[tokio::test]
+async fn test_get_dashboard_defaults_missing_columns_to_two_memory() {
+    let stream_store = MemoryStreamStore::new(100_000);
+    let viewer_store = MemoryViewerStore::new();
+
+    let dashboard = DashboardDefinition {
+        id: Uuid::new_v4(),
+        slug: "legacy-dashboard".to_string(),
+        name: "Legacy Dashboard".to_string(),
+        layout_json: json!({ "panels": [] }),
+        revision: 1,
+        enabled: true,
+    };
+    let dashboard_id = dashboard.id;
+    viewer_store.insert_dashboard(&dashboard).await.unwrap();
+
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Memory(viewer_store.clone()),
+        StreamStore::Memory(stream_store.clone()),
+    )
+    .await
+    .unwrap();
+    let runtime = Arc::new(Mutex::new(runtime));
+
+    let app = build_app_with_services(
+        StreamStore::Memory(stream_store),
+        Some(ViewerStore::Memory(viewer_store)),
+        Some(runtime),
+    );
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/dashboards/{dashboard_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["columns"], 2);
+}
+
+#[tokio::test]
+async fn test_create_dashboard_invalid_columns_returns_400_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    for invalid_columns in [0, 5] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/dashboards")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({ "name": "Invalid Columns", "columns": invalid_columns })
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "columns={invalid_columns} should be rejected"
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_create_dashboard_with_viewers_then_get_detail_memory() {
     let env = setup_memory_viewer_app().await;
     let app = env.app;
@@ -2612,6 +2734,58 @@ async fn test_patch_dashboard_name_and_columns_memory() {
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["name"], "Updated Name");
     assert_eq!(payload["columns"], 3);
+}
+
+#[tokio::test]
+async fn test_patch_dashboard_invalid_columns_returns_400_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let create_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/dashboards")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "name": "Original Name", "columns": 2 }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let dash_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    for invalid_columns in [0, 5] {
+        let patch_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/dashboards/{dash_id}"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({ "columns": invalid_columns }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            patch_resp.status(),
+            StatusCode::BAD_REQUEST,
+            "columns={invalid_columns} should be rejected"
+        );
+    }
 }
 
 #[tokio::test]
