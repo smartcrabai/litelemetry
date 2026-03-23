@@ -6,7 +6,7 @@ env:
 
 on:
   push:
-    branches: ["main"]
+    tags: ["v*.*.*"]
 
 jobs:
   test:
@@ -44,7 +44,7 @@ jobs:
       with:
         images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
         tags: |
-          type=raw,value=${{ github.sha }}
+          type=semver,pattern={{version}}
           type=raw,value=latest
 
     - name: Build and push
