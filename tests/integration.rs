@@ -3581,6 +3581,616 @@ async fn test_dashboard_skips_missing_viewers() {
     assert!(payload["panels"].as_array().unwrap().is_empty());
 }
 
+// ===========================================================================
+// --- Viewer query filter tests (Memory -- no Docker required) --------------
+// ===========================================================================
+
+/// Create viewer with query → only matching entries appear in detail
+#[tokio::test]
+async fn test_create_viewer_with_query_filters_matching_entries_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // Given: two traces ingested — one from "checkout-ui", one from "orders-api"
+    for (service, span) in [
+        ("checkout-ui", "render-checkout"),
+        ("orders-api", "process-order"),
+    ] {
+        assert_eq!(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/traces")
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(make_trace_payload(service, span)))
+                        .unwrap()
+                )
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+
+    // When: create viewer with query="checkout-ui"
+    let create_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/viewers")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "name": "Checkout only", "signal": "traces", "query": "checkout-ui" })
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Then: viewer detail shows only the checkout-ui entry
+    let get_body = axum::body::to_bytes(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/viewers/{viewer_id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let viewer: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+
+    assert_eq!(
+        viewer["entry_count"], 1,
+        "only matching entry should be counted"
+    );
+    assert_eq!(viewer["entries"][0]["service_name"], "checkout-ui");
+    assert_eq!(
+        viewer["query"], "checkout-ui",
+        "viewer summary should expose the current query"
+    );
+}
+
+/// Create viewer with query → non-matching entries excluded from entry_count and entries list
+#[tokio::test]
+async fn test_create_viewer_with_query_excludes_non_matching_from_entry_count_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // Given: ingest 3 traces from different services
+    for (service, span) in [
+        ("svc-alpha", "op-alpha"),
+        ("svc-beta", "op-beta"),
+        ("svc-gamma", "op-gamma"),
+    ] {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/traces")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(make_trace_payload(service, span)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    // When: create viewer with query matching only "svc-alpha"
+    let create_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/viewers")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "name": "Alpha only", "signal": "traces", "query": "svc-alpha" })
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Then: entry_count = 1 (only svc-alpha), not 3
+    let get_body = axum::body::to_bytes(
+        app.oneshot(
+            Request::builder()
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let viewer: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+    assert_eq!(viewer["entry_count"], 1);
+    assert_eq!(viewer["entries"][0]["service_name"], "svc-alpha");
+}
+
+/// Create viewer without query → all entries pass (backward-compatible match-all)
+#[tokio::test]
+async fn test_create_viewer_without_query_shows_all_entries_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // Given: ingest 2 traces from different services
+    for (svc, span) in [("svc-x", "op-x"), ("svc-y", "op-y")] {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/traces")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(make_trace_payload(svc, span)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    // When: create viewer with NO query
+    let create_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/viewers")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "name": "All traces", "signal": "traces" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Then: all 2 entries appear
+    let get_body = axum::body::to_bytes(
+        app.oneshot(
+            Request::builder()
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let viewer: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+    assert_eq!(
+        viewer["entry_count"], 2,
+        "without query all entries should be included"
+    );
+    assert_eq!(
+        viewer["query"],
+        serde_json::Value::Null,
+        "query field should be absent when not set"
+    );
+}
+
+/// PATCH viewer query → viewer state is rebuilt and old non-matching entries are removed
+#[tokio::test]
+async fn test_patch_viewer_query_rebuilds_state_removes_non_matching_entries_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // Given: ingest traces from two services
+    for (svc, span) in [
+        ("checkout-ui", "render-checkout"),
+        ("orders-api", "process-order"),
+    ] {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/traces")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(make_trace_payload(svc, span)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    // Create a viewer with no query → sees both entries
+    let create_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/viewers")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "name": "All traces", "signal": "traces" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Confirm both entries are present before patch
+    let pre_body = axum::body::to_bytes(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/viewers/{viewer_id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let pre: serde_json::Value = serde_json::from_slice(&pre_body).unwrap();
+    assert_eq!(pre["entry_count"], 2, "should see 2 entries before patch");
+
+    // When: PATCH to add query="checkout-ui"
+    let patch_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "query": "checkout-ui" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(patch_resp.status(), StatusCode::OK);
+
+    // Then: viewer now shows only checkout-ui entry
+    let post_body = axum::body::to_bytes(
+        app.oneshot(
+            Request::builder()
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let post: serde_json::Value = serde_json::from_slice(&post_body).unwrap();
+    assert_eq!(
+        post["entry_count"], 1,
+        "after patching query, only matching entry should remain"
+    );
+    assert_eq!(post["entries"][0]["service_name"], "checkout-ui");
+    assert_eq!(post["query"], "checkout-ui");
+}
+
+/// POST /api/viewers/preview → returns matching entries without persisting a viewer
+#[tokio::test]
+async fn test_preview_viewer_returns_matching_entries_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // Given: two traces ingested
+    for (svc, span) in [
+        ("checkout-ui", "render-checkout"),
+        ("orders-api", "process-order"),
+    ] {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/traces")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(make_trace_payload(svc, span)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    // When: POST /api/viewers/preview with signal=traces, query=checkout-ui
+    let preview_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/viewers/preview")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "signal": "traces", "query": "checkout-ui" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview_resp.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(preview_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let preview: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    // Then: only checkout-ui entry is returned
+    assert_eq!(preview["entry_count"], 1);
+    assert_eq!(preview["entries"][0]["service_name"], "checkout-ui");
+    assert_eq!(preview["signal"], "traces");
+    assert_eq!(preview["query"], "checkout-ui");
+}
+
+/// POST /api/viewers/preview → does not create a viewer or increase viewer list count
+#[tokio::test]
+async fn test_preview_viewer_does_not_persist_viewer_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // Given: ingest a trace
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/traces")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(make_trace_payload("svc-a", "op-a")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // When: POST /api/viewers/preview
+    let preview_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/viewers/preview")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "signal": "traces", "query": "svc-a" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview_resp.status(), StatusCode::OK);
+
+    // Then: viewer list is still empty — preview did not persist anything
+    let list_body = axum::body::to_bytes(
+        app.oneshot(
+            Request::builder()
+                .uri("/api/viewers")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let list: serde_json::Value = serde_json::from_slice(&list_body).unwrap();
+    assert_eq!(
+        list["viewers"].as_array().unwrap().len(),
+        0,
+        "preview must not persist a viewer"
+    );
+}
+
+/// Preview and viewer detail must agree on matching entries for the same signal/query
+#[tokio::test]
+async fn test_preview_and_viewer_detail_are_consistent_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // Given: ingest two traces
+    for (svc, span) in [
+        ("checkout-ui", "render-checkout"),
+        ("orders-api", "process-order"),
+    ] {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/traces")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(make_trace_payload(svc, span)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    // Run preview with query="checkout-ui"
+    let preview_body = axum::body::to_bytes(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/viewers/preview")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({ "signal": "traces", "query": "checkout-ui" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let preview: serde_json::Value = serde_json::from_slice(&preview_body).unwrap();
+
+    // Create a viewer with the same signal/query
+    let create_body = axum::body::to_bytes(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/viewers")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({ "name": "Checkout viewer", "signal": "traces", "query": "checkout-ui" })
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&create_body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let detail_body = axum::body::to_bytes(
+        app.oneshot(
+            Request::builder()
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let detail: serde_json::Value = serde_json::from_slice(&detail_body).unwrap();
+
+    // Then: preview and detail must report the same entry_count
+    assert_eq!(
+        preview["entry_count"], detail["entry_count"],
+        "preview and viewer detail must agree on match count"
+    );
+}
+
+/// Existing chart_type PATCH still works when query is not provided
+#[tokio::test]
+async fn test_patch_chart_type_without_query_still_works_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // Create viewer (no query)
+    let create_body = axum::body::to_bytes(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/viewers")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({ "name": "Chart test", "signal": "metrics" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&create_body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // PATCH only chart_type (no query field)
+    let patch_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "chart_type": "line" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(patch_resp.status(), StatusCode::OK);
+
+    // Verify chart_type changed
+    let get_body = axum::body::to_bytes(
+        app.oneshot(
+            Request::builder()
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let viewer: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+    assert_eq!(viewer["chart_type"], "line");
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_create_dashboard_without_runtime_returns_503() {

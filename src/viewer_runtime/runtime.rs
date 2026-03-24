@@ -150,24 +150,7 @@ impl ViewerRuntime {
         let revision = definition.revision;
         let viewer = compile(definition)?;
         let mut state = ViewerState::new(viewer_id, revision);
-        let now = Utc::now();
-
-        for signal in Signal::all() {
-            if !viewer.matches_signal(signal) {
-                continue;
-            }
-
-            let entries = self
-                .stream_store
-                .read_entries_since(signal, None, 100_000)
-                .await?;
-            for (entry_id, entry) in entries {
-                apply_entry(&mut state, &viewer, entry);
-                state.last_cursor.set(signal, entry_id);
-            }
-        }
-
-        prune_stale_buckets(&mut state, viewer.lookback_ms(), now);
+        populate_state_from_stream(&mut self.stream_store, &viewer, &mut state).await?;
         self.viewers.push((viewer, state));
         Ok(())
     }
@@ -188,9 +171,64 @@ impl ViewerRuntime {
         false
     }
 
+    /// Rebuilds a viewer's state from scratch using the updated definition_json/layout_json.
+    /// Re-scans the stream from the beginning so that stale entries (no longer matching the
+    /// new query) are evicted and new matches are included.
+    /// Returns true if the viewer was found and rebuilt.
+    pub async fn rebuild_viewer(
+        &mut self,
+        id: Uuid,
+        definition_json: Value,
+        layout_json: Value,
+    ) -> Result<bool, RuntimeError> {
+        let idx = match self
+            .viewers
+            .iter()
+            .position(|(v, _)| v.definition().id == id)
+        {
+            Some(i) => i,
+            None => return Ok(false),
+        };
+
+        let mut updated_def = self.viewers[idx].0.definition().clone();
+        updated_def.definition_json = definition_json;
+        updated_def.layout_json = layout_json;
+        updated_def.revision += 1;
+
+        let viewer = compile(updated_def)?;
+        let mut state = ViewerState::new(viewer.definition().id, viewer.definition().revision);
+        populate_state_from_stream(&mut self.stream_store, &viewer, &mut state).await?;
+        self.viewers[idx] = (viewer, state);
+        Ok(true)
+    }
+
     pub fn viewers(&self) -> &[(CompiledViewer, ViewerState)] {
         &self.viewers
     }
+}
+
+/// Scans the stream for all signals the viewer cares about, applies matching entries to
+/// `state`, and prunes stale buckets.  Used by both `add_viewer` and `rebuild_viewer`.
+async fn populate_state_from_stream(
+    stream_store: &mut StreamStore,
+    viewer: &CompiledViewer,
+    state: &mut ViewerState,
+) -> Result<(), RuntimeError> {
+    let now = Utc::now();
+    for signal in Signal::all() {
+        if !viewer.matches_signal(signal) {
+            continue;
+        }
+        let entries = stream_store
+            .read_entries_since(signal, None, 100_000)
+            .await?;
+        for (entry_id, entry) in entries {
+            apply_entry(state, viewer, entry);
+            state.last_cursor.set(signal, entry_id);
+        }
+    }
+    prune_stale_buckets(state, viewer.lookback_ms(), now);
+    Ok(())
 }
 
 /// Reads the stream once for the specified signal and fans out entries to all viewers.
