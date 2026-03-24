@@ -202,6 +202,10 @@ impl ViewerRuntime {
         Ok(true)
     }
 
+    pub fn remove_viewer(&mut self, id: Uuid) {
+        self.viewers.retain(|(v, _)| v.definition().id != id);
+    }
+
     pub fn viewers(&self) -> &[(CompiledViewer, ViewerState)] {
         &self.viewers
     }

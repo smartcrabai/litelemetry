@@ -174,6 +174,14 @@ impl MemoryViewerStore {
         Ok(())
     }
 
+    pub async fn delete_viewer(&self, id: Uuid) -> Result<bool, StorageError> {
+        let mut guard = self.inner.lock().await;
+        let before = guard.definitions.len();
+        guard.definitions.retain(|d| d.id != id);
+        guard.snapshots.remove(&id);
+        Ok(guard.definitions.len() < before)
+    }
+
     // --- Dashboard CRUD ------------------------------------------------------
 
     pub async fn insert_dashboard(

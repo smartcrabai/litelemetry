@@ -120,6 +120,13 @@ impl ViewerStore {
         }
     }
 
+    pub async fn delete_viewer(&self, id: Uuid) -> Result<bool, StorageError> {
+        match self {
+            ViewerStore::Postgres(s) => s.delete_viewer(id).await.map_err(StorageError::Postgres),
+            ViewerStore::Memory(s) => s.delete_viewer(id).await,
+        }
+    }
+
     // --- Dashboard CRUD ------------------------------------------------------
 
     pub async fn insert_dashboard(

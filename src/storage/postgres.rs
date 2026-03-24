@@ -329,6 +329,21 @@ impl PostgresStore {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Deletes a viewer and its snapshots
+    pub async fn delete_viewer(&self, id: Uuid) -> Result<bool, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM viewer_snapshots WHERE viewer_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        let result = sqlx::query("DELETE FROM viewer_definitions WHERE id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Deletes a dashboard
     pub async fn delete_dashboard(&self, id: Uuid) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("DELETE FROM dashboard_definitions WHERE id = $1")
