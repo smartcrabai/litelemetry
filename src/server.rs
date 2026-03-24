@@ -90,11 +90,15 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       }
 
       main {
-        width: min(1200px, calc(100% - 32px));
+        width: min(1200px, calc(100% - 48px));
         margin: 0 auto;
-        padding: 32px 0 44px;
+        padding: 48px 0 56px;
+      }
+
+      #page-viewers,
+      #page-dashboard {
         display: grid;
-        gap: 18px;
+        gap: 24px;
       }
 
       .stack,
@@ -477,8 +481,8 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       }
 
       main.with-sidebar {
-        margin-left: var(--sidebar-width);
-        width: min(1200px, calc(100% - var(--sidebar-width) - 32px));
+        margin-left: calc(var(--sidebar-width) + 24px);
+        width: min(1200px, calc(100% - var(--sidebar-width) - 72px));
       }
 
       /* --- Dashboard page --- */
@@ -486,7 +490,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         display: flex;
         align-items: center;
         gap: 16px;
-        padding: 24px 0 8px;
+        padding: 8px 0;
       }
 
       .dashboard-page-header h2 {
@@ -547,7 +551,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
         main.with-sidebar {
           margin-left: 0;
-          width: min(1200px, calc(100% - 32px));
+          width: min(1200px, calc(100% - 48px));
         }
 
         .dashboard-grid {
@@ -3615,8 +3619,8 @@ mod tests {
     async fn test_main_with_sidebar_width_accounts_for_sidebar() {
         let (_, html) = index_html().await;
         assert!(
-            html.contains("width: min(1200px, calc(100% - var(--sidebar-width) - 32px))"),
-            "main.with-sidebar must constrain width to viewport minus sidebar (var(--sidebar-width)) and right gap (32px)"
+            html.contains("width: min(1200px, calc(100% - var(--sidebar-width) - 72px))"),
+            "main.with-sidebar must constrain width to viewport minus sidebar, left gap (24px), and right gap (48px)"
         );
     }
 
