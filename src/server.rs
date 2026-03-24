@@ -1,10 +1,11 @@
 use crate::domain::dashboard::{DashboardDefinition, build_layout_json};
-use crate::domain::telemetry::{Signal, SignalMask};
+use crate::domain::telemetry::{NormalizedEntry, Signal, SignalMask};
 use crate::domain::viewer::{ViewerDefinition, ViewerStatus};
 use crate::ingest::decode::DecodeError;
 use crate::ingest::otlp_http::parse_ingest_request;
 use crate::storage::{StreamStore, ViewerStore};
-use crate::viewer_runtime::compiler::CompiledViewer;
+use crate::viewer_runtime::compiler::{CompiledViewer, compile, query_from_definition};
+use crate::viewer_runtime::reducer::{apply_entry, prune_stale_buckets};
 use crate::viewer_runtime::runtime::ViewerRuntime;
 use crate::viewer_runtime::state::ViewerState;
 use axum::{
@@ -2193,11 +2194,32 @@ struct CreateViewerRequest {
     signal: String,
     #[serde(default = "default_chart_type")]
     chart_type: String,
+    #[serde(default)]
+    query: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct PatchViewerRequest {
-    chart_type: String,
+    chart_type: Option<String>,
+    #[serde(default)]
+    query: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PreviewViewerRequest {
+    signal: String,
+    #[serde(default)]
+    query: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ViewerPreviewResponse {
+    signal: String,
+    query: Option<String>,
+    entry_count: usize,
+    entries: Vec<ViewerEntryRow>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    traces: Vec<TraceSummary>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2217,6 +2239,8 @@ struct ViewerSummary {
     name: String,
     signals: Vec<&'static str>,
     chart_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    query: Option<String>,
     refresh_interval_ms: u32,
     lookback_ms: i64,
     entry_count: usize,
@@ -2283,6 +2307,7 @@ pub fn build_app_with_services(
         .route("/", get(index))
         .route("/healthz", get(healthz))
         .route("/api/viewers", get(list_viewers).post(create_viewer))
+        .route("/api/viewers/preview", post(preview_viewer))
         .route("/api/viewers/{id}", get(get_viewer).patch(patch_viewer))
         .route(
             "/api/dashboards",
@@ -2347,6 +2372,18 @@ async fn list_viewers(
     Ok(Json(ViewerListResponse { viewers }))
 }
 
+fn apply_query_to_definition(definition_json: &mut serde_json::Value, query: Option<&str>) {
+    let Some(q) = query else { return };
+    let trimmed = q.trim();
+    if trimmed.is_empty() {
+        if let Some(o) = definition_json.as_object_mut() {
+            o.remove("query");
+        }
+    } else {
+        definition_json["query"] = json!(trimmed);
+    }
+}
+
 async fn create_viewer(
     State(state): State<AppState>,
     Json(payload): Json<CreateViewerRequest>,
@@ -2369,6 +2406,11 @@ async fn create_viewer(
     }
 
     let id = Uuid::new_v4();
+    let mut definition_json = json!({
+        "kind": payload.chart_type,
+        "signal": signal_name(signal)
+    });
+    apply_query_to_definition(&mut definition_json, payload.query.as_deref());
     let definition = ViewerDefinition {
         id,
         slug: format!("viewer-{}", id.simple()),
@@ -2376,10 +2418,7 @@ async fn create_viewer(
         refresh_interval_ms: DEFAULT_VIEWER_REFRESH_MS,
         lookback_ms: DEFAULT_VIEWER_LOOKBACK_MS,
         signal_mask: signal.into(),
-        definition_json: json!({
-            "kind": payload.chart_type,
-            "signal": signal_name(signal)
-        }),
+        definition_json,
         layout_json: json!({
             "default_view": "table"
         }),
@@ -2419,12 +2458,14 @@ async fn patch_viewer(
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let runtime = state.require_viewer_runtime()?;
 
-    if !is_valid_chart_type(&payload.chart_type) {
+    if let Some(ct) = &payload.chart_type
+        && !is_valid_chart_type(ct)
+    {
         return Err(StatusCode::BAD_REQUEST);
     }
 
     // Read current state under lock, then release before DB write
-    let (definition_json, layout_json) = {
+    let (definition_json, layout_json, query_changed) = {
         let rt = runtime.lock().await;
         let (viewer, _) = rt
             .viewers()
@@ -2437,14 +2478,18 @@ async fn patch_viewer(
                 tracing::error!("viewer {id}: {error}");
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
-        if current_kind == payload.chart_type {
+
+        let new_chart_type = payload.chart_type.as_deref().unwrap_or(current_kind);
+        let current_query = viewer.query().map(str::to_string);
+        let mut definition_json = viewer.definition().definition_json.clone();
+        definition_json["kind"] = json!(new_chart_type);
+        apply_query_to_definition(&mut definition_json, payload.query.as_deref());
+        let query_changed = query_from_definition(&definition_json) != current_query;
+        if new_chart_type == current_kind && !query_changed {
             return Ok(StatusCode::OK);
         }
-
-        let mut definition_json = viewer.definition().definition_json.clone();
-        definition_json["kind"] = json!(payload.chart_type);
         let layout_json = viewer.definition().layout_json.clone();
-        (definition_json, layout_json)
+        (definition_json, layout_json, query_changed)
     }; // lock released here
 
     let updated = viewer_store
@@ -2459,13 +2504,98 @@ async fn patch_viewer(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    // Re-acquire lock to update in-memory state
-    runtime
-        .lock()
-        .await
-        .update_viewer_definition(id, definition_json, layout_json);
+    // Re-acquire lock to update in-memory state.
+    // When the query changes, rebuild from scratch to evict stale entries.
+    let mut rt = runtime.lock().await;
+    if query_changed {
+        rt.rebuild_viewer(id, definition_json, layout_json)
+            .await
+            .map_err(|error| {
+                tracing::error!("viewer {id}: rebuild_viewer failed: {error}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+    } else {
+        rt.update_viewer_definition(id, definition_json, layout_json);
+    }
 
     Ok(StatusCode::OK)
+}
+
+async fn preview_viewer(
+    State(mut state): State<AppState>,
+    Json(payload): Json<PreviewViewerRequest>,
+) -> Result<Json<ViewerPreviewResponse>, StatusCode> {
+    let signal = parse_signal_name(payload.signal.trim()).ok_or(StatusCode::BAD_REQUEST)?;
+
+    let mut definition_json = json!({
+        "kind": "table",
+        "signal": signal_name(signal)
+    });
+    apply_query_to_definition(&mut definition_json, payload.query.as_deref());
+
+    let temp_def = ViewerDefinition {
+        id: Uuid::new_v4(),
+        slug: "preview".to_string(),
+        name: "preview".to_string(),
+        refresh_interval_ms: DEFAULT_VIEWER_REFRESH_MS,
+        lookback_ms: DEFAULT_VIEWER_LOOKBACK_MS,
+        signal_mask: signal.into(),
+        definition_json,
+        layout_json: json!({}),
+        revision: 1,
+        enabled: true,
+    };
+
+    let viewer = compile(temp_def).map_err(|e| {
+        tracing::error!("preview_viewer: compile failed: {e}");
+        StatusCode::BAD_REQUEST
+    })?;
+
+    let mut viewer_state = ViewerState::new(viewer.definition().id, 1);
+    let now = Utc::now();
+
+    let entries = state
+        .stream_store
+        .read_entries_since(signal, None, 100_000)
+        .await
+        .map_err(|error| {
+            tracing::error!("preview_viewer: read_entries_since failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    for (_, entry) in entries {
+        apply_entry(&mut viewer_state, &viewer, entry);
+    }
+    prune_stale_buckets(&mut viewer_state, viewer.lookback_ms(), now);
+
+    let entry_rows = map_entries_to_rows(
+        viewer_state
+            .entries
+            .iter()
+            .rev()
+            .take(VIEWER_ENTRY_PREVIEW_LIMIT),
+    );
+
+    let traces = if signal == Signal::Traces {
+        extract_traces_from_entries(&viewer_state.entries)
+    } else {
+        vec![]
+    };
+
+    let query = viewer
+        .definition()
+        .definition_json
+        .get("query")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    Ok(Json(ViewerPreviewResponse {
+        signal: signal_name(signal).to_string(),
+        query,
+        entry_count: viewer_state.entries.len(),
+        entries: entry_rows,
+        traces,
+    }))
 }
 
 // --- Dashboard API ----------------------------------------------------------
@@ -2797,6 +2927,39 @@ async fn handle_ingest(
     }
 }
 
+fn map_entries_to_rows<'a>(
+    entries: impl Iterator<Item = &'a NormalizedEntry>,
+) -> Vec<ViewerEntryRow> {
+    entries
+        .map(|entry| {
+            let (metric_name, metric_value, preview) = if entry.signal == Signal::Metrics {
+                let fields = extract_metric_fields(&entry.payload);
+                let name = fields.as_ref().and_then(|f| f.metric_name.clone());
+                let value = fields
+                    .as_ref()
+                    .and_then(|f| f.metric_value.as_ref().and_then(|s| s.parse::<f64>().ok()));
+                let preview = fields
+                    .as_ref()
+                    .and_then(format_metric_preview)
+                    .map(|s| truncate_preview(&s))
+                    .unwrap_or_else(|| raw_payload_preview(&entry.payload));
+                (name, value, preview)
+            } else {
+                (None, None, payload_preview(entry.signal, &entry.payload))
+            };
+            ViewerEntryRow {
+                observed_at: entry.observed_at,
+                signal: signal_name(entry.signal),
+                service_name: entry.service_name.clone(),
+                payload_size_bytes: entry.payload.len(),
+                payload_preview: preview,
+                metric_name,
+                metric_value,
+            }
+        })
+        .collect()
+}
+
 fn viewer_summary(
     viewer: &CompiledViewer,
     viewer_state: &ViewerState,
@@ -2804,40 +2967,20 @@ fn viewer_summary(
 ) -> Result<ViewerSummary, &'static str> {
     let definition = viewer.definition();
     let chart_type = chart_type_from_definition(&definition.definition_json)?.to_string();
+    let query = definition
+        .definition_json
+        .get("query")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
 
     let entries = if include_entries {
-        viewer_state
-            .entries
-            .iter()
-            .rev()
-            .take(VIEWER_ENTRY_PREVIEW_LIMIT)
-            .map(|entry| {
-                let (metric_name, metric_value, preview) = if entry.signal == Signal::Metrics {
-                    let fields = extract_metric_fields(&entry.payload);
-                    let name = fields.as_ref().and_then(|f| f.metric_name.clone());
-                    let value = fields
-                        .as_ref()
-                        .and_then(|f| f.metric_value.as_ref().and_then(|s| s.parse::<f64>().ok()));
-                    let preview = fields
-                        .as_ref()
-                        .and_then(format_metric_preview)
-                        .map(|s| truncate_preview(&s))
-                        .unwrap_or_else(|| raw_payload_preview(&entry.payload));
-                    (name, value, preview)
-                } else {
-                    (None, None, payload_preview(entry.signal, &entry.payload))
-                };
-                ViewerEntryRow {
-                    observed_at: entry.observed_at,
-                    signal: signal_name(entry.signal),
-                    service_name: entry.service_name.clone(),
-                    payload_size_bytes: entry.payload.len(),
-                    payload_preview: preview,
-                    metric_name,
-                    metric_value,
-                }
-            })
-            .collect()
+        map_entries_to_rows(
+            viewer_state
+                .entries
+                .iter()
+                .rev()
+                .take(VIEWER_ENTRY_PREVIEW_LIMIT),
+        )
     } else {
         vec![]
     };
@@ -2848,6 +2991,7 @@ fn viewer_summary(
         name: definition.name.clone(),
         signals: signal_mask_labels(definition.signal_mask),
         chart_type,
+        query,
         refresh_interval_ms: definition.refresh_interval_ms,
         lookback_ms: definition.lookback_ms,
         entry_count: viewer_state.entries.len(),

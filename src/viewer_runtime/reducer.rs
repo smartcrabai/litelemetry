@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 /// prune_stale_buckets assumes entries are in ascending time order;
 /// if the order is disrupted, pruning will not work correctly.
 pub fn apply_entry(state: &mut ViewerState, viewer: &CompiledViewer, entry: NormalizedEntry) {
-    if viewer.matches_signal(entry.signal) {
+    if viewer.matches_signal(entry.signal) && viewer.matches_entry(&entry) {
         state.entries.push(entry);
     }
 }
@@ -48,6 +48,25 @@ mod tests {
             lookback_ms: 60_000,
             signal_mask,
             definition_json: json!({}),
+            layout_json: json!({}),
+            revision: 1,
+            enabled: true,
+        })
+        .unwrap()
+    }
+
+    fn make_compiled_viewer_with_query(
+        signal_mask: crate::domain::telemetry::SignalMask,
+        query: &str,
+    ) -> CompiledViewer {
+        compile(ViewerDefinition {
+            id: Uuid::new_v4(),
+            slug: "test".to_string(),
+            name: "Test".to_string(),
+            refresh_interval_ms: 5_000,
+            lookback_ms: 60_000,
+            signal_mask,
+            definition_json: json!({ "query": query }),
             layout_json: json!({}),
             revision: 1,
             enabled: true,
@@ -200,6 +219,79 @@ mod tests {
         // Then: all entries removed
         assert_eq!(pruned, 2);
         assert_eq!(state.entries.len(), 0);
+    }
+
+    // --- apply_entry with query filter --------------------------------------
+
+    #[test]
+    fn test_apply_entry_matching_query_is_added() {
+        // Given: viewer with query "checkout-ui", entry whose service_name contains the query
+        let viewer = make_compiled_viewer_with_query(Signal::Traces.into(), "checkout-ui");
+        let mut state = make_state();
+        let entry = NormalizedEntry {
+            signal: Signal::Traces,
+            observed_at: Utc::now(),
+            service_name: Some("checkout-ui".to_string()),
+            payload: Bytes::from_static(b"{}"),
+        };
+
+        // When: apply_entry
+        apply_entry(&mut state, &viewer, entry);
+
+        // Then: entry is added because query matches
+        assert_eq!(state.entries.len(), 1);
+    }
+
+    #[test]
+    fn test_apply_entry_non_matching_query_is_ignored() {
+        // Given: viewer with query "orders", entry with service_name "checkout-ui" (non-matching)
+        let viewer = make_compiled_viewer_with_query(Signal::Traces.into(), "orders");
+        let mut state = make_state();
+        let entry = NormalizedEntry {
+            signal: Signal::Traces,
+            observed_at: Utc::now(),
+            service_name: Some("checkout-ui".to_string()),
+            payload: Bytes::from_static(b"{}"),
+        };
+
+        // When: apply_entry
+        apply_entry(&mut state, &viewer, entry);
+
+        // Then: entry is ignored because query does not match
+        assert_eq!(state.entries.len(), 0);
+    }
+
+    #[test]
+    fn test_apply_entry_no_query_allows_all_matching_signal_entries() {
+        // Given: viewer with no query (match-all)
+        let viewer = make_compiled_viewer(Signal::Traces.into());
+        let mut state = make_state();
+
+        // When: applying multiple entries with different service names
+        apply_entry(&mut state, &viewer, make_entry(Signal::Traces, 200));
+        apply_entry(&mut state, &viewer, make_entry(Signal::Traces, 100));
+
+        // Then: all entries with matching signal are added
+        assert_eq!(state.entries.len(), 2);
+    }
+
+    #[test]
+    fn test_apply_entry_query_case_insensitive_match() {
+        // Given: viewer with uppercase query "CHECKOUT-UI"
+        let viewer = make_compiled_viewer_with_query(Signal::Traces.into(), "CHECKOUT-UI");
+        let mut state = make_state();
+        let entry = NormalizedEntry {
+            signal: Signal::Traces,
+            observed_at: Utc::now(),
+            service_name: Some("checkout-ui".to_string()),
+            payload: Bytes::from_static(b"{}"),
+        };
+
+        // When: apply_entry
+        apply_entry(&mut state, &viewer, entry);
+
+        // Then: case-insensitive match adds the entry
+        assert_eq!(state.entries.len(), 1);
     }
 
     #[test]
