@@ -1434,6 +1434,83 @@ async fn test_metric_entries_contain_metric_name_and_value() {
     );
 }
 
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_delete_viewer() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    // Given: a viewer exists
+    let create_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/viewers")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "name": "To Delete", "signal": "traces" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // When: DELETE /api/viewers/{id}
+    let del_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Then: 204 No Content
+    assert_eq!(del_resp.status(), StatusCode::NO_CONTENT);
+
+    // And: subsequent GET returns 404
+    let get_resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_delete_nonexistent_viewer_returns_404() {
+    let env = setup_viewer_app().await;
+    let resp = env
+        .app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/viewers/{}", Uuid::new_v4()))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
 // --- Memory store (no Docker required) -------------------------------------
 
 struct MemoryViewerTestEnv {
@@ -2405,6 +2482,85 @@ async fn test_metric_entries_contain_metric_name_and_value_memory() {
         "http.request.duration"
     );
     assert_eq!(payload["entries"][0]["metric_value"], 150.0);
+}
+
+// --- delete viewer (memory) -----------------------------------------------
+
+#[tokio::test]
+async fn test_delete_viewer_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // Given: a viewer exists
+    let create_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/viewers")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "name": "To Delete", "signal": "traces" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // When: DELETE /api/viewers/{id}
+    let del_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Then: 204 No Content
+    assert_eq!(del_resp.status(), StatusCode::NO_CONTENT);
+
+    // And: subsequent GET returns 404
+    let get_resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_delete_nonexistent_viewer_returns_404_memory() {
+    let env = setup_memory_viewer_app().await;
+    // When: DELETE for a UUID that does not exist
+    let resp = env
+        .app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/viewers/{}", Uuid::new_v4()))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // Then: 404 Not Found
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 // ===========================================================================

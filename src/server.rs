@@ -251,6 +251,11 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         border: 1px solid rgba(13, 109, 98, 0.16);
       }
 
+      .btn-compact {
+        min-height: auto;
+        padding: 2px 8px;
+      }
+
       .status-box {
         padding: 16px 18px;
         border-radius: 18px;
@@ -874,6 +879,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
                 <th>Lookback</th>
                 <th>Entries</th>
                 <th>Status</th>
+                <th aria-label="Actions"></th>
               </tr>
             </thead>
             <tbody id="viewer-table-body"></tbody>
@@ -1225,6 +1231,18 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           appendTableCell(row, formatLookbackMs(viewer.lookback_ms));
           appendTableCell(row, String(viewer.entry_count));
           appendTableCell(row, formatStatus(viewer.status));
+
+          const delCell = document.createElement('td');
+          const delBtn = document.createElement('button');
+          delBtn.className = 'secondary btn-compact';
+          delBtn.textContent = '×';
+          delBtn.title = 'Delete viewer';
+          delBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            deleteViewer(viewer.id, viewer.name);
+          });
+          delCell.appendChild(delBtn);
+          row.appendChild(delCell);
 
           row.addEventListener('click', () => showViewerDetail(viewer.id));
           viewerTableBody.appendChild(row);
@@ -1609,6 +1627,23 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           setStatus('error', `Viewer creation failed: ${error.message}`);
         } finally {
           createViewerButton.disabled = false;
+        }
+      }
+
+      async function deleteViewer(viewerId, viewerName) {
+        if (!confirm(`Delete viewer "${viewerName}"?`)) return;
+        setStatus('working', 'Deleting viewer...');
+        try {
+          const resp = await fetch(`/api/viewers/${viewerId}`, { method: 'DELETE' });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          if (selectedViewerId === viewerId) {
+            selectedViewerId = null;
+            viewerDetailSection.classList.remove('visible');
+          }
+          setStatus('ok', 'Viewer deleted');
+          await refreshViewers();
+        } catch (err) {
+          setStatus('error', `Delete failed: ${err.message}`);
         }
       }
 
@@ -2308,7 +2343,10 @@ pub fn build_app_with_services(
         .route("/healthz", get(healthz))
         .route("/api/viewers", get(list_viewers).post(create_viewer))
         .route("/api/viewers/preview", post(preview_viewer))
-        .route("/api/viewers/{id}", get(get_viewer).patch(patch_viewer))
+        .route(
+            "/api/viewers/{id}",
+            get(get_viewer).patch(patch_viewer).delete(delete_viewer),
+        )
         .route(
             "/api/dashboards",
             get(list_dashboards).post(create_dashboard),
@@ -2860,6 +2898,27 @@ async fn patch_dashboard(
     }
 
     Ok(StatusCode::OK)
+}
+
+async fn delete_viewer(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, StatusCode> {
+    let store = state.require_viewer_store()?;
+    let runtime = state.require_viewer_runtime()?;
+
+    let deleted = store.delete_viewer(id).await.map_err(|error| {
+        tracing::error!("delete_viewer failed: {error}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    if !deleted {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    runtime.lock().await.remove_viewer(id);
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn delete_dashboard(
