@@ -879,7 +879,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
                 <th>Lookback</th>
                 <th>Entries</th>
                 <th>Status</th>
-                <th></th>
+                <th aria-label="Actions"></th>
               </tr>
             </thead>
             <tbody id="viewer-table-body"></tbody>
