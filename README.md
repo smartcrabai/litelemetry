@@ -38,16 +38,16 @@ OTLP/HTTP Client
 
 - Rust (edition 2024)
 - [bacon](https://github.com/Canop/bacon) for local app startup (`cargo install --locked bacon`)
-- Redis
-- PostgreSQL
+- Redis and PostgreSQL (only required for full mode; standalone mode needs neither)
 - Docker (for integration tests and Docker Compose startup)
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REDIS_URL` | `redis://127.0.0.1:6379` | Redis connection URL |
-| `DATABASE_URL` | — | PostgreSQL connection URL. When set, the app bootstraps the PostgreSQL schema and starts the viewer runtime. |
+| `STANDALONE` | `true` | When `true` or `1`, uses in-memory storage (no Redis or PostgreSQL required). Set to `false` to use Redis + PostgreSQL. |
+| `REDIS_URL` | `redis://127.0.0.1:6379` | Redis connection URL (used only when `STANDALONE=false`) |
+| `DATABASE_URL` | — | PostgreSQL connection URL (used only when `STANDALONE=false`). When set, the app bootstraps the PostgreSQL schema and starts the viewer runtime. |
 | `HTTP_PORT` | `8080` | HTTP server listen port |
 | `VIEWER_RUNTIME_POLL_MS` | `1000` | Poll interval for the background viewer runtime |
 
@@ -57,22 +57,25 @@ OTLP/HTTP Client
 # Install bacon once
 cargo install --locked bacon
 
-# Start Redis + PostgreSQL + seeded demo data
-docker compose up -d
-
-# Run the app locally with auto-restart on changes
+# Run the app locally with auto-restart on changes (no external services required)
 bacon serve
 ```
 
-The `serve` job uses `scripts/run-local-with-bacon.sh`, which defaults to:
+The `serve` job uses `scripts/run-local-with-bacon.sh`. By default, it starts in **standalone (in-memory) mode** (`STANDALONE=true`) — no Redis or PostgreSQL is needed.
 
-- `REDIS_URL=redis://127.0.0.1:${LITELEMETRY_REDIS_PORT:-6379}`
-- `DATABASE_URL=postgres://postgres:postgres@127.0.0.1:${LITELEMETRY_POSTGRES_PORT:-5432}/litelemetry`
-- `HTTP_PORT=8080`
+### Full mode (Redis + PostgreSQL)
+
+To run with real external services:
+
+```bash
+# Start Redis + PostgreSQL
+docker compose up -d
+
+# Run in full mode
+STANDALONE=false bacon serve
+```
 
 If you override Compose ports, export `LITELEMETRY_REDIS_PORT` / `LITELEMETRY_POSTGRES_PORT` before `bacon serve`, or set `REDIS_URL` / `DATABASE_URL` directly.
-
-If you only want OTLP ingest into Redis, `DATABASE_URL` is optional and the app will start in ingest-only mode.
 
 ## Docker
 
@@ -122,7 +125,7 @@ After Compose is up, start the app locally:
 bacon serve
 ```
 
-When `DATABASE_URL` is set (as it is by default in `scripts/run-local-with-bacon.sh`), the app automatically creates the `viewer_definitions` and `viewer_snapshots` tables and starts the background viewer runtime.
+When running in full mode (`STANDALONE=false`), `DATABASE_URL` is set and the app automatically creates the `viewer_definitions` and `viewer_snapshots` tables and starts the background viewer runtime.
 
 If you want a fresh copy of the seeded demo data, recreate the containers first:
 

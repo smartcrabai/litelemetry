@@ -32,10 +32,12 @@ async fn main() {
         .unwrap_or(DEFAULT_VIEWER_RUNTIME_POLL_MS);
     let standalone = std::env::var("STANDALONE")
         .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-        .unwrap_or(false);
+        .unwrap_or(true);
 
     let (stream_store, viewer_store, viewer_runtime) = if standalone {
-        tracing::info!("starting in standalone (in-memory) mode");
+        tracing::warn!(
+            "starting in standalone (in-memory) mode; set STANDALONE=false to use persistent storage"
+        );
 
         let max_entries = std::env::var("MEMORY_STREAM_MAX_ENTRIES")
             .ok()
