@@ -48,7 +48,8 @@ OTLP/HTTP Client
 | `STANDALONE` | `true` | When `true` or `1`, uses in-memory storage (no Redis or PostgreSQL required). Set to `false` to use Redis + PostgreSQL. |
 | `REDIS_URL` | `redis://127.0.0.1:6379` | Redis connection URL (used only when `STANDALONE=false`) |
 | `DATABASE_URL` | — | PostgreSQL connection URL (used only when `STANDALONE=false`). When set, the app bootstraps the PostgreSQL schema and starts the viewer runtime. |
-| `HTTP_PORT` | `8080` | HTTP server listen port |
+| `PORT` | `8080` | HTTP server listen port (shorthand; overridden by `HTTP_PORT`) |
+| `HTTP_PORT` | — | HTTP server listen port (takes precedence over `PORT`) |
 | `VIEWER_RUNTIME_POLL_MS` | `1000` | Poll interval for the background viewer runtime |
 
 ## Build & Run
@@ -62,6 +63,12 @@ bacon serve
 ```
 
 The `serve` job uses `scripts/run-local-with-bacon.sh`. By default, it starts in **standalone (in-memory) mode** (`STANDALONE=true`) — no Redis or PostgreSQL is needed.
+
+To run on a different port (e.g. in a git worktree):
+
+```bash
+PORT=8081 bacon serve
+```
 
 ### Full mode (Redis + PostgreSQL)
 

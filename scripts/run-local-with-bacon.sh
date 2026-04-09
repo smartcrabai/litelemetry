@@ -2,7 +2,7 @@
 set -eu
 
 : "${STANDALONE:=true}"
-: "${HTTP_PORT:=8080}"
+: "${HTTP_PORT:=${PORT:-8080}}"
 : "${VIEWER_RUNTIME_POLL_MS:=1000}"
 : "${RUST_LOG:=litelemetry=info}"
 
