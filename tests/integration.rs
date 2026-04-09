@@ -227,48 +227,58 @@ fn make_log_payload(service_name: &str, severity_text: &str, message: &str) -> B
     )
 }
 
-async fn create_viewer_id(app: &axum::Router, payload: serde_json::Value) -> String {
-    let response = app
-        .clone()
+async fn send_json_request(
+    app: &axum::Router,
+    method: &str,
+    uri: impl Into<String>,
+    payload: serde_json::Value,
+) -> axum::response::Response {
+    app.clone()
         .oneshot(
             Request::builder()
-                .method("POST")
-                .uri("/api/viewers")
+                .method(method)
+                .uri(uri.into())
                 .header("content-type", "application/json")
                 .body(axum::body::Body::from(payload.to_string()))
                 .unwrap(),
         )
         .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::CREATED);
+        .unwrap()
+}
 
+async fn send_get_request(app: &axum::Router, uri: impl Into<String>) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(uri.into())
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+async fn response_json(response: axum::response::Response) -> serde_json::Value {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
-    serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+    serde_json::from_slice(&body).unwrap()
+}
+
+async fn create_viewer_id(app: &axum::Router, payload: serde_json::Value) -> String {
+    let response = send_json_request(app, "POST", "/api/viewers", payload).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    response_json(response).await["id"]
         .as_str()
         .unwrap()
         .to_string()
 }
 
 async fn fetch_viewer_payload(app: &axum::Router, viewer_id: &str) -> serde_json::Value {
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/api/viewers/{viewer_id}"))
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let response = send_get_request(app, format!("/api/viewers/{viewer_id}")).await;
     assert_eq!(response.status(), StatusCode::OK);
-
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    serde_json::from_slice(&body).unwrap()
+    response_json(response).await
 }
 
 async fn assert_viewer_chart_type(app: &axum::Router, viewer_id: &str, expected_chart_type: &str) {
@@ -304,7 +314,6 @@ async fn patch_viewer_chart_type(app: &axum::Router, viewer_id: &str, chart_type
     let status = patch_viewer_chart_type_status(app, viewer_id, chart_type).await;
     assert_eq!(status, StatusCode::OK, "PATCH should return 200 OK");
 }
-
 // --- startup resume ---------------------------------------------------------
 
 /// Startup resume: restore state from PostgreSQL snapshot + Redis diff
@@ -1277,6 +1286,22 @@ async fn test_create_viewer_with_area_chart_type() {
     assert_viewer_chart_type(&app, &viewer_id, "area").await;
 }
 
+/// Creating viewer with pie chart_type is reflected in response chart_type
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_create_viewer_with_pie_chart_type() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    let viewer_id = create_viewer_id(
+        &app,
+        json!({ "name": "Metrics pie", "signal": "metrics", "chart_type": "pie" }),
+    )
+    .await;
+
+    assert_viewer_chart_type(&app, &viewer_id, "pie").await;
+}
+
 /// Omitting chart_type defaults to "table"
 #[tokio::test]
 #[ignore = "requires Docker"]
@@ -1321,6 +1346,23 @@ async fn test_patch_viewer_chart_type_to_area() {
     assert_viewer_chart_type(&app, &viewer_id, "area").await;
 }
 
+/// Change chart_type to donut via PATCH /api/viewers/:id -> reflected in subsequent GET
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_patch_viewer_chart_type_to_donut() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    let viewer_id = create_viewer_id(
+        &app,
+        json!({ "name": "Patch donut test", "signal": "metrics" }),
+    )
+    .await;
+
+    patch_viewer_chart_type(&app, &viewer_id, "donut").await;
+    assert_viewer_chart_type(&app, &viewer_id, "donut").await;
+}
+
 /// Create with invalid chart_type -> 400 BAD REQUEST
 #[tokio::test]
 #[ignore = "requires Docker"]
@@ -1328,16 +1370,13 @@ async fn test_create_viewer_invalid_chart_type_returns_400() {
     let env = setup_viewer_app().await;
     let app = env.app;
 
-    let request = Request::builder()
-        .method("POST")
-        .uri("/api/viewers")
-        .header("content-type", "application/json")
-        .body(axum::body::Body::from(
-            json!({ "name": "Bad chart", "signal": "metrics", "chart_type": "pie" }).to_string(),
-        ))
-        .unwrap();
-
-    let response = app.oneshot(request).await.unwrap();
+    let response = send_json_request(
+        &app,
+        "POST",
+        "/api/viewers",
+        json!({ "name": "Bad chart", "signal": "metrics", "chart_type": "heatmap" }),
+    )
+    .await;
     assert_eq!(
         response.status(),
         StatusCode::BAD_REQUEST,
@@ -1351,16 +1390,33 @@ async fn test_create_logs_viewer_with_non_table_chart_type_returns_400() {
     let env = setup_viewer_app().await;
     let app = env.app;
 
-    let request = Request::builder()
-        .method("POST")
-        .uri("/api/viewers")
-        .header("content-type", "application/json")
-        .body(axum::body::Body::from(
-            json!({ "name": "Logs line", "signal": "logs", "chart_type": "line" }).to_string(),
-        ))
-        .unwrap();
+    let response = send_json_request(
+        &app,
+        "POST",
+        "/api/viewers",
+        json!({ "name": "Logs line", "signal": "logs", "chart_type": "line" }),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "non-metrics viewers should reject non-table chart types"
+    );
+}
 
-    let response = app.oneshot(request).await.unwrap();
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_create_traces_viewer_with_non_table_chart_type_returns_400() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    let response = send_json_request(
+        &app,
+        "POST",
+        "/api/viewers",
+        json!({ "name": "Bad trace chart", "signal": "traces", "chart_type": "pie" }),
+    )
+    .await;
     assert_eq!(
         response.status(),
         StatusCode::BAD_REQUEST,
@@ -1376,16 +1432,13 @@ async fn test_patch_nonexistent_viewer_returns_404() {
     let app = env.app;
 
     let unknown_id = Uuid::new_v4();
-    let request = Request::builder()
-        .method("PATCH")
-        .uri(format!("/api/viewers/{unknown_id}"))
-        .header("content-type", "application/json")
-        .body(axum::body::Body::from(
-            json!({ "chart_type": "line" }).to_string(),
-        ))
-        .unwrap();
-
-    let response = app.oneshot(request).await.unwrap();
+    let response = send_json_request(
+        &app,
+        "PATCH",
+        format!("/api/viewers/{unknown_id}"),
+        json!({ "chart_type": "line" }),
+    )
+    .await;
     assert_eq!(
         response.status(),
         StatusCode::NOT_FOUND,
@@ -1402,6 +1455,24 @@ async fn test_patch_logs_viewer_with_non_table_chart_type_returns_400() {
     let viewer_id = create_viewer_id(&app, json!({ "name": "Logs table", "signal": "logs" })).await;
 
     let status = patch_viewer_chart_type_status(&app, &viewer_id, "area").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "non-metrics viewers should reject non-table chart types"
+    );
+    assert_viewer_chart_type(&app, &viewer_id, "table").await;
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_patch_traces_viewer_to_non_table_chart_type_returns_400() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    let viewer_id =
+        create_viewer_id(&app, json!({ "name": "Trace viewer", "signal": "traces" })).await;
+
+    let status = patch_viewer_chart_type_status(&app, &viewer_id, "donut").await;
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
@@ -2315,6 +2386,19 @@ async fn test_create_viewer_with_area_chart_type_memory() {
 }
 
 #[tokio::test]
+async fn test_create_viewer_with_pie_chart_type_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let viewer_id = create_viewer_id(
+        &app,
+        json!({ "name": "Metrics pie", "signal": "metrics", "chart_type": "pie" }),
+    )
+    .await;
+    assert_viewer_chart_type(&app, &viewer_id, "pie").await;
+}
+
+#[tokio::test]
 async fn test_create_viewer_default_chart_type_is_table_memory() {
     let env = setup_memory_viewer_app().await;
     let app = env.app;
@@ -2353,64 +2437,69 @@ async fn test_patch_viewer_chart_type_to_area_memory() {
 }
 
 #[tokio::test]
+async fn test_patch_viewer_chart_type_to_donut_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let viewer_id = create_viewer_id(
+        &app,
+        json!({ "name": "Patch donut test", "signal": "metrics" }),
+    )
+    .await;
+
+    patch_viewer_chart_type(&app, &viewer_id, "donut").await;
+    assert_viewer_chart_type(&app, &viewer_id, "donut").await;
+}
+
+#[tokio::test]
 async fn test_create_viewer_invalid_chart_type_returns_400_memory() {
     let env = setup_memory_viewer_app().await;
-    let resp = env
-        .app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/viewers")
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(
-                    json!({ "name": "Bad chart", "signal": "metrics", "chart_type": "pie" })
-                        .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let resp = send_json_request(
+        &env.app,
+        "POST",
+        "/api/viewers",
+        json!({ "name": "Bad chart", "signal": "metrics", "chart_type": "heatmap" }),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
 async fn test_create_logs_viewer_with_non_table_chart_type_returns_400_memory() {
     let env = setup_memory_viewer_app().await;
-    let resp = env
-        .app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/viewers")
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(
-                    json!({ "name": "Logs line", "signal": "logs", "chart_type": "line" })
-                        .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let resp = send_json_request(
+        &env.app,
+        "POST",
+        "/api/viewers",
+        json!({ "name": "Logs line", "signal": "logs", "chart_type": "line" }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_create_traces_viewer_with_non_table_chart_type_returns_400_memory() {
+    let env = setup_memory_viewer_app().await;
+    let resp = send_json_request(
+        &env.app,
+        "POST",
+        "/api/viewers",
+        json!({ "name": "Bad trace chart", "signal": "traces", "chart_type": "pie" }),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
 async fn test_patch_nonexistent_viewer_returns_404_memory() {
     let env = setup_memory_viewer_app().await;
-    let resp = env
-        .app
-        .oneshot(
-            Request::builder()
-                .method("PATCH")
-                .uri(format!("/api/viewers/{}", Uuid::new_v4()))
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(
-                    json!({ "chart_type": "line" }).to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let resp = send_json_request(
+        &env.app,
+        "PATCH",
+        format!("/api/viewers/{}", Uuid::new_v4()),
+        json!({ "chart_type": "line" }),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -2422,6 +2511,19 @@ async fn test_patch_logs_viewer_with_non_table_chart_type_returns_400_memory() {
     let viewer_id = create_viewer_id(&app, json!({ "name": "Logs table", "signal": "logs" })).await;
 
     let status = patch_viewer_chart_type_status(&app, &viewer_id, "area").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_viewer_chart_type(&app, &viewer_id, "table").await;
+}
+
+#[tokio::test]
+async fn test_patch_traces_viewer_to_non_table_chart_type_returns_400_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let viewer_id =
+        create_viewer_id(&app, json!({ "name": "Trace viewer", "signal": "traces" })).await;
+
+    let status = patch_viewer_chart_type_status(&app, &viewer_id, "donut").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_viewer_chart_type(&app, &viewer_id, "table").await;
 }
