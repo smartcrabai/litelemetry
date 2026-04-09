@@ -1424,6 +1424,117 @@ async fn test_create_traces_viewer_with_non_table_chart_type_returns_400() {
     );
 }
 
+/// Creating viewer with chart_type = "billboard" is reflected in GET
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_create_viewer_with_billboard_chart_type() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    let create_request = Request::builder()
+        .method("POST")
+        .uri("/api/viewers")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "Metrics billboard", "signal": "metrics", "chart_type": "billboard" })
+                .to_string(),
+        ))
+        .unwrap();
+
+    let create_response = app.clone().oneshot(create_request).await.unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let create_body = axum::body::to_bytes(create_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_payload: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
+    let viewer_id = create_payload["id"].as_str().unwrap().to_string();
+
+    let get_response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(get_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        payload["chart_type"], "billboard",
+        "chart_type should be billboard"
+    );
+}
+
+/// PATCH viewer to chart_type = "billboard" is reflected in subsequent GET
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_patch_viewer_chart_type_to_billboard() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    let create_request = Request::builder()
+        .method("POST")
+        .uri("/api/viewers")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "Billboard patch test", "signal": "metrics" }).to_string(),
+        ))
+        .unwrap();
+    let create_response = app.clone().oneshot(create_request).await.unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let create_body = axum::body::to_bytes(create_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&create_body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let patch_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "chart_type": "billboard" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        patch_response.status(),
+        StatusCode::OK,
+        "PATCH to billboard should return 200 OK"
+    );
+
+    let get_body = axum::body::to_bytes(
+        app.oneshot(
+            Request::builder()
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+    assert_eq!(
+        payload["chart_type"], "billboard",
+        "chart_type should be updated to billboard"
+    );
+}
+
 /// PATCH to nonexistent ID -> 404
 #[tokio::test]
 #[ignore = "requires Docker"]
@@ -2488,6 +2599,118 @@ async fn test_create_traces_viewer_with_non_table_chart_type_returns_400_memory(
     )
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_create_viewer_with_billboard_chart_type_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // Given: a create request with chart_type = "billboard"
+    let create_req = Request::builder()
+        .method("POST")
+        .uri("/api/viewers")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "Metrics billboard", "signal": "metrics", "chart_type": "billboard" })
+                .to_string(),
+        ))
+        .unwrap();
+
+    // When: the request is sent
+    let create_resp = app.clone().oneshot(create_req).await.unwrap();
+
+    // Then: 201 Created
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let viewer_id = create_payload["id"].as_str().unwrap().to_string();
+
+    // And: GET returns chart_type = "billboard"
+    let get_body = axum::body::to_bytes(
+        app.oneshot(
+            Request::builder()
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+    assert_eq!(
+        payload["chart_type"], "billboard",
+        "chart_type should be billboard"
+    );
+}
+
+#[tokio::test]
+async fn test_patch_viewer_chart_type_to_billboard_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // Given: a metrics viewer with default table chart type
+    let create_req = Request::builder()
+        .method("POST")
+        .uri("/api/viewers")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({ "name": "Billboard patch test", "signal": "metrics" }).to_string(),
+        ))
+        .unwrap();
+    let create_resp = app.clone().oneshot(create_req).await.unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // When: PATCH changes chart_type to "billboard"
+    let patch_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "chart_type": "billboard" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(patch_resp.status(), StatusCode::OK);
+
+    // Then: subsequent GET returns chart_type = "billboard"
+    let get_body = axum::body::to_bytes(
+        app.oneshot(
+            Request::builder()
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+    assert_eq!(
+        payload["chart_type"], "billboard",
+        "chart_type should be updated to billboard"
+    );
 }
 
 #[tokio::test]
@@ -3847,13 +4070,13 @@ async fn test_dashboard_skips_missing_viewers() {
 // --- Viewer query filter tests (Memory -- no Docker required) --------------
 // ===========================================================================
 
-/// Create viewer with query → only matching entries appear in detail
+/// Create viewer with query -> only matching entries appear in detail
 #[tokio::test]
 async fn test_create_viewer_with_query_filters_matching_entries_memory() {
     let env = setup_memory_viewer_app().await;
     let app = env.app;
 
-    // Given: two traces ingested — one from "checkout-ui", one from "orders-api"
+    // Given: two traces ingested -- one from "checkout-ui", one from "orders-api"
     for (service, span) in [
         ("checkout-ui", "render-checkout"),
         ("orders-api", "process-order"),
@@ -3929,7 +4152,7 @@ async fn test_create_viewer_with_query_filters_matching_entries_memory() {
     );
 }
 
-/// Create viewer with query → non-matching entries excluded from entry_count and entries list
+/// Create viewer with query -> non-matching entries excluded from entry_count and entries list
 #[tokio::test]
 async fn test_create_viewer_with_query_excludes_non_matching_from_entry_count_memory() {
     let env = setup_memory_viewer_app().await;
@@ -3999,7 +4222,7 @@ async fn test_create_viewer_with_query_excludes_non_matching_from_entry_count_me
     assert_eq!(viewer["entries"][0]["service_name"], "svc-alpha");
 }
 
-/// Create viewer without query → all entries pass (backward-compatible match-all)
+/// Create viewer without query -> all entries pass (backward-compatible match-all)
 #[tokio::test]
 async fn test_create_viewer_without_query_shows_all_entries_memory() {
     let env = setup_memory_viewer_app().await;
@@ -4071,7 +4294,7 @@ async fn test_create_viewer_without_query_shows_all_entries_memory() {
     );
 }
 
-/// PATCH viewer query → viewer state is rebuilt and old non-matching entries are removed
+/// PATCH viewer query -> viewer state is rebuilt and old non-matching entries are removed
 #[tokio::test]
 async fn test_patch_viewer_query_rebuilds_state_removes_non_matching_entries_memory() {
     let env = setup_memory_viewer_app().await;
@@ -4095,7 +4318,7 @@ async fn test_patch_viewer_query_rebuilds_state_removes_non_matching_entries_mem
             .unwrap();
     }
 
-    // Create a viewer with no query → sees both entries
+    // Create a viewer with no query -> sees both entries
     let create_resp = app
         .clone()
         .oneshot(
@@ -4179,7 +4402,7 @@ async fn test_patch_viewer_query_rebuilds_state_removes_non_matching_entries_mem
     assert_eq!(post["query"], "checkout-ui");
 }
 
-/// POST /api/viewers/preview → returns matching entries without persisting a viewer
+/// POST /api/viewers/preview -> returns matching entries without persisting a viewer
 #[tokio::test]
 async fn test_preview_viewer_returns_matching_entries_memory() {
     let env = setup_memory_viewer_app().await;
@@ -4232,7 +4455,7 @@ async fn test_preview_viewer_returns_matching_entries_memory() {
     assert_eq!(preview["query"], "checkout-ui");
 }
 
-/// POST /api/viewers/preview → does not create a viewer or increase viewer list count
+/// POST /api/viewers/preview -> does not create a viewer or increase viewer list count
 #[tokio::test]
 async fn test_preview_viewer_does_not_persist_viewer_memory() {
     let env = setup_memory_viewer_app().await;
@@ -4268,7 +4491,7 @@ async fn test_preview_viewer_does_not_persist_viewer_memory() {
         .unwrap();
     assert_eq!(preview_resp.status(), StatusCode::OK);
 
-    // Then: viewer list is still empty — preview did not persist anything
+    // Then: viewer list is still empty -- preview did not persist anything
     let list_body = axum::body::to_bytes(
         app.oneshot(
             Request::builder()
