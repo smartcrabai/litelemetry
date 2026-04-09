@@ -646,6 +646,43 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         max-height: 400px;
       }
 
+      .billboard-widget {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        gap: 6px;
+      }
+
+      .billboard-value {
+        font-size: 48px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+        color: var(--teal);
+      }
+
+      .billboard-value.no-data {
+        color: var(--muted);
+      }
+
+      .billboard-subtitle {
+        font-size: 16px;
+        color: var(--muted);
+      }
+
+      .billboard-change {
+        font-size: 16px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .billboard-change.up { color: var(--teal); }
+      .billboard-change.down { color: var(--accent); }
+
+      .billboard-widget.compact .billboard-value { font-size: 32px; }
+      .billboard-widget.compact .billboard-subtitle { font-size: 12px; }
+      .billboard-widget.compact .billboard-change { font-size: 12px; }
+
       .viewer-row {
         cursor: pointer;
       }
@@ -857,6 +894,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             <option value="table">Table</option>
             <option value="stacked_bar">Stacked Bar</option>
             <option value="line">Line</option>
+            <option value="billboard">Billboard</option>
           </select>
           <input id="viewer-name-input" data-testid="viewer-name-input" name="viewer-name" placeholder="checkout traces" maxlength="80" />
           <button id="create-viewer-button" data-testid="create-viewer-button" class="primary" type="button">+ Create viewer</button>
@@ -1105,7 +1143,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       }
 
       const VIEWER_PLACEHOLDERS = { traces: 'checkout traces', metrics: 'orders metrics', logs: 'billing logs' };
-      const CHART_TYPE_LABELS = { table: 'Table', stacked_bar: 'Stacked Bar', line: 'Line' };
+      const CHART_TYPE_LABELS = { table: 'Table', stacked_bar: 'Stacked Bar', line: 'Line', billboard: 'Billboard' };
       const MIN_DASHBOARD_COLUMNS = 1;
       const MAX_DASHBOARD_COLUMNS = 4;
 
@@ -1235,7 +1273,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           const delCell = document.createElement('td');
           const delBtn = document.createElement('button');
           delBtn.className = 'secondary btn-compact';
-          delBtn.textContent = '×';
+          delBtn.textContent = 'x';
           delBtn.title = 'Delete viewer';
           delBtn.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -1295,17 +1333,90 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         };
       }
 
+      function renderBillboard(entries, lookbackMs, container, { compact = false } = {}) {
+        const hasValues = entries.some(e => Number.isFinite(e.metric_value));
+
+        let latestSum = 0;
+        let previousSum = 0;
+        let hasPrevious = false;
+
+        if (hasValues) {
+          const { datasets, labels } = buildChartData(entries, lookbackMs);
+          const numBuckets = labels.length;
+          hasPrevious = numBuckets >= 2;
+          for (const ds of datasets) {
+            latestSum += ds.data[numBuckets - 1];
+            if (hasPrevious) previousSum += ds.data[numBuckets - 2];
+          }
+        }
+
+        const metricNames = [...new Set(entries.map(e => e.metric_name).filter(Boolean))];
+        const subtitle = metricNames.length === 1 ? metricNames[0] : metricNames.length > 1 ? 'Multiple metrics' : '';
+
+        let changePct = null;
+        if (hasPrevious && previousSum !== 0) {
+          changePct = (latestSum - previousSum) / previousSum * 100;
+        }
+
+        const widget = document.createElement('div');
+        widget.classList.add('billboard-widget');
+        if (compact) widget.classList.add('compact');
+        widget.setAttribute('role', 'img');
+
+        if (!hasValues) {
+          widget.setAttribute('aria-label', subtitle ? `${subtitle}: No data` : 'No data');
+        } else {
+          const valuePart = subtitle ? `${subtitle}: ${latestSum.toLocaleString()}` : latestSum.toLocaleString();
+          const changePart = changePct !== null
+            ? `, ${changePct >= 0 ? 'up' : 'down'} ${Math.abs(changePct).toFixed(1)}%`
+            : '';
+          widget.setAttribute('aria-label', valuePart + changePart);
+        }
+
+        const valueEl = makeTextElement('div', hasValues ? latestSum.toLocaleString() : '--', hasValues ? 'billboard-value' : 'billboard-value no-data');
+        valueEl.setAttribute('aria-hidden', 'true');
+        widget.appendChild(valueEl);
+
+        if (subtitle) {
+          const subtitleEl = makeTextElement('div', subtitle, 'billboard-subtitle');
+          subtitleEl.setAttribute('aria-hidden', 'true');
+          widget.appendChild(subtitleEl);
+        }
+
+        if (changePct !== null) {
+          const up = changePct >= 0;
+          const pctStr = Math.abs(changePct).toFixed(1);
+          const changeEl = makeTextElement('div', `${up ? '^' : 'v'} ${pctStr}%`, up ? 'billboard-change up' : 'billboard-change down');
+          changeEl.setAttribute('aria-hidden', 'true');
+          widget.appendChild(changeEl);
+        }
+
+        container.replaceChildren(widget);
+      }
+
       function renderChart(chartType, entries, lookbackMs) {
         if (currentChart) {
           currentChart.destroy();
           currentChart = null;
         }
 
-        if (chartType === 'table' || !entries.length) {
+        if (chartType === 'table') {
           viewerChartContainer.hidden = true;
           return;
         }
 
+        if (chartType === 'billboard') {
+          viewerChartContainer.hidden = false;
+          renderBillboard(entries, lookbackMs, viewerChartContainer);
+          return;
+        }
+
+        if (!entries.length) {
+          viewerChartContainer.hidden = true;
+          return;
+        }
+
+        viewerChartContainer.replaceChildren(viewerChartCanvas);
         viewerChartContainer.hidden = false;
         const data = buildChartData(entries, lookbackMs);
         const isStacked = chartType === 'stacked_bar';
@@ -1822,7 +1933,12 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         const isTraces = v.signals.includes('traces');
         const isMetrics = v.signals.includes('metrics');
 
-        if (chartType !== 'table' && isMetrics && v.entries.length) {
+        if (chartType === 'billboard' && isMetrics) {
+          const host = document.createElement('div');
+          host.style.maxHeight = '220px';
+          div.appendChild(host);
+          renderBillboard(v.entries, v.lookback_ms, host, { compact: true });
+        } else if (chartType !== 'table' && isMetrics && v.entries.length) {
           const canvas = document.createElement('canvas');
           canvas.style.maxHeight = '220px';
           div.appendChild(canvas);
@@ -2177,7 +2293,7 @@ fn default_chart_type() -> String {
 }
 
 fn is_valid_chart_type(chart_type: &str) -> bool {
-    matches!(chart_type, "table" | "stacked_bar" | "line")
+    matches!(chart_type, "table" | "stacked_bar" | "line" | "billboard")
 }
 
 fn chart_type_from_definition(definition_json: &serde_json::Value) -> Result<&str, &'static str> {
@@ -3644,6 +3760,27 @@ mod tests {
     }
 
     #[test]
+    fn test_chart_type_from_definition_accepts_billboard() {
+        assert_eq!(
+            chart_type_from_definition(&serde_json::json!({ "kind": "billboard" })).unwrap(),
+            "billboard"
+        );
+    }
+
+    #[test]
+    fn test_is_valid_chart_type_accepts_billboard() {
+        assert!(is_valid_chart_type("billboard"));
+    }
+
+    #[test]
+    fn test_is_valid_chart_type_rejects_unknown_types() {
+        assert!(!is_valid_chart_type("pie"));
+        assert!(!is_valid_chart_type("heatmap"));
+        assert!(!is_valid_chart_type("scatter"));
+        assert!(!is_valid_chart_type(""));
+    }
+
+    #[test]
     fn test_dashboard_columns_from_layout_defaults_to_two_when_missing() {
         assert_eq!(
             dashboard_columns_from_layout(&serde_json::json!({})).unwrap(),
@@ -3839,5 +3976,25 @@ mod tests {
         assert!(!html.contains("data.columns || 2"));
         assert!(!html.contains("dash.columns || 2"));
         assert!(!html.contains("Number.parseInt(input.value, 10)"));
+    }
+
+    #[tokio::test]
+    async fn test_root_returns_billboard_option_in_chart_type_select() {
+        let (_, html) = index_html().await;
+
+        assert!(
+            html.contains(r#"<option value="billboard">Billboard</option>"#),
+            "create viewer form must include billboard option"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_root_returns_billboard_in_chart_type_labels() {
+        let (_, html) = index_html().await;
+
+        assert!(
+            html.contains("billboard: 'Billboard'"),
+            "CHART_TYPE_LABELS must include billboard entry"
+        );
     }
 }
