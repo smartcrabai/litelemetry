@@ -857,6 +857,8 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             <option value="table">Table</option>
             <option value="stacked_bar">Stacked Bar</option>
             <option value="line">Line</option>
+            <option value="pie">Pie</option>
+            <option value="donut">Donut</option>
           </select>
           <input id="viewer-name-input" data-testid="viewer-name-input" name="viewer-name" placeholder="checkout traces" maxlength="80" />
           <button id="create-viewer-button" data-testid="create-viewer-button" class="primary" type="button">+ Create viewer</button>
@@ -1003,13 +1005,16 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         return new Date(Number(ns) / 1e6).toLocaleTimeString();
       }
 
+      function hashStringHue(s) {
+        let h = 0;
+        for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+        return Math.abs(h) % 360;
+      }
+
       const _svcColorCache = {};
       function serviceColor(name) {
         if (_svcColorCache[name]) return _svcColorCache[name];
-        let h = 0;
-        for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
-        const hue = Math.abs(h) % 360;
-        _svcColorCache[name] = 'hsl(' + hue + ', 55%, 50%)';
+        _svcColorCache[name] = 'hsl(' + hashStringHue(name) + ', 55%, 50%)';
         return _svcColorCache[name];
       }
 
@@ -1105,7 +1110,14 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       }
 
       const VIEWER_PLACEHOLDERS = { traces: 'checkout traces', metrics: 'orders metrics', logs: 'billing logs' };
-      const CHART_TYPE_LABELS = { table: 'Table', stacked_bar: 'Stacked Bar', line: 'Line' };
+      const CHART_TYPE_LABELS = {
+        table: 'Table',
+        stacked_bar: 'Stacked Bar',
+        line: 'Line',
+        pie: 'Pie',
+        donut: 'Donut',
+      };
+      const CIRCULAR_CHART_TYPES = { pie: 'pie', donut: 'doughnut' };
       const MIN_DASHBOARD_COLUMNS = 1;
       const MAX_DASHBOARD_COLUMNS = 4;
 
@@ -1115,6 +1127,10 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           throw new Error('Viewer payload is missing a valid chart type.');
         }
         return chartType;
+      }
+
+      function viewerSupportsMetricCharts(viewer) {
+        return Array.isArray(viewer.signals) && viewer.signals.length === 1 && viewer.signals[0] === 'metrics';
       }
 
       function readDashboardColumns(value) {
@@ -1169,7 +1185,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           if (selectedViewerId === viewerId) {
             await showViewerDetail(viewerId);
           }
-          setStatus('ok', `Chart type updated to ${CHART_TYPE_LABELS[chartType] || chartType}.`);
+          setStatus('ok', `Chart type updated to ${CHART_TYPE_LABELS[chartType]}.`);
         } catch (error) {
           setStatus('error', `Failed to update chart type: ${error.message}`);
         }
@@ -1205,8 +1221,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           appendTableCell(row, viewer.signals.join(', '));
 
           const chartCell = document.createElement('td');
-          const isMetrics = viewer.signals.includes('metrics');
-          if (isMetrics) {
+          if (viewerSupportsMetricCharts(viewer)) {
             const currentChartType = readViewerChartType(viewer);
             const sel = document.createElement('select');
             sel.className = 'chart-type-select';
@@ -1260,27 +1275,47 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         return new Date(Math.floor(t / bucketMs) * bucketMs).toISOString();
       }
 
+      function metricSeriesLabel(entry) {
+        return `${entry.metric_name || 'unknown'} (${entry.service_name || 'unknown'})`;
+      }
+
+      function metricChartValue(entry) {
+        return typeof entry.metric_value === 'number' && Number.isFinite(entry.metric_value)
+          ? entry.metric_value
+          : null;
+      }
+
+      function chartSeriesColors(series) {
+        const hue = hashStringHue(series);
+        return {
+          backgroundColor: `hsla(${hue}, 60%, 55%, 0.7)`,
+          borderColor: `hsl(${hue}, 60%, 45%)`,
+        };
+      }
+
       function buildChartData(entries, lookbackMs) {
         const bucketMs = getBucketSizeMs(lookbackMs);
         const grouped = {};
         const allBuckets = new Set();
 
         for (const entry of entries) {
+          const metricValue = metricChartValue(entry);
+          if (metricValue === null) continue;
           const key = bucketKey(entry.observed_at, bucketMs);
           allBuckets.add(key);
-          const series = `${entry.metric_name || 'unknown'} (${entry.service_name || 'unknown'})`;
+          const series = metricSeriesLabel(entry);
           if (!grouped[series]) grouped[series] = {};
-          grouped[series][key] = (grouped[series][key] || 0) + (entry.metric_value ?? 0);
+          grouped[series][key] = (grouped[series][key] || 0) + metricValue;
         }
 
         const labels = [...allBuckets].sort();
         const datasets = Object.entries(grouped).map(([series, buckets]) => {
-          const hue = Math.abs([...series].reduce((h, c) => h * 31 + c.charCodeAt(0), 0)) % 360;
+          const colors = chartSeriesColors(series);
           return {
             label: series,
             data: labels.map(l => buckets[l] || 0),
-            backgroundColor: `hsla(${hue}, 60%, 55%, 0.7)`,
-            borderColor: `hsl(${hue}, 60%, 45%)`,
+            backgroundColor: colors.backgroundColor,
+            borderColor: colors.borderColor,
             borderWidth: 1,
             fill: false,
           };
@@ -1292,6 +1327,84 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
           }),
           datasets,
+        };
+      }
+
+      function buildPieData(entries) {
+        const grouped = {};
+
+        for (const entry of entries) {
+          const metricValue = metricChartValue(entry);
+          if (metricValue === null) continue;
+          const series = metricSeriesLabel(entry);
+          grouped[series] = (grouped[series] || 0) + metricValue;
+        }
+
+        const labels = Object.keys(grouped).sort();
+        const data = labels.map(label => grouped[label]);
+        const total = data.reduce((s, v) => s + v, 0);
+        const backgroundColors = [];
+        const borderColors = [];
+        for (const series of labels) {
+          const c = chartSeriesColors(series);
+          backgroundColors.push(c.backgroundColor);
+          borderColors.push(c.borderColor);
+        }
+
+        return {
+          labels,
+          total,
+          datasets: [{
+            data,
+            backgroundColor: backgroundColors,
+            borderColor: borderColors,
+            borderWidth: 1,
+          }],
+        };
+      }
+
+      function makeCircularTooltipLabel(total) {
+        return function(context) {
+          const value = Number(context.raw);
+          const percentage = total > 0 ? (value / total) * 100 : 0;
+          return `${context.label}: ${value} (${percentage.toFixed(1)}%)`;
+        };
+      }
+
+      function buildCircularChartOptions(total, legendLabels) {
+        const legend = { position: 'bottom' };
+        if (legendLabels) {
+          legend.labels = legendLabels;
+        }
+
+        return {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend,
+            tooltip: {
+              callbacks: {
+                label: makeCircularTooltipLabel(total),
+              },
+            },
+          },
+        };
+      }
+
+      function isCircularChartType(chartType) {
+        return chartType in CIRCULAR_CHART_TYPES;
+      }
+
+      function buildCircularChartConfig(chartType, entries, legendLabels) {
+        if (!isCircularChartType(chartType)) return null;
+
+        const data = buildPieData(entries);
+        if (!data.labels.length) return null;
+
+        return {
+          type: CIRCULAR_CHART_TYPES[chartType],
+          data,
+          options: buildCircularChartOptions(data.total, legendLabels),
         };
       }
 
@@ -1307,7 +1420,21 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
 
         viewerChartContainer.hidden = false;
+        if (isCircularChartType(chartType)) {
+          const circularConfig = buildCircularChartConfig(chartType, entries);
+          if (!circularConfig) {
+            viewerChartContainer.hidden = true;
+            return;
+          }
+          currentChart = new Chart(viewerChartCanvas, circularConfig);
+          return;
+        }
+
         const data = buildChartData(entries, lookbackMs);
+        if (!data.datasets.length) {
+          viewerChartContainer.hidden = true;
+          return;
+        }
         const isStacked = chartType === 'stacked_bar';
         const type = isStacked ? 'bar' : 'line';
 
@@ -1530,7 +1657,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           hideAllDetailPanels();
 
           const isTraceViewer = viewer.signals.includes('traces');
-          if (chartType !== 'table' && viewer.signals.includes('metrics')) {
+          if (chartType !== 'table' && viewerSupportsMetricCharts(viewer)) {
             renderChart(chartType, viewer.entries, viewer.lookback_ms);
           } else if (isTraceViewer && viewer.traces && viewer.traces.length > 0) {
             renderTraceList(viewer.traces);
@@ -1820,9 +1947,9 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
         const chartType = readViewerChartType(v);
         const isTraces = v.signals.includes('traces');
-        const isMetrics = v.signals.includes('metrics');
+        const supportsMetricCharts = viewerSupportsMetricCharts(v);
 
-        if (chartType !== 'table' && isMetrics && v.entries.length) {
+        if (chartType !== 'table' && supportsMetricCharts && v.entries.length) {
           const canvas = document.createElement('canvas');
           canvas.style.maxHeight = '220px';
           div.appendChild(canvas);
@@ -1838,6 +1965,14 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       }
 
       function renderPanelChart(chartType, entries, lookbackMs, canvas) {
+        if (isCircularChartType(chartType)) {
+          const circularConfig = buildCircularChartConfig(chartType, entries, {
+            boxWidth: 10,
+            font: { size: 10 },
+          });
+          return circularConfig ? new Chart(canvas, circularConfig) : null;
+        }
+
         const data = buildChartData(entries, lookbackMs);
         if (!data.datasets.length) return null;
         const isStacked = chartType === 'stacked_bar';
@@ -2177,7 +2312,22 @@ fn default_chart_type() -> String {
 }
 
 fn is_valid_chart_type(chart_type: &str) -> bool {
-    matches!(chart_type, "table" | "stacked_bar" | "line")
+    matches!(
+        chart_type,
+        "table" | "stacked_bar" | "line" | "pie" | "donut"
+    )
+}
+
+fn chart_type_allowed_for_signal(signal: Signal, chart_type: &str) -> bool {
+    chart_type_allowed_for_signal_mask(signal.into(), chart_type)
+}
+
+fn chart_type_allowed_for_signal_mask(signal_mask: SignalMask, chart_type: &str) -> bool {
+    match chart_type {
+        "table" => true,
+        "stacked_bar" | "line" | "pie" | "donut" => signal_mask == Signal::Metrics.into(),
+        _ => false,
+    }
 }
 
 fn chart_type_from_definition(definition_json: &serde_json::Value) -> Result<&str, &'static str> {
@@ -2439,7 +2589,7 @@ async fn create_viewer(
 
     let signal = parse_signal_name(payload.signal.trim()).ok_or(StatusCode::BAD_REQUEST)?;
 
-    if !is_valid_chart_type(&payload.chart_type) {
+    if !chart_type_allowed_for_signal(signal, &payload.chart_type) {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -2496,12 +2646,6 @@ async fn patch_viewer(
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let runtime = state.require_viewer_runtime()?;
 
-    if let Some(ct) = &payload.chart_type
-        && !is_valid_chart_type(ct)
-    {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
     // Read current state under lock, then release before DB write
     let (definition_json, layout_json, query_changed) = {
         let rt = runtime.lock().await;
@@ -2510,6 +2654,12 @@ async fn patch_viewer(
             .iter()
             .find(|(viewer, _)| viewer.definition().id == id)
             .ok_or(StatusCode::NOT_FOUND)?;
+
+        if let Some(new_chart_type) = payload.chart_type.as_deref()
+            && !chart_type_allowed_for_signal_mask(viewer.definition().signal_mask, new_chart_type)
+        {
+            return Err(StatusCode::BAD_REQUEST);
+        }
 
         let current_kind = chart_type_from_definition(&viewer.definition().definition_json)
             .map_err(|error| {
@@ -3644,6 +3794,28 @@ mod tests {
     }
 
     #[test]
+    fn test_chart_type_from_definition_accepts_pie_and_donut_when_present() {
+        assert_eq!(
+            chart_type_from_definition(&serde_json::json!({ "kind": "pie" })).unwrap(),
+            "pie"
+        );
+        assert_eq!(
+            chart_type_from_definition(&serde_json::json!({ "kind": "donut" })).unwrap(),
+            "donut"
+        );
+    }
+
+    #[test]
+    fn test_chart_type_allowed_for_signal_restricts_non_table_types_to_metrics() {
+        assert!(chart_type_allowed_for_signal(Signal::Metrics, "pie"));
+        assert!(chart_type_allowed_for_signal(Signal::Metrics, "donut"));
+        assert!(chart_type_allowed_for_signal(Signal::Traces, "table"));
+        assert!(chart_type_allowed_for_signal(Signal::Logs, "table"));
+        assert!(!chart_type_allowed_for_signal(Signal::Traces, "pie"));
+        assert!(!chart_type_allowed_for_signal(Signal::Logs, "donut"));
+    }
+
+    #[test]
     fn test_dashboard_columns_from_layout_defaults_to_two_when_missing() {
         assert_eq!(
             dashboard_columns_from_layout(&serde_json::json!({})).unwrap(),
@@ -3711,6 +3883,16 @@ mod tests {
         assert!(html.contains("sidebar-toggle"));
         assert!(html.contains("viewer-sortable-item"));
         assert!(html.contains("viewer-drag-handle"));
+    }
+
+    #[tokio::test]
+    async fn test_root_exposes_pie_and_donut_chart_types_for_metrics_viewers() {
+        let (_, html) = index_html().await;
+
+        assert!(html.contains("<option value=\"pie\">Pie</option>"));
+        assert!(html.contains("<option value=\"donut\">Donut</option>"));
+        assert!(html.contains("pie: 'Pie'"));
+        assert!(html.contains("donut: 'Donut'"));
     }
 
     #[tokio::test]
@@ -3832,10 +4014,18 @@ mod tests {
         let (_, html) = index_html().await;
 
         assert!(html.contains("readViewerChartType(viewer)"));
+        assert!(html.contains("viewerSupportsMetricCharts(viewer)"));
+        assert!(html.contains("metricChartValue(entry)"));
         assert!(html.contains("readDashboardColumns(data.columns)"));
         assert!(html.contains("const value = Number(input.value);"));
         assert!(!html.contains("viewer.chart_type || 'table'"));
+        assert!(!html.contains("viewer.signals.includes('metrics')"));
         assert!(!html.contains("v.chart_type || 'table'"));
+        assert!(!html.contains("v.signals.includes('metrics')"));
+        assert!(!html.contains("entry.metric_value ?? 0"));
+        assert!(!html.contains("Number(v) || 0"));
+        assert!(!html.contains("Number(context.raw) || 0"));
+        assert!(!html.contains("tryCircularChart("));
         assert!(!html.contains("data.columns || 2"));
         assert!(!html.contains("dash.columns || 2"));
         assert!(!html.contains("Number.parseInt(input.value, 10)"));

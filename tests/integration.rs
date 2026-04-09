@@ -227,6 +227,60 @@ fn make_log_payload(service_name: &str, severity_text: &str, message: &str) -> B
     )
 }
 
+async fn send_json_request(
+    app: &axum::Router,
+    method: &str,
+    uri: impl Into<String>,
+    payload: serde_json::Value,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri.into())
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+async fn send_get_request(app: &axum::Router, uri: impl Into<String>) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(uri.into())
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+async fn response_json(response: axum::response::Response) -> serde_json::Value {
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+async fn create_viewer_and_get_id(app: &axum::Router, payload: serde_json::Value) -> String {
+    let response = send_json_request(app, "POST", "/api/viewers", payload).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    response_json(response).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+async fn fetch_viewer(app: &axum::Router, viewer_id: &str) -> serde_json::Value {
+    let response = send_get_request(app, format!("/api/viewers/{viewer_id}")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    response_json(response).await
+}
+
 // --- startup resume ---------------------------------------------------------
 
 /// Startup resume: restore state from PostgreSQL snapshot + Redis diff
@@ -1174,43 +1228,32 @@ async fn test_create_viewer_with_chart_type() {
     let env = setup_viewer_app().await;
     let app = env.app;
 
-    let create_request = Request::builder()
-        .method("POST")
-        .uri("/api/viewers")
-        .header("content-type", "application/json")
-        .body(axum::body::Body::from(
-            json!({ "name": "Metrics bar", "signal": "metrics", "chart_type": "stacked_bar" })
-                .to_string(),
-        ))
-        .unwrap();
-
-    let create_response = app.clone().oneshot(create_request).await.unwrap();
-    assert_eq!(create_response.status(), StatusCode::CREATED);
-
-    let create_body = axum::body::to_bytes(create_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let create_payload: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
-    let viewer_id = create_payload["id"].as_str().unwrap().to_string();
-
-    // Verify chart_type is stacked_bar via GET /api/viewers/:id
-    let get_request = Request::builder()
-        .method("GET")
-        .uri(format!("/api/viewers/{viewer_id}"))
-        .body(axum::body::Body::empty())
-        .unwrap();
-
-    let get_response = app.oneshot(get_request).await.unwrap();
-    assert_eq!(get_response.status(), StatusCode::OK);
-
-    let body = axum::body::to_bytes(get_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let viewer_id = create_viewer_and_get_id(
+        &app,
+        json!({ "name": "Metrics bar", "signal": "metrics", "chart_type": "stacked_bar" }),
+    )
+    .await;
+    let payload = fetch_viewer(&app, &viewer_id).await;
     assert_eq!(
         payload["chart_type"], "stacked_bar",
         "chart_type should be stacked_bar"
     );
+}
+
+/// Creating viewer with pie chart_type is reflected in response chart_type
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_create_viewer_with_pie_chart_type() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    let viewer_id = create_viewer_and_get_id(
+        &app,
+        json!({ "name": "Metrics pie", "signal": "metrics", "chart_type": "pie" }),
+    )
+    .await;
+    let payload = fetch_viewer(&app, &viewer_id).await;
+    assert_eq!(payload["chart_type"], "pie", "chart_type should be pie");
 }
 
 /// Omitting chart_type defaults to "table"
@@ -1220,35 +1263,10 @@ async fn test_create_viewer_default_chart_type_is_table() {
     let env = setup_viewer_app().await;
     let app = env.app;
 
-    let create_request = Request::builder()
-        .method("POST")
-        .uri("/api/viewers")
-        .header("content-type", "application/json")
-        .body(axum::body::Body::from(
-            json!({ "name": "Default chart", "signal": "traces" }).to_string(),
-        ))
-        .unwrap();
-
-    let create_response = app.clone().oneshot(create_request).await.unwrap();
-    assert_eq!(create_response.status(), StatusCode::CREATED);
-
-    let create_body = axum::body::to_bytes(create_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let create_payload: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
-    let viewer_id = create_payload["id"].as_str().unwrap().to_string();
-
-    let get_request = Request::builder()
-        .method("GET")
-        .uri(format!("/api/viewers/{viewer_id}"))
-        .body(axum::body::Body::empty())
-        .unwrap();
-
-    let get_response = app.oneshot(get_request).await.unwrap();
-    let body = axum::body::to_bytes(get_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let viewer_id =
+        create_viewer_and_get_id(&app, json!({ "name": "Default chart", "signal": "traces" }))
+            .await;
+    let payload = fetch_viewer(&app, &viewer_id).await;
     assert_eq!(
         payload["chart_type"], "table",
         "default chart_type should be table"
@@ -1262,57 +1280,57 @@ async fn test_patch_viewer_chart_type() {
     let env = setup_viewer_app().await;
     let app = env.app;
 
-    // Create metrics viewer with "table"
-    let create_request = Request::builder()
-        .method("POST")
-        .uri("/api/viewers")
-        .header("content-type", "application/json")
-        .body(axum::body::Body::from(
-            json!({ "name": "Patch test", "signal": "metrics" }).to_string(),
-        ))
-        .unwrap();
-
-    let create_response = app.clone().oneshot(create_request).await.unwrap();
-    assert_eq!(create_response.status(), StatusCode::CREATED);
-
-    let create_body = axum::body::to_bytes(create_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let create_payload: serde_json::Value = serde_json::from_slice(&create_body).unwrap();
-    let viewer_id = create_payload["id"].as_str().unwrap().to_string();
-
-    // Change to "line" via PATCH
-    let patch_request = Request::builder()
-        .method("PATCH")
-        .uri(format!("/api/viewers/{viewer_id}"))
-        .header("content-type", "application/json")
-        .body(axum::body::Body::from(
-            json!({ "chart_type": "line" }).to_string(),
-        ))
-        .unwrap();
-
-    let patch_response = app.clone().oneshot(patch_request).await.unwrap();
+    let viewer_id =
+        create_viewer_and_get_id(&app, json!({ "name": "Patch test", "signal": "metrics" })).await;
+    let patch_response = send_json_request(
+        &app,
+        "PATCH",
+        format!("/api/viewers/{viewer_id}"),
+        json!({ "chart_type": "line" }),
+    )
+    .await;
     assert_eq!(
         patch_response.status(),
         StatusCode::OK,
         "PATCH should return 200 OK"
     );
 
-    // Verify changed to "line" via GET
-    let get_request = Request::builder()
-        .method("GET")
-        .uri(format!("/api/viewers/{viewer_id}"))
-        .body(axum::body::Body::empty())
-        .unwrap();
-
-    let get_response = app.oneshot(get_request).await.unwrap();
-    let body = axum::body::to_bytes(get_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let payload = fetch_viewer(&app, &viewer_id).await;
     assert_eq!(
         payload["chart_type"], "line",
         "chart_type should be updated to line"
+    );
+}
+
+/// Change chart_type to donut via PATCH /api/viewers/:id -> reflected in subsequent GET
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_patch_viewer_chart_type_to_donut() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    let viewer_id = create_viewer_and_get_id(
+        &app,
+        json!({ "name": "Patch donut test", "signal": "metrics" }),
+    )
+    .await;
+    let patch_response = send_json_request(
+        &app,
+        "PATCH",
+        format!("/api/viewers/{viewer_id}"),
+        json!({ "chart_type": "donut" }),
+    )
+    .await;
+    assert_eq!(
+        patch_response.status(),
+        StatusCode::OK,
+        "PATCH should return 200 OK"
+    );
+
+    let payload = fetch_viewer(&app, &viewer_id).await;
+    assert_eq!(
+        payload["chart_type"], "donut",
+        "chart_type should be updated to donut"
     );
 }
 
@@ -1323,20 +1341,61 @@ async fn test_create_viewer_invalid_chart_type_returns_400() {
     let env = setup_viewer_app().await;
     let app = env.app;
 
-    let request = Request::builder()
-        .method("POST")
-        .uri("/api/viewers")
-        .header("content-type", "application/json")
-        .body(axum::body::Body::from(
-            json!({ "name": "Bad chart", "signal": "metrics", "chart_type": "pie" }).to_string(),
-        ))
-        .unwrap();
-
-    let response = app.oneshot(request).await.unwrap();
+    let response = send_json_request(
+        &app,
+        "POST",
+        "/api/viewers",
+        json!({ "name": "Bad chart", "signal": "metrics", "chart_type": "heatmap" }),
+    )
+    .await;
     assert_eq!(
         response.status(),
         StatusCode::BAD_REQUEST,
         "invalid chart_type should return 400"
+    );
+}
+
+/// Non-metrics viewers only support the table chart_type
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_create_traces_viewer_with_non_table_chart_type_returns_400() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    let response = send_json_request(
+        &app,
+        "POST",
+        "/api/viewers",
+        json!({ "name": "Bad trace chart", "signal": "traces", "chart_type": "pie" }),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "non-metrics viewers should reject non-table chart_type"
+    );
+}
+
+/// Non-metrics viewers reject chart_type PATCH values other than table
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_patch_traces_viewer_to_non_table_chart_type_returns_400() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    let viewer_id =
+        create_viewer_and_get_id(&app, json!({ "name": "Trace viewer", "signal": "traces" })).await;
+    let patch_response = send_json_request(
+        &app,
+        "PATCH",
+        format!("/api/viewers/{viewer_id}"),
+        json!({ "chart_type": "donut" }),
+    )
+    .await;
+    assert_eq!(
+        patch_response.status(),
+        StatusCode::BAD_REQUEST,
+        "non-metrics viewers should reject non-table chart_type updates"
     );
 }
 
@@ -1348,16 +1407,13 @@ async fn test_patch_nonexistent_viewer_returns_404() {
     let app = env.app;
 
     let unknown_id = Uuid::new_v4();
-    let request = Request::builder()
-        .method("PATCH")
-        .uri(format!("/api/viewers/{unknown_id}"))
-        .header("content-type", "application/json")
-        .body(axum::body::Body::from(
-            json!({ "chart_type": "line" }).to_string(),
-        ))
-        .unwrap();
-
-    let response = app.oneshot(request).await.unwrap();
+    let response = send_json_request(
+        &app,
+        "PATCH",
+        format!("/api/viewers/{unknown_id}"),
+        json!({ "chart_type": "line" }),
+    )
+    .await;
     assert_eq!(
         response.status(),
         StatusCode::NOT_FOUND,
@@ -2246,41 +2302,27 @@ async fn test_create_viewer_with_chart_type_memory() {
     let env = setup_memory_viewer_app().await;
     let app = env.app;
 
-    let create_req = Request::builder()
-        .method("POST")
-        .uri("/api/viewers")
-        .header("content-type", "application/json")
-        .body(axum::body::Body::from(
-            json!({ "name": "Metrics bar", "signal": "metrics", "chart_type": "stacked_bar" })
-                .to_string(),
-        ))
-        .unwrap();
-    let create_resp = app.clone().oneshot(create_req).await.unwrap();
-    assert_eq!(create_resp.status(), StatusCode::CREATED);
-    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let viewer_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    let get_body = axum::body::to_bytes(
-        app.oneshot(
-            Request::builder()
-                .uri(format!("/api/viewers/{viewer_id}"))
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap()
-        .into_body(),
-        usize::MAX,
+    let viewer_id = create_viewer_and_get_id(
+        &app,
+        json!({ "name": "Metrics bar", "signal": "metrics", "chart_type": "stacked_bar" }),
     )
-    .await
-    .unwrap();
-    let payload: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+    .await;
+    let payload = fetch_viewer(&app, &viewer_id).await;
     assert_eq!(payload["chart_type"], "stacked_bar");
+}
+
+#[tokio::test]
+async fn test_create_viewer_with_pie_chart_type_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let viewer_id = create_viewer_and_get_id(
+        &app,
+        json!({ "name": "Metrics pie", "signal": "metrics", "chart_type": "pie" }),
+    )
+    .await;
+    let payload = fetch_viewer(&app, &viewer_id).await;
+    assert_eq!(payload["chart_type"], "pie");
 }
 
 #[tokio::test]
@@ -2288,39 +2330,10 @@ async fn test_create_viewer_default_chart_type_is_table_memory() {
     let env = setup_memory_viewer_app().await;
     let app = env.app;
 
-    let create_req = Request::builder()
-        .method("POST")
-        .uri("/api/viewers")
-        .header("content-type", "application/json")
-        .body(axum::body::Body::from(
-            json!({ "name": "Default chart", "signal": "traces" }).to_string(),
-        ))
-        .unwrap();
-    let create_resp = app.clone().oneshot(create_req).await.unwrap();
-    assert_eq!(create_resp.status(), StatusCode::CREATED);
-    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let viewer_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    let get_body = axum::body::to_bytes(
-        app.oneshot(
-            Request::builder()
-                .uri(format!("/api/viewers/{viewer_id}"))
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap()
-        .into_body(),
-        usize::MAX,
-    )
-    .await
-    .unwrap();
-    let payload: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+    let viewer_id =
+        create_viewer_and_get_id(&app, json!({ "name": "Default chart", "signal": "traces" }))
+            .await;
+    let payload = fetch_viewer(&app, &viewer_id).await;
     assert_eq!(payload["chart_type"], "table");
 }
 
@@ -2329,96 +2342,97 @@ async fn test_patch_viewer_chart_type_memory() {
     let env = setup_memory_viewer_app().await;
     let app = env.app;
 
-    let create_req = Request::builder()
-        .method("POST")
-        .uri("/api/viewers")
-        .header("content-type", "application/json")
-        .body(axum::body::Body::from(
-            json!({ "name": "Patch test", "signal": "metrics" }).to_string(),
-        ))
-        .unwrap();
-    let create_resp = app.clone().oneshot(create_req).await.unwrap();
-    assert_eq!(create_resp.status(), StatusCode::CREATED);
-    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let viewer_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    let patch_resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("PATCH")
-                .uri(format!("/api/viewers/{viewer_id}"))
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(
-                    json!({ "chart_type": "line" }).to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let viewer_id =
+        create_viewer_and_get_id(&app, json!({ "name": "Patch test", "signal": "metrics" })).await;
+    let patch_resp = send_json_request(
+        &app,
+        "PATCH",
+        format!("/api/viewers/{viewer_id}"),
+        json!({ "chart_type": "line" }),
+    )
+    .await;
     assert_eq!(patch_resp.status(), StatusCode::OK);
 
-    let get_body = axum::body::to_bytes(
-        app.oneshot(
-            Request::builder()
-                .uri(format!("/api/viewers/{viewer_id}"))
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap()
-        .into_body(),
-        usize::MAX,
-    )
-    .await
-    .unwrap();
-    let payload: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+    let payload = fetch_viewer(&app, &viewer_id).await;
     assert_eq!(payload["chart_type"], "line");
+}
+
+#[tokio::test]
+async fn test_patch_viewer_chart_type_to_donut_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let viewer_id = create_viewer_and_get_id(
+        &app,
+        json!({ "name": "Patch donut test", "signal": "metrics" }),
+    )
+    .await;
+    let patch_resp = send_json_request(
+        &app,
+        "PATCH",
+        format!("/api/viewers/{viewer_id}"),
+        json!({ "chart_type": "donut" }),
+    )
+    .await;
+    assert_eq!(patch_resp.status(), StatusCode::OK);
+
+    let payload = fetch_viewer(&app, &viewer_id).await;
+    assert_eq!(payload["chart_type"], "donut");
 }
 
 #[tokio::test]
 async fn test_create_viewer_invalid_chart_type_returns_400_memory() {
     let env = setup_memory_viewer_app().await;
-    let resp = env
-        .app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/viewers")
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(
-                    json!({ "name": "Bad chart", "signal": "metrics", "chart_type": "pie" })
-                        .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let resp = send_json_request(
+        &env.app,
+        "POST",
+        "/api/viewers",
+        json!({ "name": "Bad chart", "signal": "metrics", "chart_type": "heatmap" }),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_create_traces_viewer_with_non_table_chart_type_returns_400_memory() {
+    let env = setup_memory_viewer_app().await;
+    let resp = send_json_request(
+        &env.app,
+        "POST",
+        "/api/viewers",
+        json!({ "name": "Bad trace chart", "signal": "traces", "chart_type": "pie" }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_patch_traces_viewer_to_non_table_chart_type_returns_400_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let viewer_id =
+        create_viewer_and_get_id(&app, json!({ "name": "Trace viewer", "signal": "traces" })).await;
+    let patch_resp = send_json_request(
+        &app,
+        "PATCH",
+        format!("/api/viewers/{viewer_id}"),
+        json!({ "chart_type": "donut" }),
+    )
+    .await;
+    assert_eq!(patch_resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
 async fn test_patch_nonexistent_viewer_returns_404_memory() {
     let env = setup_memory_viewer_app().await;
-    let resp = env
-        .app
-        .oneshot(
-            Request::builder()
-                .method("PATCH")
-                .uri(format!("/api/viewers/{}", Uuid::new_v4()))
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(
-                    json!({ "chart_type": "line" }).to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let resp = send_json_request(
+        &env.app,
+        "PATCH",
+        format!("/api/viewers/{}", Uuid::new_v4()),
+        json!({ "chart_type": "line" }),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
