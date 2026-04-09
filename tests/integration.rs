@@ -3823,6 +3823,621 @@ async fn test_create_viewer_with_query_filters_matching_entries_memory() {
     );
 }
 
+/// Create viewer with `filters` (AND mode) — only entries matching all filters appear
+#[tokio::test]
+async fn test_create_viewer_with_filters_and_mode_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // Given: traces from three services
+    for (service, span) in [
+        ("checkout-ui", "render"),
+        ("checkout-ui-extra", "render-extra"),
+        ("orders-api", "process"),
+    ] {
+        assert_eq!(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/traces")
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(make_trace_payload(service, span)))
+                        .unwrap()
+                )
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+
+    // When: create viewer with AND filters: service_name eq "checkout-ui" AND payload contains "render"
+    let create_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/viewers")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({
+                        "name": "Checkout exact",
+                        "signal": "traces",
+                        "filters": [
+                            { "field": "service_name", "op": "eq", "value": "checkout-ui" },
+                            { "field": "payload", "op": "contains", "value": "render" }
+                        ],
+                        "filter_mode": "and"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let get_body = axum::body::to_bytes(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/viewers/{viewer_id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let viewer: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+
+    // Then: only "checkout-ui" with "render" span matches (not "checkout-ui-extra")
+    assert_eq!(
+        viewer["entry_count"], 1,
+        "AND mode: only exact match should pass"
+    );
+    assert_eq!(viewer["entries"][0]["service_name"], "checkout-ui");
+    assert_eq!(viewer["filter_mode"], "and");
+    assert_eq!(viewer["filters"][0]["field"], "service_name");
+    assert_eq!(viewer["filters"][0]["op"], "eq");
+}
+
+/// Create viewer with `filters` (OR mode) — entries matching any filter appear
+#[tokio::test]
+async fn test_create_viewer_with_filters_or_mode_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // Given: traces from two services
+    for (service, span) in [("frontend", "render"), ("backend", "process")] {
+        assert_eq!(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/traces")
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(make_trace_payload(service, span)))
+                        .unwrap()
+                )
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+
+    // When: create viewer with OR filters: service_name eq "frontend" OR service_name eq "backend"
+    let create_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/viewers")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({
+                        "name": "Frontend or Backend",
+                        "signal": "traces",
+                        "filters": [
+                            { "field": "service_name", "op": "eq", "value": "frontend" },
+                            { "field": "service_name", "op": "eq", "value": "backend" }
+                        ],
+                        "filter_mode": "or"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let get_body = axum::body::to_bytes(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/viewers/{viewer_id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let viewer: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+
+    // Then: both entries match (OR logic)
+    assert_eq!(
+        viewer["entry_count"], 2,
+        "OR mode: both matching entries should appear"
+    );
+    assert_eq!(viewer["filter_mode"], "or");
+}
+
+/// Preview viewer with filters — filters apply to preview results
+#[tokio::test]
+async fn test_preview_viewer_with_filters_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // Given: traces from two services
+    for (service, span) in [("alpha-svc", "span-a"), ("beta-svc", "span-b")] {
+        assert_eq!(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/traces")
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(make_trace_payload(service, span)))
+                        .unwrap()
+                )
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+
+    // When: preview with filter service_name eq "alpha-svc"
+    let preview_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/viewers/preview")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({
+                        "signal": "traces",
+                        "filters": [{ "field": "service_name", "op": "eq", "value": "alpha-svc" }],
+                        "filter_mode": "and"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview_resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(preview_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let preview: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    // Then: only alpha-svc entry matches
+    assert_eq!(
+        preview["entry_count"], 1,
+        "preview should only return matching entry"
+    );
+    assert_eq!(preview["entries"][0]["service_name"], "alpha-svc");
+    assert_eq!(preview["filters"][0]["field"], "service_name");
+}
+
+/// Patch viewer from query-only to filters
+#[tokio::test]
+async fn test_patch_viewer_query_to_filters_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // Given: traces from two services
+    for (service, span) in [("svc-a", "op-a"), ("svc-b", "op-b")] {
+        assert_eq!(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/traces")
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(make_trace_payload(service, span)))
+                        .unwrap()
+                )
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+
+    // Create viewer with query
+    let create_body = axum::body::to_bytes(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/viewers")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({"name": "Query only viewer", "signal": "traces", "query": "svc-a"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&create_body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Patch to use filters instead
+    let patch_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({
+                        "filters": [{ "field": "service_name", "op": "eq", "value": "svc-b" }],
+                        "filter_mode": "and"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(patch_resp.status(), StatusCode::OK);
+
+    let get_body = axum::body::to_bytes(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/viewers/{viewer_id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let viewer: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+
+    // Then: svc-b filter matches only svc-b entry
+    assert_eq!(
+        viewer["entry_count"], 1,
+        "after patch to filters, only svc-b should match"
+    );
+    assert_eq!(viewer["entries"][0]["service_name"], "svc-b");
+}
+
+/// Patch viewer to remove all filters (pass empty filters array)
+#[tokio::test]
+async fn test_patch_viewer_remove_filters_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // Given: traces from two services
+    for (service, span) in [("svc-x", "op-x"), ("svc-y", "op-y")] {
+        assert_eq!(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/traces")
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(make_trace_payload(service, span)))
+                        .unwrap()
+                )
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+
+    // Create viewer with filter
+    let create_body = axum::body::to_bytes(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/viewers")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({
+                            "name": "Filtered viewer",
+                            "signal": "traces",
+                            "filters": [{ "field": "service_name", "op": "eq", "value": "svc-x" }],
+                            "filter_mode": "and"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&create_body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Patch with empty filters to remove filters
+    let patch_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/viewers/{viewer_id}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(json!({ "filters": [] }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(patch_resp.status(), StatusCode::OK);
+
+    let get_body = axum::body::to_bytes(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/viewers/{viewer_id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let viewer: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+
+    // Then: no filters → match-all → both entries visible
+    assert_eq!(
+        viewer["entry_count"], 2,
+        "after clearing filters, all entries should match"
+    );
+    assert!(
+        viewer["filters"].is_null(),
+        "filters field should be absent after clear"
+    );
+}
+
+/// Create viewer with invalid regex filter — should return 400
+#[tokio::test]
+async fn test_create_viewer_with_invalid_regex_returns_400_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/viewers")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({
+                        "name": "Bad regex viewer",
+                        "signal": "traces",
+                        "filters": [{ "field": "service_name", "op": "regex", "value": "[invalid" }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// `query` backward compat — existing query field still filters when no filters present
+#[tokio::test]
+async fn test_query_backward_compat_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    for (service, span) in [("legacy-svc", "op"), ("new-svc", "op")] {
+        assert_eq!(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/traces")
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(make_trace_payload(service, span)))
+                        .unwrap()
+                )
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+
+    let create_body = axum::body::to_bytes(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/viewers")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({"name": "Legacy query viewer", "signal": "traces", "query": "legacy-svc"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&create_body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let get_body = axum::body::to_bytes(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/viewers/{viewer_id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let viewer: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+
+    assert_eq!(
+        viewer["entry_count"], 1,
+        "query should still filter entries backward-compatibly"
+    );
+    assert_eq!(viewer["entries"][0]["service_name"], "legacy-svc");
+    assert_eq!(viewer["query"], "legacy-svc");
+    assert!(
+        viewer["filters"].is_null(),
+        "no filters field should be present"
+    );
+}
+
+/// When both `query` and `filters` are present, `filters` take priority
+#[tokio::test]
+async fn test_filters_take_priority_over_query_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    for (service, span) in [("alpha", "op"), ("beta", "op")] {
+        assert_eq!(
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/traces")
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(make_trace_payload(service, span)))
+                        .unwrap()
+                )
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+
+    // query="beta" but filter=service_name eq "alpha" → filter wins, only alpha appears
+    let create_body = axum::body::to_bytes(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/viewers")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({
+                            "name": "Filter priority test",
+                            "signal": "traces",
+                            "query": "beta",
+                            "filters": [{ "field": "service_name", "op": "eq", "value": "alpha" }],
+                            "filter_mode": "and"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let viewer_id = serde_json::from_slice::<serde_json::Value>(&create_body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let get_body = axum::body::to_bytes(
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/viewers/{viewer_id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let viewer: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+
+    // filters take priority: filter matches "alpha" only, not "beta"
+    assert_eq!(
+        viewer["entry_count"], 1,
+        "filters must take priority over query"
+    );
+    assert_eq!(viewer["entries"][0]["service_name"], "alpha");
+}
+
 /// Create viewer with query → non-matching entries excluded from entry_count and entries list
 #[tokio::test]
 async fn test_create_viewer_with_query_excludes_non_matching_from_entry_count_memory() {
