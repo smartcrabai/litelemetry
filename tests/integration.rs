@@ -4376,3 +4376,94 @@ async fn test_create_dashboard_without_runtime_returns_503() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
+
+// --- UI HTML content (query filter / preview) ---------------------------------
+
+/// GET / HTML contains all query filter and preview UI elements:
+/// - viewer-query-input (with data-testid)
+/// - preview-viewer-button (with data-testid)
+/// - viewer-preview-panel with its inner elements
+/// - Query column header in the viewer table
+/// - viewer-detail-query-row with its inner elements
+#[tokio::test]
+async fn test_index_html_contains_query_filter_and_preview_elements() {
+    let env = setup_memory_viewer_app().await;
+    let resp = env
+        .app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8(bytes.to_vec()).expect("HTML body should be valid UTF-8");
+
+    // query input
+    assert!(
+        html.contains("id=\"viewer-query-input\""),
+        "HTML should contain viewer-query-input element"
+    );
+    assert!(
+        html.contains("data-testid=\"viewer-query-input\""),
+        "viewer-query-input should have data-testid attribute"
+    );
+
+    // preview button
+    assert!(
+        html.contains("id=\"preview-viewer-button\""),
+        "HTML should contain preview-viewer-button element"
+    );
+    assert!(
+        html.contains("data-testid=\"preview-viewer-button\""),
+        "preview-viewer-button should have data-testid attribute"
+    );
+
+    // preview panel
+    assert!(
+        html.contains("id=\"viewer-preview-panel\""),
+        "HTML should contain viewer-preview-panel section"
+    );
+    assert!(
+        html.contains("id=\"viewer-preview-entries-body\""),
+        "preview panel should contain entries tbody"
+    );
+    assert!(
+        html.contains("id=\"viewer-preview-traces-body\""),
+        "preview panel should contain traces tbody"
+    );
+    assert!(
+        html.contains("id=\"viewer-preview-count\""),
+        "preview panel should contain entry count span"
+    );
+    assert!(
+        html.contains("id=\"viewer-preview-close\""),
+        "preview panel should contain close button"
+    );
+
+    // viewer table Query column
+    assert!(
+        html.contains("<th>Query</th>"),
+        "viewer table header should contain Query column"
+    );
+
+    // viewer detail query edit row
+    assert!(
+        html.contains("id=\"viewer-detail-query-row\""),
+        "viewer detail section should contain query edit row"
+    );
+    assert!(
+        html.contains("id=\"viewer-detail-query-input\""),
+        "query edit row should contain input field"
+    );
+    assert!(
+        html.contains("id=\"viewer-detail-query-update\""),
+        "query edit row should contain update button"
+    );
+}
