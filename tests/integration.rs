@@ -4347,6 +4347,58 @@ async fn test_patch_chart_type_without_query_still_works_memory() {
     assert_eq!(viewer["chart_type"], "line");
 }
 
+/// POST /api/viewers/preview with signal=metrics returns entries with metric_name and metric_value
+#[tokio::test]
+async fn test_preview_viewer_returns_metric_name_and_value_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let metric_req = Request::builder()
+        .method("POST")
+        .uri("/v1/metrics")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(make_metric_payload(
+            "metrics-svc",
+            "cpu.usage",
+            42,
+        )))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(metric_req).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let preview_resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/viewers/preview")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "signal": "metrics" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview_resp.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(preview_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let preview: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(preview["entry_count"], 1);
+    assert_eq!(
+        preview["entries"][0]["metric_name"], "cpu.usage",
+        "metric_name must be present in preview entries"
+    );
+    assert_eq!(
+        preview["entries"][0]["metric_value"], 42.0,
+        "metric_value must be present in preview entries"
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn test_create_dashboard_without_runtime_returns_503() {

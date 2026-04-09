@@ -830,6 +830,38 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         white-space: nowrap;
         padding-left: 4px;
       }
+
+      .preview-panel {
+        background: rgba(240, 246, 244, 0.92);
+        gap: 14px;
+      }
+
+      .preview-panel-header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      .preview-summary {
+        font-size: 0.85rem;
+        color: var(--muted);
+      }
+
+      .preview-status {
+        font-size: 0.8rem;
+        color: var(--muted);
+        margin-left: auto;
+      }
+
+      .preview-content {
+        max-height: 300px;
+        overflow-y: auto;
+      }
+
+      #preview-chart-container {
+        max-height: 220px;
+      }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
   </head>
@@ -862,8 +894,25 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           <button id="create-viewer-button" data-testid="create-viewer-button" class="primary" type="button">+ Create viewer</button>
           <button id="refresh-viewers-button" class="secondary" type="button">Refresh</button>
         </div>
+        <div class="toolbar-row">
+          <input id="viewer-query-input" data-testid="viewer-query-input" name="viewer-query" type="search" aria-label="Filter by service name or keyword" placeholder="Filter by service name or keyword" />
+        </div>
         <div id="status-box" data-testid="status-box" class="status-box" data-state="working">
           Loading viewers...
+        </div>
+      </section>
+
+      <section id="preview-panel" class="panel preview-panel" aria-labelledby="preview-label" hidden>
+        <div class="preview-panel-header">
+          <span id="preview-label" class="label">Preview</span>
+          <span id="preview-summary" class="preview-summary"></span>
+          <span id="preview-status" class="preview-status" role="status" aria-live="polite"></span>
+        </div>
+        <div id="preview-content" class="preview-content">
+          <div id="preview-chart-container" hidden>
+            <canvas id="preview-chart-canvas"></canvas>
+          </div>
+          <div id="preview-table-container"></div>
         </div>
       </section>
 
@@ -956,6 +1005,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const viewerSignalSelect = document.getElementById('viewer-signal-select');
       const viewerChartTypeSelect = document.getElementById('viewer-chart-type-select');
       const viewerNameInput = document.getElementById('viewer-name-input');
+      const viewerQueryInput = document.getElementById('viewer-query-input');
       const createViewerButton = document.getElementById('create-viewer-button');
       const refreshViewersButton = document.getElementById('refresh-viewers-button');
       const viewerEmpty = document.getElementById('viewer-empty');
@@ -976,11 +1026,22 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const traceDetailTitle = document.getElementById('trace-detail-title');
       const traceAxis = document.getElementById('trace-axis');
       const traceTimeline = document.getElementById('trace-timeline');
+      const previewPanel = document.getElementById('preview-panel');
+      const previewSummary = document.getElementById('preview-summary');
+      const previewStatusEl = document.getElementById('preview-status');
+      const previewChartContainer = document.getElementById('preview-chart-container');
+      const previewChartCanvas = document.getElementById('preview-chart-canvas');
+      const previewTableContainer = document.getElementById('preview-table-container');
 
       let latestViewers = [];
       let viewerLoadState = 'loading';
       let selectedViewerId = null;
       let currentChart = null;
+      let previewChart = null;
+      let previewAbortController = null;
+      let previewDebounceTimer = null;
+      let previewRequestSeq = 0;
+      let latestPreviewPayload = null;
 
       function setStatus(kind, message) {
         statusBox.dataset.state = kind;
@@ -1594,10 +1655,112 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
       }
 
+      function clearPreviewDebounce() {
+        if (previewDebounceTimer) { clearTimeout(previewDebounceTimer); previewDebounceTimer = null; }
+      }
+
+      function clearPreviewContent() {
+        if (previewChart) { previewChart.destroy(); previewChart = null; }
+        previewChartContainer.hidden = true;
+        previewTableContainer.replaceChildren();
+      }
+
+      function showPreviewMessage(message) {
+        clearPreviewContent();
+        const p = document.createElement('p');
+        p.className = 'preview-summary';
+        p.textContent = message;
+        previewTableContainer.appendChild(p);
+      }
+
+      function cancelPreview() {
+        clearPreviewDebounce();
+        if (previewAbortController) { previewAbortController.abort(); previewAbortController = null; }
+        latestPreviewPayload = null;
+        previewSummary.textContent = '';
+        previewStatusEl.textContent = '';
+        clearPreviewContent();
+        previewPanel.hidden = true;
+      }
+
+      function renderPreview(payload) {
+        latestPreviewPayload = payload;
+        const chartType = viewerChartTypeSelect.value;
+        const signal = payload.signal;
+        const entries = payload.entries;
+        const traces = payload.traces || [];
+
+        previewSummary.textContent = `${payload.entry_count} entries found`;
+        previewStatusEl.textContent = '';
+
+        clearPreviewContent();
+
+        if (!entries.length && !traces.length) {
+          showPreviewMessage('No matching entries.');
+          return;
+        }
+
+        if (signal === 'metrics' && chartType !== 'table' && entries.length) {
+          previewChartContainer.hidden = false;
+          previewChart = renderPanelChart(chartType, entries, 5 * 60 * 1000, previewChartCanvas);
+          if (!previewChart) previewChartContainer.hidden = true;
+        } else if (signal === 'traces' && traces.length) {
+          renderPanelTraceTable(previewTableContainer, traces);
+        } else {
+          renderPanelEntriesTable(previewTableContainer, entries);
+        }
+      }
+
+      async function fetchPreview() {
+        const signalType = viewerSignalSelect.value;
+        const query = viewerQueryInput.value.trim();
+        const seq = ++previewRequestSeq;
+
+        previewAbortController = new AbortController();
+        latestPreviewPayload = null;
+
+        previewSummary.textContent = '';
+        previewStatusEl.textContent = 'Loading...';
+        clearPreviewContent();
+        previewPanel.hidden = false;
+
+        try {
+          const body = { signal: signalType };
+          if (query) body.query = query;
+          const resp = await fetch('/api/viewers/preview', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'accept': 'application/json' },
+            body: JSON.stringify(body),
+            signal: previewAbortController.signal,
+          });
+          if (seq !== previewRequestSeq) return;
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const payload = await resp.json();
+          if (seq !== previewRequestSeq) return;
+          renderPreview(payload);
+        } catch (err) {
+          if (err.name === 'AbortError') return;
+          if (seq !== previewRequestSeq) return;
+          latestPreviewPayload = null;
+          previewStatusEl.textContent = `Error: ${err.message}`;
+          previewSummary.textContent = '';
+          showPreviewMessage('Preview unavailable.');
+        } finally {
+          if (seq === previewRequestSeq) previewAbortController = null;
+        }
+      }
+
+      function previewViewer(immediate = false) {
+        clearPreviewDebounce();
+        if (previewAbortController) previewAbortController.abort();
+        if (immediate) { fetchPreview(); } else { previewDebounceTimer = setTimeout(fetchPreview, 500); }
+      }
+
       async function createViewer() {
         const name = viewerNameInput.value.trim();
         const signal = viewerSignalSelect.value;
         const chart_type = viewerChartTypeSelect.value;
+        const query = viewerQueryInput.value.trim();
         if (!name) {
           setStatus('error', 'Viewer name is required.');
           viewerNameInput.focus();
@@ -1608,13 +1771,15 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         setStatus('working', `Creating ${signal} viewer "${name}"...`);
 
         try {
+          const requestBody = { name, signal, chart_type };
+          if (query) requestBody.query = query;
           const response = await fetch('/api/viewers', {
             method: 'POST',
             headers: {
               'content-type': 'application/json',
               'accept': 'application/json'
             },
-            body: JSON.stringify({ name, signal, chart_type })
+            body: JSON.stringify(requestBody)
           });
 
           if (!response.ok) {
@@ -1648,8 +1813,18 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       }
 
       createViewerButton.addEventListener('click', createViewer);
-      refreshViewersButton.addEventListener('click', () => refreshViewers());
-      viewerSignalSelect.addEventListener('change', syncCreateForm);
+      refreshViewersButton.addEventListener('click', () => {
+        refreshViewers();
+        previewViewer(true);
+      });
+      viewerSignalSelect.addEventListener('change', () => {
+        syncCreateForm();
+        previewViewer(true);
+      });
+      viewerQueryInput.addEventListener('input', () => previewViewer());
+      viewerChartTypeSelect.addEventListener('change', () => {
+        if (latestPreviewPayload) renderPreview(latestPreviewPayload);
+      });
       viewerNameInput.addEventListener('keydown', event => {
         if (event.key === 'Enter') {
           event.preventDefault();
@@ -1658,6 +1833,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       });
 
       syncCreateForm();
+      previewViewer(true);
       refreshViewers({ silent: true });
       window.setInterval(() => refreshViewers({ silent: true }), 5000);
 
@@ -1690,6 +1866,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       });
 
       function navigateTo(page, dashboardId) {
+        cancelPreview();
         currentPage = page;
         currentDashboardId = dashboardId || null;
 
@@ -1704,6 +1881,9 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
         if (page === 'dashboard' && dashboardId) {
           loadDashboard(dashboardId);
+        }
+        if (page === 'viewers') {
+          previewViewer(true);
         }
 
         sidebar.classList.remove('open');
@@ -3711,6 +3891,65 @@ mod tests {
         assert!(html.contains("sidebar-toggle"));
         assert!(html.contains("viewer-sortable-item"));
         assert!(html.contains("viewer-drag-handle"));
+    }
+
+    #[tokio::test]
+    async fn test_root_returns_query_input_and_preview_panel() {
+        let (_, html) = index_html().await;
+
+        assert!(
+            html.contains("viewer-query-input"),
+            "query input element must exist"
+        );
+        assert!(
+            html.contains("preview-panel"),
+            "preview panel container must exist"
+        );
+        assert!(
+            html.contains("preview-summary"),
+            "preview summary element must exist"
+        );
+        assert!(html.contains("Preview"), "Preview label must appear");
+        assert!(
+            html.contains("if (page === 'viewers') {\n          previewViewer(true);\n        }"),
+            "returning to viewers must restore the preview"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_root_initializes_preview_on_first_load_and_refresh() {
+        let (_, html) = index_html().await;
+
+        assert!(
+            html.contains("syncCreateForm();\n      previewViewer(true);\n      refreshViewers({ silent: true });"),
+            "initial page load must trigger the preview before the first viewer list refresh"
+        );
+        assert!(
+            html.contains(
+                "refreshViewersButton.addEventListener('click', () => {\n        refreshViewers();\n        previewViewer(true);\n      });"
+            ),
+            "manual refresh must also refresh the preview panel"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_root_clears_stale_preview_state_during_reload_and_errors() {
+        let (_, html) = index_html().await;
+
+        assert!(
+            html.contains("function clearPreviewContent()"),
+            "preview content reset helper must exist"
+        );
+        assert!(
+            html.contains(
+                "previewStatusEl.textContent = 'Loading...';\n        clearPreviewContent();"
+            ),
+            "loading a preview must clear stale content"
+        );
+        assert!(
+            html.contains("showPreviewMessage('Preview unavailable.');"),
+            "failed previews must replace stale content with an explicit empty state"
+        );
     }
 
     #[tokio::test]
