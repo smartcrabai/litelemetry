@@ -299,6 +299,92 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         min-width: 160px;
       }
 
+      .filter-row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+        width: 100%;
+      }
+
+      .filter-row select,
+      .filter-row input[type="text"] {
+        min-height: 38px;
+        padding: 6px 10px;
+        border-radius: 12px;
+        width: auto;
+      }
+
+      .filter-row select {
+        min-width: 110px;
+        flex-shrink: 0;
+      }
+
+      .filter-row input[type="text"] {
+        flex: 1;
+        min-width: 120px;
+      }
+
+      .filter-mode-toggle {
+        display: flex;
+        border-radius: 999px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        flex-shrink: 0;
+      }
+
+      .filter-mode-toggle button {
+        min-height: 36px;
+        padding: 0 14px;
+        border-radius: 0;
+        font-size: 0.82rem;
+        background: rgba(255,255,255,0.85);
+        color: var(--ink);
+        font-weight: 600;
+        border: 0;
+      }
+
+      .filter-mode-toggle button.active {
+        background: var(--teal);
+        color: #fff;
+      }
+
+      .filter-helper-text {
+        font-size: 0.82rem;
+        color: var(--muted);
+        font-style: italic;
+      }
+
+      .filter-badges {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      .filter-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 0.78rem;
+        background: var(--teal-soft);
+        color: var(--teal);
+        border: 1px solid rgba(13,109,98,0.2);
+        border-radius: 999px;
+        padding: 3px 10px;
+        font-weight: 600;
+      }
+
+      .filter-badge-mode {
+        background: var(--accent-soft);
+        color: var(--accent);
+        border-color: rgba(183,84,50,0.2);
+      }
+
+      .filter-section {
+        display: grid;
+        gap: 10px;
+      }
+
       .table-wrap {
         overflow: hidden;
       }
@@ -646,6 +732,43 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         max-height: 400px;
       }
 
+      .billboard-widget {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        gap: 6px;
+      }
+
+      .billboard-value {
+        font-size: 48px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+        color: var(--teal);
+      }
+
+      .billboard-value.no-data {
+        color: var(--muted);
+      }
+
+      .billboard-subtitle {
+        font-size: 16px;
+        color: var(--muted);
+      }
+
+      .billboard-change {
+        font-size: 16px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .billboard-change.up { color: var(--teal); }
+      .billboard-change.down { color: var(--accent); }
+
+      .billboard-widget.compact .billboard-value { font-size: 32px; }
+      .billboard-widget.compact .billboard-subtitle { font-size: 12px; }
+      .billboard-widget.compact .billboard-change { font-size: 12px; }
+
       .viewer-row {
         cursor: pointer;
       }
@@ -889,33 +1012,71 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             <option value="table">Table</option>
             <option value="stacked_bar">Stacked Bar</option>
             <option value="line">Line</option>
+            <option value="area">Area</option>
+            <option value="pie">Pie</option>
+            <option value="donut">Donut</option>
+            <option value="billboard">Billboard</option>
           </select>
-          <input id="viewer-name-input" data-testid="viewer-name-input" name="viewer-name" placeholder="checkout traces" maxlength="80" />
+          <input id="viewer-name-input" data-testid="viewer-name-input" name="viewer-name" placeholder="checkout traces" maxlength="80" style="max-width: 200px;" />
           <button id="create-viewer-button" data-testid="create-viewer-button" class="primary" type="button">+ Create viewer</button>
           <button id="refresh-viewers-button" class="secondary" type="button">Refresh</button>
         </div>
-        <div class="toolbar-row">
-          <input id="viewer-query-input" data-testid="viewer-query-input" name="viewer-query" type="search" aria-label="Filter by service name or keyword" placeholder="Filter by service name or keyword" />
+        <div class="toolbar-row" id="filter-builder-row">
+          <input id="viewer-query-input" data-testid="viewer-query-input" name="viewer-query"
+                 type="search" placeholder="Filter by service name or keyword" maxlength="200"
+                 aria-label="Text search query" style="flex:1;min-width:180px;" />
+          <div class="filter-mode-toggle" id="filter-mode-toggle">
+            <button id="filter-mode-and" class="active" type="button" title="All filters must match" aria-pressed="true">AND</button>
+            <button id="filter-mode-or" type="button" title="Any filter must match" aria-pressed="false">OR</button>
+          </div>
+          <div id="filter-rows-container" style="display:contents;"></div>
+          <button id="add-filter-button" class="secondary" type="button" data-testid="add-filter-button">+ Add filter</button>
+          <button id="preview-viewer-button" data-testid="preview-viewer-button"
+                  class="secondary" type="button">Preview</button>
         </div>
+        <div id="filter-helper-text" class="filter-helper-text" hidden>Advanced filters are active — they take priority over the query field.</div>
         <div id="status-box" data-testid="status-box" class="status-box" data-state="working">
           Loading viewers...
         </div>
       </section>
 
-      <section id="preview-panel" class="panel preview-panel" aria-labelledby="preview-label" hidden>
+      <section id="viewer-preview-panel" class="panel preview-panel" aria-labelledby="preview-label" hidden>
         <div class="preview-panel-header">
           <span id="preview-label" class="label">Preview</span>
-          <span id="preview-summary" class="preview-summary"></span>
+          <span id="viewer-preview-count" class="preview-summary"></span>
           <span id="preview-status" class="preview-status" role="status" aria-live="polite"></span>
+          <button id="viewer-preview-close" class="secondary btn-compact" type="button">×</button>
         </div>
-        <div id="preview-content" class="preview-content">
+        <div class="preview-content">
           <div id="preview-chart-container" hidden>
             <canvas id="preview-chart-canvas"></canvas>
           </div>
-          <div id="preview-table-container"></div>
+          <div id="viewer-preview-entries" class="entries-table-wrap" hidden>
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th><th>Signal</th><th>Service</th><th>Preview</th>
+                </tr>
+              </thead>
+              <tbody id="viewer-preview-entries-body"></tbody>
+            </table>
+          </div>
+          <div id="viewer-preview-traces" class="entries-table-wrap" hidden>
+            <table>
+              <thead>
+                <tr>
+                  <th>Trace ID</th><th>Root Span</th><th>Services</th>
+                  <th>Spans</th><th>Duration</th><th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="viewer-preview-traces-body"></tbody>
+            </table>
+          </div>
+          <p id="viewer-preview-empty" hidden style="text-align:center; color: var(--muted);">
+            No matching entries.
+          </p>
         </div>
       </section>
-
       <section class="panel panel-strong stack table-wrap">
         <div id="viewer-table-scroll" class="table-scroll" hidden>
           <table data-testid="viewer-table">
@@ -925,6 +1086,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
                 <th>ID</th>
                 <th>Signal</th>
                 <th>Chart</th>
+                <th>Query</th>
                 <th>Lookback</th>
                 <th>Entries</th>
                 <th>Status</th>
@@ -943,7 +1105,32 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       </section>
 
       <section id="viewer-detail-section" class="panel panel-strong chart-section">
-        <h3 id="viewer-detail-title">Viewer Detail</h3>
+        <div class="toolbar-row" style="margin-bottom: 4px;">
+          <h3 id="viewer-detail-title">Viewer Detail</h3>
+        </div>
+        <div id="viewer-detail-query-row" class="toolbar-row" hidden>
+          <input id="viewer-detail-query-input" placeholder="Query filter" maxlength="200"
+                 style="flex:1; min-width: 120px;" />
+          <button id="viewer-detail-query-update" class="secondary btn-compact" type="button">Update</button>
+        </div>
+        <div id="viewer-filter-section" class="filter-section" hidden>
+          <div class="filter-badges" id="viewer-filter-badges"></div>
+          <div id="viewer-filter-editor" hidden>
+            <div class="toolbar-row" style="margin-top:6px;">
+              <input id="detail-query-input" type="text" placeholder="Simple text search (optional)" aria-label="Text search query" style="flex:1;min-width:180px;" />
+              <div class="filter-mode-toggle" id="detail-filter-mode-toggle">
+                <button id="detail-filter-mode-and" class="active" type="button" title="All filters must match" aria-pressed="true">AND</button>
+                <button id="detail-filter-mode-or" type="button" title="Any filter must match" aria-pressed="false">OR</button>
+              </div>
+            </div>
+            <div id="detail-filter-rows-container" style="display:grid;gap:6px;margin-top:8px;"></div>
+            <div style="display:flex;gap:8px;margin-top:8px;">
+              <button id="detail-add-filter-button" class="secondary" type="button">+ Add filter</button>
+              <button id="detail-save-filters-button" class="primary" type="button">Save filters</button>
+            </div>
+          </div>
+          <button id="edit-viewer-filters-button" class="secondary btn-compact" type="button" aria-expanded="false" aria-controls="viewer-filter-editor">Edit filters</button>
+        </div>
         <div id="viewer-chart-container">
           <canvas id="viewer-chart-canvas"></canvas>
         </div>
@@ -1026,12 +1213,41 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const traceDetailTitle = document.getElementById('trace-detail-title');
       const traceAxis = document.getElementById('trace-axis');
       const traceTimeline = document.getElementById('trace-timeline');
-      const previewPanel = document.getElementById('preview-panel');
-      const previewSummary = document.getElementById('preview-summary');
+      const viewerQueryInput = document.getElementById('viewer-query-input');
+      const previewViewerButton = document.getElementById('preview-viewer-button');
+      const viewerPreviewPanel = document.getElementById('viewer-preview-panel');
+      const viewerPreviewCount = document.getElementById('viewer-preview-count');
+      const viewerPreviewClose = document.getElementById('viewer-preview-close');
+      const viewerPreviewEntries = document.getElementById('viewer-preview-entries');
+      const viewerPreviewEntriesBody = document.getElementById('viewer-preview-entries-body');
+      const viewerPreviewTraces = document.getElementById('viewer-preview-traces');
+      const viewerPreviewTracesBody = document.getElementById('viewer-preview-traces-body');
+      const viewerPreviewEmpty = document.getElementById('viewer-preview-empty');
       const previewStatusEl = document.getElementById('preview-status');
       const previewChartContainer = document.getElementById('preview-chart-container');
       const previewChartCanvas = document.getElementById('preview-chart-canvas');
-      const previewTableContainer = document.getElementById('preview-table-container');
+      const viewerDetailQueryRow = document.getElementById('viewer-detail-query-row');
+      const viewerDetailQueryInput = document.getElementById('viewer-detail-query-input');
+      const viewerDetailQueryUpdate = document.getElementById('viewer-detail-query-update');
+
+      // --- Filter builder (create form) ---
+      const filterModeAndBtn = document.getElementById('filter-mode-and');
+      const filterModeOrBtn = document.getElementById('filter-mode-or');
+      const filterRowsContainer = document.getElementById('filter-rows-container');
+      const addFilterButton = document.getElementById('add-filter-button');
+      const filterHelperText = document.getElementById('filter-helper-text');
+
+      // --- Filter section (viewer detail) ---
+      const viewerFilterSection = document.getElementById('viewer-filter-section');
+      const viewerFilterBadges = document.getElementById('viewer-filter-badges');
+      const viewerFilterEditor = document.getElementById('viewer-filter-editor');
+      const detailQueryInput = document.getElementById('detail-query-input');
+      const detailFilterModeAndBtn = document.getElementById('detail-filter-mode-and');
+      const detailFilterModeOrBtn = document.getElementById('detail-filter-mode-or');
+      const detailFilterRowsContainer = document.getElementById('detail-filter-rows-container');
+      const detailAddFilterButton = document.getElementById('detail-add-filter-button');
+      const detailSaveFiltersButton = document.getElementById('detail-save-filters-button');
+      const editViewerFiltersButton = document.getElementById('edit-viewer-filters-button');
 
       let latestViewers = [];
       let viewerLoadState = 'loading';
@@ -1064,13 +1280,16 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         return new Date(Number(ns) / 1e6).toLocaleTimeString();
       }
 
+      function hashStringHue(s) {
+        let h = 0;
+        for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+        return Math.abs(h) % 360;
+      }
+
       const _svcColorCache = {};
       function serviceColor(name) {
         if (_svcColorCache[name]) return _svcColorCache[name];
-        let h = 0;
-        for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
-        const hue = Math.abs(h) % 360;
-        _svcColorCache[name] = 'hsl(' + hue + ', 55%, 50%)';
+        _svcColorCache[name] = 'hsl(' + hashStringHue(name) + ', 55%, 50%)';
         return _svcColorCache[name];
       }
 
@@ -1082,6 +1301,205 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         element.textContent = text;
         return element;
       }
+
+      // --- Filter builder helpers ---
+
+      function makeFilterRow(filter = null, onRemove = null, onChange = null) {
+        const row = document.createElement('div');
+        row.className = 'filter-row';
+        const notifyChange = () => {
+          if (onChange) onChange();
+        };
+
+        const fieldSel = document.createElement('select');
+        fieldSel.setAttribute('aria-label', 'Filter field');
+        for (const [val, label] of [['service_name', 'Service name'], ['payload', 'Payload']]) {
+          const opt = document.createElement('option');
+          opt.value = val;
+          opt.textContent = label;
+          if (filter && filter.field === val) opt.selected = true;
+          fieldSel.appendChild(opt);
+        }
+
+        const opSel = document.createElement('select');
+        opSel.setAttribute('aria-label', 'Filter operator');
+        for (const [val, label] of [['contains', 'contains'], ['eq', 'equals'], ['regex', 'regex']]) {
+          const opt = document.createElement('option');
+          opt.value = val;
+          opt.textContent = label;
+          if (filter && filter.op === val) opt.selected = true;
+          opSel.appendChild(opt);
+        }
+
+        const valueInput = document.createElement('input');
+        valueInput.type = 'text';
+        valueInput.placeholder = 'value';
+        valueInput.setAttribute('aria-label', 'Filter value');
+        if (filter && filter.value) valueInput.value = filter.value;
+
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'secondary btn-compact';
+        removeBtn.textContent = '\u00d7';
+        removeBtn.title = 'Remove filter';
+        removeBtn.setAttribute('aria-label', 'Remove filter');
+        removeBtn.addEventListener('click', () => {
+          row.remove();
+          if (onRemove) onRemove();
+          notifyChange();
+        });
+
+        fieldSel.addEventListener('change', notifyChange);
+        opSel.addEventListener('change', notifyChange);
+        valueInput.addEventListener('input', notifyChange);
+
+        row.appendChild(fieldSel);
+        row.appendChild(opSel);
+        row.appendChild(valueInput);
+        row.appendChild(removeBtn);
+        return row;
+      }
+
+      function readFiltersFromBuilder(container) {
+        const rows = container.querySelectorAll('.filter-row');
+        if (rows.length === 0) return null;
+        const filters = [];
+        for (const row of rows) {
+          const selects = row.querySelectorAll('select');
+          const input = row.querySelector('input[type="text"]');
+          if (!selects[0] || !selects[1] || !input) continue;
+          const value = input.value.trim();
+          if (!value) continue;
+          filters.push({ field: selects[0].value, op: selects[1].value, value });
+        }
+        return filters.length > 0 ? filters : [];
+      }
+
+      function syncCreateFilterHelper() {
+        const rows = filterRowsContainer.querySelectorAll('.filter-row');
+        filterHelperText.hidden = rows.length === 0;
+      }
+
+      function setFilterModeToggle(andBtn, orBtn, mode) {
+        andBtn.classList.toggle('active', mode === 'and');
+        orBtn.classList.toggle('active', mode === 'or');
+        andBtn.setAttribute('aria-pressed', String(mode === 'and'));
+        orBtn.setAttribute('aria-pressed', String(mode === 'or'));
+      }
+
+      function readFilterMode(andBtn) {
+        return andBtn.classList.contains('active') ? 'and' : 'or';
+      }
+
+      function wireFilterModeToggle(andBtn, orBtn) {
+        andBtn.addEventListener('click', () => setFilterModeToggle(andBtn, orBtn, 'and'));
+        orBtn.addEventListener('click', () => setFilterModeToggle(andBtn, orBtn, 'or'));
+      }
+
+      function renderFilterBadges(viewer) {
+        viewerFilterBadges.replaceChildren();
+        const filters = viewer.filters;
+        const mode = viewer.filter_mode || 'and';
+        const query = viewer.query;
+
+        if ((!filters || filters.length === 0) && !query) {
+          viewerFilterSection.hidden = true;
+          return;
+        }
+
+        viewerFilterSection.hidden = false;
+
+        if (filters && filters.length > 0) {
+          const modeEl = document.createElement('span');
+          modeEl.className = 'filter-badge filter-badge-mode';
+          modeEl.textContent = mode.toUpperCase();
+          viewerFilterBadges.appendChild(modeEl);
+
+          for (const f of filters) {
+            const badge = document.createElement('span');
+            badge.className = 'filter-badge';
+            badge.textContent = `${f.field} ${f.op} "${f.value}"`;
+            viewerFilterBadges.appendChild(badge);
+          }
+        } else if (query) {
+          const badge = document.createElement('span');
+          badge.className = 'filter-badge';
+          badge.textContent = `search: "${query}"`;
+          viewerFilterBadges.appendChild(badge);
+        }
+      }
+
+      function hydrateFilterEditor(viewer) {
+        detailQueryInput.value = viewer.query || '';
+        detailFilterRowsContainer.replaceChildren();
+
+        const filters = viewer.filters;
+        const mode = viewer.filter_mode || 'and';
+        setFilterModeToggle(detailFilterModeAndBtn, detailFilterModeOrBtn, mode);
+
+        if (Array.isArray(filters)) {
+          for (const f of filters) {
+            detailFilterRowsContainer.appendChild(makeFilterRow(f));
+          }
+        }
+      }
+
+      async function patchViewerFilters(viewerId) {
+        const filters = readFiltersFromBuilder(detailFilterRowsContainer);
+        const payload = {
+          query: detailQueryInput.value.trim(),
+          filters: filters ?? [],
+          filter_mode: readFilterMode(detailFilterModeAndBtn),
+        };
+        setStatus('working', 'Saving filters...');
+        try {
+          const response = await fetch(`/api/viewers/${viewerId}`, {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          if (!response.ok) {
+            const text = await response.text().catch(() => '');
+            throw new Error(`HTTP ${response.status}${text ? ': ' + text : ''}`);
+          }
+          await refreshViewers({ silent: true });
+          await showViewerDetail(viewerId);
+          setStatus('ok', 'Filters saved.');
+        } catch (error) {
+          setStatus('error', `Failed to save filters: ${error.message}`);
+        }
+      }
+
+      // --- Filter builder event wiring (create form) ---
+      wireFilterModeToggle(filterModeAndBtn, filterModeOrBtn);
+      addFilterButton.addEventListener('click', () => {
+        const row = makeFilterRow(
+          null,
+          () => {
+            syncCreateFilterHelper();
+            previewViewer();
+          },
+          () => previewViewer(),
+        );
+        filterRowsContainer.appendChild(row);
+        syncCreateFilterHelper();
+        previewViewer();
+      });
+
+      // --- Filter editor event wiring (viewer detail) ---
+      wireFilterModeToggle(detailFilterModeAndBtn, detailFilterModeOrBtn);
+      detailAddFilterButton.addEventListener('click', () => {
+        detailFilterRowsContainer.appendChild(makeFilterRow());
+      });
+      detailSaveFiltersButton.addEventListener('click', () => {
+        if (selectedViewerId) patchViewerFilters(selectedViewerId);
+      });
+      editViewerFiltersButton.addEventListener('click', () => {
+        const hidden = viewerFilterEditor.hidden;
+        viewerFilterEditor.hidden = !hidden;
+        editViewerFiltersButton.textContent = hidden ? 'Cancel' : 'Edit filters';
+        editViewerFiltersButton.setAttribute('aria-expanded', String(hidden));
+      });
 
       function createViewerItem(v, checked) {
         const item = document.createElement('div');
@@ -1166,9 +1584,34 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       }
 
       const VIEWER_PLACEHOLDERS = { traces: 'checkout traces', metrics: 'orders metrics', logs: 'billing logs' };
-      const CHART_TYPE_LABELS = { table: 'Table', stacked_bar: 'Stacked Bar', line: 'Line' };
+      const CHART_TYPE_LABELS = {
+        table: 'Table',
+        stacked_bar: 'Stacked Bar',
+        line: 'Line',
+        area: 'Area',
+        pie: 'Pie',
+        donut: 'Donut',
+        billboard: 'Billboard',
+      };
+      const CIRCULAR_CHART_TYPES = { pie: 'pie', donut: 'doughnut' };
       const MIN_DASHBOARD_COLUMNS = 1;
       const MAX_DASHBOARD_COLUMNS = 4;
+
+      function readViewerPlaceholder(signal) {
+        const placeholder = VIEWER_PLACEHOLDERS[signal];
+        if (typeof placeholder !== 'string') {
+          throw new Error('Viewer create form is missing a valid signal.');
+        }
+        return placeholder;
+      }
+
+      function chartTypeLabel(chartType) {
+        const label = CHART_TYPE_LABELS[chartType];
+        if (typeof label !== 'string') {
+          throw new Error('Unknown chart type.');
+        }
+        return label;
+      }
 
       function readViewerChartType(viewer) {
         const chartType = viewer.chart_type;
@@ -1176,6 +1619,10 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           throw new Error('Viewer payload is missing a valid chart type.');
         }
         return chartType;
+      }
+
+      function viewerSupportsMetricCharts(viewer) {
+        return Array.isArray(viewer.signals) && viewer.signals.length === 1 && viewer.signals[0] === 'metrics';
       }
 
       function readDashboardColumns(value) {
@@ -1202,7 +1649,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
       function syncCreateForm() {
         const signal = viewerSignalSelect.value;
-        viewerNameInput.placeholder = VIEWER_PLACEHOLDERS[signal] || signal;
+        viewerNameInput.placeholder = readViewerPlaceholder(signal);
         const isMetrics = signal === 'metrics';
         viewerChartTypeSelect.disabled = !isMetrics;
         if (!isMetrics) {
@@ -1218,21 +1665,21 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         viewerTableBody.replaceChildren();
       }
 
-      async function patchViewerChartType(viewerId, chartType) {
+      async function patchViewer(viewerId, payload, successMsg) {
         try {
           const response = await fetch(`/api/viewers/${viewerId}`, {
             method: 'PATCH',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ chart_type: chartType })
+            body: JSON.stringify(payload)
           });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           await refreshViewers({ silent: true });
           if (selectedViewerId === viewerId) {
             await showViewerDetail(viewerId);
           }
-          setStatus('ok', `Chart type updated to ${CHART_TYPE_LABELS[chartType] || chartType}.`);
+          setStatus('ok', successMsg);
         } catch (error) {
-          setStatus('error', `Failed to update chart type: ${error.message}`);
+          setStatus('error', `Failed to update viewer: ${error.message}`);
         }
       }
 
@@ -1266,8 +1713,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           appendTableCell(row, viewer.signals.join(', '));
 
           const chartCell = document.createElement('td');
-          const isMetrics = viewer.signals.includes('metrics');
-          if (isMetrics) {
+          if (viewerSupportsMetricCharts(viewer)) {
             const currentChartType = readViewerChartType(viewer);
             const sel = document.createElement('select');
             sel.className = 'chart-type-select';
@@ -1280,7 +1726,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             }
             sel.addEventListener('change', (e) => {
               e.stopPropagation();
-              patchViewerChartType(viewer.id, sel.value);
+              patchViewer(viewer.id, { chart_type: sel.value }, `Chart type updated to ${chartTypeLabel(sel.value)}.`);
             });
             sel.addEventListener('click', (e) => e.stopPropagation());
             chartCell.appendChild(sel);
@@ -1289,6 +1735,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           }
           row.appendChild(chartCell);
 
+          appendTableCell(row, viewer.query || '-');
           appendTableCell(row, formatLookbackMs(viewer.lookback_ms));
           appendTableCell(row, String(viewer.entry_count));
           appendTableCell(row, formatStatus(viewer.status));
@@ -1321,29 +1768,50 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         return new Date(Math.floor(t / bucketMs) * bucketMs).toISOString();
       }
 
-      function buildChartData(entries, lookbackMs) {
+      function metricSeriesLabel(entry) {
+        return `${entry.metric_name || 'unknown'} (${entry.service_name || 'unknown'})`;
+      }
+
+      function metricChartValue(entry) {
+        return typeof entry.metric_value === 'number' && Number.isFinite(entry.metric_value)
+          ? entry.metric_value
+          : null;
+      }
+
+      function chartSeriesColors(series, backgroundAlpha = 0.7) {
+        const hue = hashStringHue(series);
+        return {
+          backgroundColor: `hsla(${hue}, 60%, 55%, ${backgroundAlpha})`,
+          borderColor: `hsl(${hue}, 60%, 45%)`,
+        };
+      }
+
+      function buildChartData(entries, lookbackMs, chartType) {
         const bucketMs = getBucketSizeMs(lookbackMs);
         const grouped = {};
         const allBuckets = new Set();
+        const isArea = chartType === 'area';
 
         for (const entry of entries) {
+          const metricValue = metricChartValue(entry);
+          if (metricValue === null) continue;
           const key = bucketKey(entry.observed_at, bucketMs);
           allBuckets.add(key);
-          const series = `${entry.metric_name || 'unknown'} (${entry.service_name || 'unknown'})`;
+          const series = metricSeriesLabel(entry);
           if (!grouped[series]) grouped[series] = {};
-          grouped[series][key] = (grouped[series][key] || 0) + (entry.metric_value ?? 0);
+          grouped[series][key] = (grouped[series][key] || 0) + metricValue;
         }
 
         const labels = [...allBuckets].sort();
         const datasets = Object.entries(grouped).map(([series, buckets]) => {
-          const hue = Math.abs([...series].reduce((h, c) => h * 31 + c.charCodeAt(0), 0)) % 360;
+          const colors = chartSeriesColors(series);
           return {
             label: series,
             data: labels.map(l => buckets[l] || 0),
-            backgroundColor: `hsla(${hue}, 60%, 55%, 0.7)`,
-            borderColor: `hsl(${hue}, 60%, 45%)`,
+            backgroundColor: chartSeriesColors(series, isArea ? 0.3 : 0.7).backgroundColor,
+            borderColor: colors.borderColor,
             borderWidth: 1,
-            fill: false,
+            fill: isArea,
           };
         });
 
@@ -1356,21 +1824,188 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         };
       }
 
+      function renderBillboard(entries, lookbackMs, container, { compact = false } = {}) {
+        const hasValues = entries.some(entry => metricChartValue(entry) !== null);
+
+        let latestSum = 0;
+        let previousSum = 0;
+        let hasPrevious = false;
+
+        if (hasValues) {
+          const { datasets, labels } = buildChartData(entries, lookbackMs, 'line');
+          const numBuckets = labels.length;
+          hasPrevious = numBuckets >= 2;
+          for (const dataset of datasets) {
+            latestSum += dataset.data[numBuckets - 1];
+            if (hasPrevious) previousSum += dataset.data[numBuckets - 2];
+          }
+        }
+
+        const metricNames = [...new Set(entries.map(entry => entry.metric_name).filter(Boolean))];
+        const subtitle = metricNames.length === 1 ? metricNames[0] : metricNames.length > 1 ? 'Multiple metrics' : '';
+
+        let changePct = null;
+        if (hasPrevious && previousSum !== 0) {
+          changePct = ((latestSum - previousSum) / previousSum) * 100;
+        }
+
+        const widget = document.createElement('div');
+        widget.classList.add('billboard-widget');
+        if (compact) widget.classList.add('compact');
+        widget.setAttribute('role', 'img');
+
+        if (!hasValues) {
+          widget.setAttribute('aria-label', subtitle ? `${subtitle}: No data` : 'No data');
+        } else {
+          const valuePart = subtitle ? `${subtitle}: ${latestSum.toLocaleString()}` : latestSum.toLocaleString();
+          const changePart = changePct !== null
+            ? `, ${changePct >= 0 ? 'up' : 'down'} ${Math.abs(changePct).toFixed(1)}%`
+            : '';
+          widget.setAttribute('aria-label', valuePart + changePart);
+        }
+
+        const valueEl = makeTextElement('div', hasValues ? latestSum.toLocaleString() : '--', hasValues ? 'billboard-value' : 'billboard-value no-data');
+        valueEl.setAttribute('aria-hidden', 'true');
+        widget.appendChild(valueEl);
+
+        if (subtitle) {
+          const subtitleEl = makeTextElement('div', subtitle, 'billboard-subtitle');
+          subtitleEl.setAttribute('aria-hidden', 'true');
+          widget.appendChild(subtitleEl);
+        }
+
+        if (changePct !== null) {
+          const up = changePct >= 0;
+          const pctStr = Math.abs(changePct).toFixed(1);
+          const changeEl = makeTextElement('div', `${up ? '^' : 'v'} ${pctStr}%`, up ? 'billboard-change up' : 'billboard-change down');
+          changeEl.setAttribute('aria-hidden', 'true');
+          widget.appendChild(changeEl);
+        }
+
+        container.replaceChildren(widget);
+      }
+      function buildPieData(entries) {
+        const grouped = {};
+
+        for (const entry of entries) {
+          const metricValue = metricChartValue(entry);
+          if (metricValue === null) continue;
+          const series = metricSeriesLabel(entry);
+          grouped[series] = (grouped[series] || 0) + metricValue;
+        }
+
+        const labels = Object.keys(grouped).sort();
+        const data = labels.map(label => grouped[label]);
+        const total = data.reduce((s, v) => s + v, 0);
+        const backgroundColors = [];
+        const borderColors = [];
+        for (const series of labels) {
+          const c = chartSeriesColors(series);
+          backgroundColors.push(c.backgroundColor);
+          borderColors.push(c.borderColor);
+        }
+
+        return {
+          labels,
+          total,
+          datasets: [{
+            data,
+            backgroundColor: backgroundColors,
+            borderColor: borderColors,
+            borderWidth: 1,
+          }],
+        };
+      }
+
+      function makeCircularTooltipLabel(total) {
+        return function(context) {
+          const value = Number(context.raw);
+          const percentage = total > 0 ? (value / total) * 100 : 0;
+          return `${context.label}: ${value} (${percentage.toFixed(1)}%)`;
+        };
+      }
+
+      function buildCircularChartOptions(total, legendLabels) {
+        const legend = { position: 'bottom' };
+        if (legendLabels) {
+          legend.labels = legendLabels;
+        }
+
+        return {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend,
+            tooltip: {
+              callbacks: {
+                label: makeCircularTooltipLabel(total),
+              },
+            },
+          },
+        };
+      }
+
+      function isCircularChartType(chartType) {
+        return chartType in CIRCULAR_CHART_TYPES;
+      }
+
+      function buildCircularChartConfig(chartType, entries, legendLabels) {
+        if (!isCircularChartType(chartType)) return null;
+
+        const data = buildPieData(entries);
+        if (!data.labels.length) return null;
+
+        return {
+          type: CIRCULAR_CHART_TYPES[chartType],
+          data,
+          options: buildCircularChartOptions(data.total, legendLabels),
+        };
+      }
+
+      function resolveChartConfig(chartType) {
+        const isStacked = chartType === 'stacked_bar';
+        return { type: isStacked ? 'bar' : 'line', isStacked };
+      }
       function renderChart(chartType, entries, lookbackMs) {
         if (currentChart) {
           currentChart.destroy();
           currentChart = null;
         }
 
-        if (chartType === 'table' || !entries.length) {
+        if (chartType === 'table') {
           viewerChartContainer.hidden = true;
           return;
         }
 
+        if (chartType === 'billboard') {
+          viewerChartContainer.hidden = false;
+          renderBillboard(entries, lookbackMs, viewerChartContainer);
+          return;
+        }
+
+        if (!entries.length) {
+          viewerChartContainer.hidden = true;
+          return;
+        }
+
+        viewerChartContainer.replaceChildren(viewerChartCanvas);
         viewerChartContainer.hidden = false;
-        const data = buildChartData(entries, lookbackMs);
-        const isStacked = chartType === 'stacked_bar';
-        const type = isStacked ? 'bar' : 'line';
+        if (isCircularChartType(chartType)) {
+          const circularConfig = buildCircularChartConfig(chartType, entries);
+          if (!circularConfig) {
+            viewerChartContainer.hidden = true;
+            return;
+          }
+          currentChart = new Chart(viewerChartCanvas, circularConfig);
+          return;
+        }
+
+        const data = buildChartData(entries, lookbackMs, chartType);
+        if (!data.datasets.length) {
+          viewerChartContainer.hidden = true;
+          return;
+        }
+        const { type, isStacked } = resolveChartConfig(chartType);
 
         currentChart = new Chart(viewerChartCanvas, {
           type,
@@ -1387,13 +2022,13 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         });
       }
 
-      function renderEntriesTable(entries) {
-        viewerEntriesBody.replaceChildren();
+      function renderEntriesTable(entries, body = viewerEntriesBody, container = viewerEntriesTable) {
+        body.replaceChildren();
         if (!entries.length) {
-          viewerEntriesTable.hidden = true;
+          container.hidden = true;
           return;
         }
-        viewerEntriesTable.hidden = false;
+        container.hidden = false;
         for (const entry of entries) {
           const row = document.createElement('tr');
           appendTableCell(row, new Date(entry.observed_at).toLocaleTimeString());
@@ -1404,7 +2039,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           code.textContent = entry.payload_preview;
           previewCell.appendChild(code);
           row.appendChild(previewCell);
-          viewerEntriesBody.appendChild(row);
+          body.appendChild(row);
         }
       }
 
@@ -1415,16 +2050,16 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         viewerTraceDetail.hidden = true;
       }
 
-      function renderTraceList(traces) {
-        viewerTraceListBody.replaceChildren();
+      function renderTraceList(traces, body = viewerTraceListBody, container = viewerTraceList, clickable = true) {
+        body.replaceChildren();
         if (!traces || !traces.length) {
-          viewerTraceList.hidden = true;
+          container.hidden = true;
           return;
         }
-        viewerTraceList.hidden = false;
+        container.hidden = false;
         for (const trace of traces) {
           const row = document.createElement('tr');
-          row.className = 'viewer-row';
+          if (clickable) row.className = 'viewer-row';
           if (trace.has_error) row.style.background = 'var(--danger-soft)';
           appendTableCell(row, truncateId(trace.trace_id));
           appendTableCell(row, trace.root_span_name || '-');
@@ -1435,8 +2070,8 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           statusCell.textContent = trace.has_error ? 'error' : 'ok';
           if (trace.has_error) statusCell.className = 'error-inline';
           row.appendChild(statusCell);
-          row.addEventListener('click', () => showTraceDetail(trace));
-          viewerTraceListBody.appendChild(row);
+          if (clickable) row.addEventListener('click', () => showTraceDetail(trace));
+          body.appendChild(row);
         }
       }
 
@@ -1587,13 +2222,21 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           const viewer = await response.json();
           const chartType = readViewerChartType(viewer);
           viewerDetailTitle.textContent = `${viewer.name} (${chartType})`;
+          viewerDetailQueryInput.value = viewer.query || '';
+          viewerDetailQueryRow.hidden = false;
           viewerDetailSection.classList.add('visible');
           hideAllDetailPanels();
 
+          renderFilterBadges(viewer);
+          hydrateFilterEditor(viewer);
+          viewerFilterEditor.hidden = true;
+          editViewerFiltersButton.textContent = 'Edit filters';
+          editViewerFiltersButton.setAttribute('aria-expanded', 'false');
+
           const isTraceViewer = viewer.signals.includes('traces');
-          if (chartType !== 'table' && viewer.signals.includes('metrics')) {
+          if (chartType !== 'table' && viewerSupportsMetricCharts(viewer)) {
             renderChart(chartType, viewer.entries, viewer.lookback_ms);
-          } else if (isTraceViewer && viewer.traces && viewer.traces.length > 0) {
+          } else if (isTraceViewer && viewer.traces) {
             renderTraceList(viewer.traces);
           } else {
             renderEntriesTable(viewer.entries);
@@ -1662,41 +2305,50 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       function clearPreviewContent() {
         if (previewChart) { previewChart.destroy(); previewChart = null; }
         previewChartContainer.hidden = true;
-        previewTableContainer.replaceChildren();
+        viewerPreviewEntries.hidden = true;
+        viewerPreviewTraces.hidden = true;
+        viewerPreviewEmpty.hidden = true;
+        viewerPreviewEntriesBody.replaceChildren();
+        viewerPreviewTracesBody.replaceChildren();
       }
 
       function showPreviewMessage(message) {
         clearPreviewContent();
-        const p = document.createElement('p');
-        p.className = 'preview-summary';
-        p.textContent = message;
-        previewTableContainer.appendChild(p);
+        viewerPreviewEmpty.textContent = message;
+        viewerPreviewEmpty.hidden = false;
       }
 
       function cancelPreview() {
         clearPreviewDebounce();
         if (previewAbortController) { previewAbortController.abort(); previewAbortController = null; }
         latestPreviewPayload = null;
-        previewSummary.textContent = '';
+        viewerPreviewCount.textContent = '';
         previewStatusEl.textContent = '';
         clearPreviewContent();
-        previewPanel.hidden = true;
+        viewerPreviewPanel.hidden = true;
+        previewViewerButton.disabled = false;
       }
 
       function renderPreview(payload) {
         latestPreviewPayload = payload;
         const chartType = viewerChartTypeSelect.value;
         const signal = payload.signal;
-        const entries = payload.entries;
+        const entries = payload.entries || [];
         const traces = payload.traces || [];
+        const filters = readFiltersFromBuilder(filterRowsContainer);
+        const hasMatcher = !!viewerQueryInput.value.trim() || filters !== null;
+        const shown = signal === 'traces' && traces.length ? traces.length : entries.length;
 
-        previewSummary.textContent = `${payload.entry_count} entries found`;
+        viewerPreviewCount.textContent = hasMatcher
+          ? `${payload.entry_count} matching entries (showing ${shown})`
+          : `${payload.entry_count} entries (showing ${shown})`;
         previewStatusEl.textContent = '';
 
         clearPreviewContent();
 
         if (!entries.length && !traces.length) {
           showPreviewMessage('No matching entries.');
+          viewerPreviewPanel.hidden = false;
           return;
         }
 
@@ -1704,29 +2356,40 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           previewChartContainer.hidden = false;
           previewChart = renderPanelChart(chartType, entries, 5 * 60 * 1000, previewChartCanvas);
           if (!previewChart) previewChartContainer.hidden = true;
-        } else if (signal === 'traces' && traces.length) {
-          renderPanelTraceTable(previewTableContainer, traces);
-        } else {
-          renderPanelEntriesTable(previewTableContainer, entries);
         }
+        if (signal === 'traces' && traces.length) {
+          renderTraceList(traces, viewerPreviewTracesBody, viewerPreviewTraces, false);
+        } else if (entries.length) {
+          renderEntriesTable(entries, viewerPreviewEntriesBody, viewerPreviewEntries);
+        } else if (previewChartContainer.hidden) {
+          showPreviewMessage('No matching entries.');
+        }
+
+        viewerPreviewPanel.hidden = false;
       }
 
       async function fetchPreview() {
         const signalType = viewerSignalSelect.value;
-        const query = viewerQueryInput.value.trim();
+        const query = viewerQueryInput.value.trim() || null;
+        const filters = readFiltersFromBuilder(filterRowsContainer);
         const seq = ++previewRequestSeq;
 
         previewAbortController = new AbortController();
         latestPreviewPayload = null;
+        previewViewerButton.disabled = true;
 
-        previewSummary.textContent = '';
+        viewerPreviewCount.textContent = '';
         previewStatusEl.textContent = 'Loading...';
         clearPreviewContent();
-        previewPanel.hidden = false;
+        viewerPreviewPanel.hidden = false;
 
         try {
           const body = { signal: signalType };
           if (query) body.query = query;
+          if (filters !== null) {
+            body.filters = filters;
+            body.filter_mode = readFilterMode(filterModeAndBtn);
+          }
           const resp = await fetch('/api/viewers/preview', {
             method: 'POST',
             headers: { 'content-type': 'application/json', 'accept': 'application/json' },
@@ -1742,44 +2405,52 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           if (err.name === 'AbortError') return;
           if (seq !== previewRequestSeq) return;
           latestPreviewPayload = null;
+          viewerPreviewCount.textContent = '';
           previewStatusEl.textContent = `Error: ${err.message}`;
-          previewSummary.textContent = '';
           showPreviewMessage('Preview unavailable.');
         } finally {
           if (seq === previewRequestSeq) previewAbortController = null;
+          previewViewerButton.disabled = false;
         }
       }
 
       function previewViewer(immediate = false) {
         clearPreviewDebounce();
         if (previewAbortController) previewAbortController.abort();
-        if (immediate) { fetchPreview(); } else { previewDebounceTimer = setTimeout(fetchPreview, 500); }
+        if (immediate) {
+          fetchPreview();
+        } else {
+          previewDebounceTimer = setTimeout(fetchPreview, 500);
+        }
       }
 
       async function createViewer() {
         const name = viewerNameInput.value.trim();
         const signal = viewerSignalSelect.value;
         const chart_type = viewerChartTypeSelect.value;
-        const query = viewerQueryInput.value.trim();
+        const query = viewerQueryInput.value.trim() || null;
         if (!name) {
           setStatus('error', 'Viewer name is required.');
           viewerNameInput.focus();
           return;
         }
 
+        const filters = readFiltersFromBuilder(filterRowsContainer);
+
         createViewerButton.disabled = true;
         setStatus('working', `Creating ${signal} viewer "${name}"...`);
 
         try {
-          const requestBody = { name, signal, chart_type };
-          if (query) requestBody.query = query;
+          const body = { name, signal, chart_type };
+          if (query) body.query = query;
+          if (filters !== null) { body.filters = filters; body.filter_mode = readFilterMode(filterModeAndBtn); }
           const response = await fetch('/api/viewers', {
             method: 'POST',
             headers: {
               'content-type': 'application/json',
               'accept': 'application/json'
             },
-            body: JSON.stringify(requestBody)
+            body: JSON.stringify(body)
           });
 
           if (!response.ok) {
@@ -1813,6 +2484,12 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       }
 
       createViewerButton.addEventListener('click', createViewer);
+      previewViewerButton.addEventListener('click', () => previewViewer(true));
+      viewerDetailQueryUpdate.addEventListener('click', () => {
+        const query = viewerDetailQueryInput.value.trim();
+        patchViewer(selectedViewerId, { query }, query ? 'Query filter updated.' : 'Query filter cleared.');
+      });
+      viewerPreviewClose.addEventListener('click', cancelPreview);
       refreshViewersButton.addEventListener('click', () => {
         refreshViewers();
         previewViewer(true);
@@ -1822,9 +2499,21 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         previewViewer(true);
       });
       viewerQueryInput.addEventListener('input', () => previewViewer());
-      viewerChartTypeSelect.addEventListener('change', () => {
-        if (latestPreviewPayload) renderPreview(latestPreviewPayload);
+      viewerQueryInput.addEventListener('keydown', event => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          previewViewer(true);
+        }
       });
+      viewerChartTypeSelect.addEventListener('change', () => {
+        if (latestPreviewPayload) {
+          renderPreview(latestPreviewPayload);
+        } else {
+          previewViewer(true);
+        }
+      });
+      filterModeAndBtn.addEventListener('click', () => previewViewer());
+      filterModeOrBtn.addEventListener('click', () => previewViewer());
       viewerNameInput.addEventListener('keydown', event => {
         if (event.key === 'Enter') {
           event.preventDefault();
@@ -2000,9 +2689,14 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
         const chartType = readViewerChartType(v);
         const isTraces = v.signals.includes('traces');
-        const isMetrics = v.signals.includes('metrics');
+        const supportsMetricCharts = viewerSupportsMetricCharts(v);
 
-        if (chartType !== 'table' && isMetrics && v.entries.length) {
+        if (chartType === 'billboard' && supportsMetricCharts) {
+          const host = document.createElement('div');
+          host.style.maxHeight = '220px';
+          div.appendChild(host);
+          renderBillboard(v.entries, v.lookback_ms, host, { compact: true });
+        } else if (chartType !== 'table' && supportsMetricCharts && v.entries.length) {
           const canvas = document.createElement('canvas');
           canvas.style.maxHeight = '220px';
           div.appendChild(canvas);
@@ -2018,11 +2712,19 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       }
 
       function renderPanelChart(chartType, entries, lookbackMs, canvas) {
-        const data = buildChartData(entries, lookbackMs);
+        if (isCircularChartType(chartType)) {
+          const circularConfig = buildCircularChartConfig(chartType, entries, {
+            boxWidth: 10,
+            font: { size: 10 },
+          });
+          return circularConfig ? new Chart(canvas, circularConfig) : null;
+        }
+
+        const data = buildChartData(entries, lookbackMs, chartType);
         if (!data.datasets.length) return null;
-        const isStacked = chartType === 'stacked_bar';
+        const { type, isStacked } = resolveChartConfig(chartType);
         return new Chart(canvas, {
-          type: isStacked ? 'bar' : 'line',
+          type,
           data,
           options: {
             responsive: true,
@@ -2357,7 +3059,20 @@ fn default_chart_type() -> String {
 }
 
 fn is_valid_chart_type(chart_type: &str) -> bool {
-    matches!(chart_type, "table" | "stacked_bar" | "line")
+    matches!(
+        chart_type,
+        "table" | "stacked_bar" | "line" | "area" | "pie" | "donut" | "billboard"
+    )
+}
+
+fn is_chart_type_supported_for_signal_mask(chart_type: &str, signal_mask: SignalMask) -> bool {
+    match chart_type {
+        "table" => true,
+        "stacked_bar" | "line" | "area" | "pie" | "donut" | "billboard" => {
+            signal_mask == Signal::Metrics.into()
+        }
+        _ => false,
+    }
 }
 
 fn chart_type_from_definition(definition_json: &serde_json::Value) -> Result<&str, &'static str> {
@@ -2403,6 +3118,14 @@ fn dashboard_columns_from_layout(layout_json: &serde_json::Value) -> Result<u32,
     Ok(columns)
 }
 
+/// Raw filter condition sent by the client in create / patch / preview requests.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct ViewerFilterInput {
+    field: String,
+    op: String,
+    value: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateViewerRequest {
     name: String,
@@ -2411,6 +3134,10 @@ struct CreateViewerRequest {
     chart_type: String,
     #[serde(default)]
     query: Option<String>,
+    #[serde(default)]
+    filters: Option<Vec<ViewerFilterInput>>,
+    #[serde(default)]
+    filter_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2418,6 +3145,10 @@ struct PatchViewerRequest {
     chart_type: Option<String>,
     #[serde(default)]
     query: Option<String>,
+    #[serde(default)]
+    filters: Option<Vec<ViewerFilterInput>>,
+    #[serde(default)]
+    filter_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2425,12 +3156,21 @@ struct PreviewViewerRequest {
     signal: String,
     #[serde(default)]
     query: Option<String>,
+    #[serde(default)]
+    filters: Option<Vec<ViewerFilterInput>>,
+    #[serde(default)]
+    filter_mode: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct ViewerPreviewResponse {
     signal: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     query: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filters: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filter_mode: Option<String>,
     entry_count: usize,
     entries: Vec<ViewerEntryRow>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -2456,6 +3196,10 @@ struct ViewerSummary {
     chart_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     query: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filters: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filter_mode: Option<String>,
     refresh_interval_ms: u32,
     lookback_ms: i64,
     entry_count: usize,
@@ -2602,6 +3346,36 @@ fn apply_query_to_definition(definition_json: &mut serde_json::Value, query: Opt
     }
 }
 
+/// Applies filter conditions and mode to definition_json.
+/// `filters: None` → no change (keep existing).
+/// `filters: Some([])` → clear "filters" and "filter_mode".
+/// `filters: Some([...])` → set "filters"; apply filter_mode if provided.
+fn apply_filters_to_definition(
+    definition_json: &mut serde_json::Value,
+    filters: Option<&[ViewerFilterInput]>,
+    filter_mode: Option<&str>,
+) {
+    let Some(filters) = filters else { return };
+    if filters.is_empty() {
+        if let Some(o) = definition_json.as_object_mut() {
+            o.remove("filters");
+            o.remove("filter_mode");
+        }
+        return;
+    }
+    definition_json["filters"] = json!(filters);
+    if let Some(mode) = filter_mode {
+        let trimmed = mode.trim();
+        if trimmed.is_empty() {
+            if let Some(o) = definition_json.as_object_mut() {
+                o.remove("filter_mode");
+            }
+        } else {
+            definition_json["filter_mode"] = json!(trimmed);
+        }
+    }
+}
+
 async fn create_viewer(
     State(state): State<AppState>,
     Json(payload): Json<CreateViewerRequest>,
@@ -2619,7 +3393,7 @@ async fn create_viewer(
 
     let signal = parse_signal_name(payload.signal.trim()).ok_or(StatusCode::BAD_REQUEST)?;
 
-    if !is_valid_chart_type(&payload.chart_type) {
+    if !is_chart_type_supported_for_signal_mask(&payload.chart_type, signal.into()) {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -2629,6 +3403,11 @@ async fn create_viewer(
         "signal": signal_name(signal)
     });
     apply_query_to_definition(&mut definition_json, payload.query.as_deref());
+    apply_filters_to_definition(
+        &mut definition_json,
+        payload.filters.as_deref(),
+        payload.filter_mode.as_deref(),
+    );
     let definition = ViewerDefinition {
         id,
         slug: format!("viewer-{}", id.simple()),
@@ -2643,6 +3422,11 @@ async fn create_viewer(
         revision: 1,
         enabled: true,
     };
+
+    compile(definition.clone()).map_err(|e| {
+        tracing::error!("create_viewer: compile failed: {e}");
+        StatusCode::BAD_REQUEST
+    })?;
 
     viewer_store
         .insert_viewer_definition(&definition)
@@ -2683,7 +3467,7 @@ async fn patch_viewer(
     }
 
     // Read current state under lock, then release before DB write
-    let (definition_json, layout_json, query_changed) = {
+    let (definition_json, layout_json, matcher_changed, signal_mask) = {
         let rt = runtime.lock().await;
         let (viewer, _) = rt
             .viewers()
@@ -2698,17 +3482,50 @@ async fn patch_viewer(
             })?;
 
         let new_chart_type = payload.chart_type.as_deref().unwrap_or(current_kind);
+        if !is_chart_type_supported_for_signal_mask(new_chart_type, viewer.definition().signal_mask)
+        {
+            return Err(StatusCode::BAD_REQUEST);
+        }
         let current_query = viewer.query().map(str::to_string);
-        let mut definition_json = viewer.definition().definition_json.clone();
+        let old_def_json = &viewer.definition().definition_json;
+        let mut definition_json = old_def_json.clone();
         definition_json["kind"] = json!(new_chart_type);
         apply_query_to_definition(&mut definition_json, payload.query.as_deref());
+        apply_filters_to_definition(
+            &mut definition_json,
+            payload.filters.as_deref(),
+            payload.filter_mode.as_deref(),
+        );
         let query_changed = query_from_definition(&definition_json) != current_query;
-        if new_chart_type == current_kind && !query_changed {
+        let filters_changed = definition_json.get("filters") != old_def_json.get("filters")
+            || definition_json.get("filter_mode") != old_def_json.get("filter_mode");
+        let matcher_changed = query_changed || filters_changed;
+        if new_chart_type == current_kind && !matcher_changed {
             return Ok(StatusCode::OK);
         }
         let layout_json = viewer.definition().layout_json.clone();
-        (definition_json, layout_json, query_changed)
-    }; // lock released here
+        let signal_mask = viewer.definition().signal_mask;
+        (definition_json, layout_json, matcher_changed, signal_mask)
+    };
+
+    if matcher_changed {
+        let temp_def = ViewerDefinition {
+            id,
+            slug: String::new(),
+            name: String::new(),
+            refresh_interval_ms: DEFAULT_VIEWER_REFRESH_MS,
+            lookback_ms: DEFAULT_VIEWER_LOOKBACK_MS,
+            signal_mask,
+            definition_json: definition_json.clone(),
+            layout_json: serde_json::Value::Object(Default::default()),
+            revision: 1,
+            enabled: true,
+        };
+        compile(temp_def).map_err(|e| {
+            tracing::error!("patch_viewer: compile failed: {e}");
+            StatusCode::BAD_REQUEST
+        })?;
+    }
 
     let updated = viewer_store
         .update_viewer_definition_json(id, &definition_json, &layout_json)
@@ -2722,10 +3539,8 @@ async fn patch_viewer(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    // Re-acquire lock to update in-memory state.
-    // When the query changes, rebuild from scratch to evict stale entries.
     let mut rt = runtime.lock().await;
-    if query_changed {
+    if matcher_changed {
         rt.rebuild_viewer(id, definition_json, layout_json)
             .await
             .map_err(|error| {
@@ -2750,6 +3565,11 @@ async fn preview_viewer(
         "signal": signal_name(signal)
     });
     apply_query_to_definition(&mut definition_json, payload.query.as_deref());
+    apply_filters_to_definition(
+        &mut definition_json,
+        payload.filters.as_deref(),
+        payload.filter_mode.as_deref(),
+    );
 
     let temp_def = ViewerDefinition {
         id: Uuid::new_v4(),
@@ -2800,16 +3620,22 @@ async fn preview_viewer(
         vec![]
     };
 
-    let query = viewer
-        .definition()
-        .definition_json
+    let def_json = &viewer.definition().definition_json;
+    let query = def_json
         .get("query")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let filters = def_json.get("filters").cloned();
+    let filter_mode = def_json
+        .get("filter_mode")
         .and_then(|v| v.as_str())
         .map(str::to_string);
 
     Ok(Json(ViewerPreviewResponse {
         signal: signal_name(signal).to_string(),
         query,
+        filters,
+        filter_mode,
         entry_count: viewer_state.entries.len(),
         entries: entry_rows,
         traces,
@@ -3211,6 +4037,12 @@ fn viewer_summary(
         .get("query")
         .and_then(|v| v.as_str())
         .map(str::to_string);
+    let filters = definition.definition_json.get("filters").cloned();
+    let filter_mode = definition
+        .definition_json
+        .get("filter_mode")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
 
     let entries = if include_entries {
         map_entries_to_rows(
@@ -3231,6 +4063,8 @@ fn viewer_summary(
         signals: signal_mask_labels(definition.signal_mask),
         chart_type,
         query,
+        filters,
+        filter_mode,
         refresh_interval_ms: definition.refresh_interval_ms,
         lookback_ms: definition.lookback_ms,
         entry_count: viewer_state.entries.len(),
@@ -3819,8 +4653,107 @@ mod tests {
             chart_type_from_definition(&serde_json::json!({ "kind": "line" })).unwrap(),
             "line"
         );
+        assert_eq!(
+            chart_type_from_definition(&serde_json::json!({ "kind": "area" })).unwrap(),
+            "area"
+        );
         assert!(chart_type_from_definition(&serde_json::json!({ "kind": 1 })).is_err());
         assert!(chart_type_from_definition(&serde_json::json!({ "kind": "heatmap" })).is_err());
+    }
+
+    #[test]
+    fn test_chart_type_from_definition_accepts_pie_and_donut_when_present() {
+        assert_eq!(
+            chart_type_from_definition(&serde_json::json!({ "kind": "pie" })).unwrap(),
+            "pie"
+        );
+        assert_eq!(
+            chart_type_from_definition(&serde_json::json!({ "kind": "donut" })).unwrap(),
+            "donut"
+        );
+    }
+
+    #[test]
+    fn test_chart_type_from_definition_accepts_billboard() {
+        assert_eq!(
+            chart_type_from_definition(&serde_json::json!({ "kind": "billboard" })).unwrap(),
+            "billboard"
+        );
+    }
+
+    #[test]
+    fn test_is_valid_chart_type_accepts_billboard() {
+        assert!(is_valid_chart_type("billboard"));
+    }
+
+    #[test]
+    fn test_is_valid_chart_type_rejects_unknown_types() {
+        assert!(!is_valid_chart_type("heatmap"));
+        assert!(!is_valid_chart_type("scatter"));
+        assert!(!is_valid_chart_type(""));
+    }
+
+    #[test]
+    fn test_chart_type_support_is_metrics_only_for_non_table_views() {
+        let metrics_only = Signal::Metrics.into();
+        let traces_only = Signal::Traces.into();
+        let logs_only = Signal::Logs.into();
+
+        assert!(is_chart_type_supported_for_signal_mask(
+            "table",
+            metrics_only
+        ));
+        assert!(is_chart_type_supported_for_signal_mask(
+            "table",
+            traces_only
+        ));
+        assert!(is_chart_type_supported_for_signal_mask("table", logs_only));
+        assert!(is_chart_type_supported_for_signal_mask(
+            "line",
+            metrics_only
+        ));
+        assert!(is_chart_type_supported_for_signal_mask(
+            "stacked_bar",
+            metrics_only
+        ));
+        assert!(is_chart_type_supported_for_signal_mask(
+            "area",
+            metrics_only
+        ));
+        assert!(is_chart_type_supported_for_signal_mask("pie", metrics_only));
+        assert!(is_chart_type_supported_for_signal_mask(
+            "donut",
+            metrics_only
+        ));
+        assert!(is_chart_type_supported_for_signal_mask(
+            "billboard",
+            metrics_only
+        ));
+        assert!(!is_chart_type_supported_for_signal_mask(
+            "line",
+            traces_only
+        ));
+        assert!(!is_chart_type_supported_for_signal_mask(
+            "stacked_bar",
+            logs_only
+        ));
+        assert!(!is_chart_type_supported_for_signal_mask(
+            "area",
+            traces_only
+        ));
+        assert!(!is_chart_type_supported_for_signal_mask("pie", logs_only));
+        assert!(!is_chart_type_supported_for_signal_mask(
+            "donut",
+            traces_only
+        ));
+        assert!(!is_chart_type_supported_for_signal_mask(
+            "billboard",
+            traces_only
+        ));
+        assert!(!is_chart_type_supported_for_signal_mask(
+            "billboard",
+            logs_only
+        ));
     }
 
     #[test]
@@ -3891,6 +4824,52 @@ mod tests {
         assert!(html.contains("sidebar-toggle"));
         assert!(html.contains("viewer-sortable-item"));
         assert!(html.contains("viewer-drag-handle"));
+    }
+
+    #[tokio::test]
+    async fn test_root_exposes_area_chart_type_in_metrics_ui() {
+        let (_, html) = index_html().await;
+
+        assert!(html.contains("<option value=\"area\">Area</option>"));
+        assert!(html.contains("area: 'Area'"));
+    }
+
+    #[tokio::test]
+    async fn test_root_exposes_pie_and_donut_chart_types_for_metrics_viewers() {
+        let (_, html) = index_html().await;
+
+        assert!(html.contains("<option value=\"pie\">Pie</option>"));
+        assert!(html.contains("<option value=\"donut\">Donut</option>"));
+        assert!(html.contains("pie: 'Pie'"));
+        assert!(html.contains("donut: 'Donut'"));
+    }
+
+    #[tokio::test]
+    async fn test_root_contains_area_chart_rendering_branch() {
+        let (_, html) = index_html().await;
+        assert!(html.contains("function buildChartData(entries, lookbackMs, chartType) {"));
+        assert!(html.contains("const isArea = chartType === 'area';"));
+        assert!(html.contains("fill: isArea"));
+        assert!(html.contains("chartSeriesColors(series, isArea ? 0.3 : 0.7)"));
+        assert!(html.contains("function resolveChartConfig(chartType) {"));
+        assert!(html.contains("buildChartData(entries, lookbackMs, chartType)"));
+        assert!(html.contains("resolveChartConfig(chartType)"));
+        assert!(
+            html.contains("function renderPanelChart(chartType, entries, lookbackMs, canvas) {")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_root_contains_circular_chart_rendering_branch() {
+        let (_, html) = index_html().await;
+
+        assert!(html.contains("const CIRCULAR_CHART_TYPES = { pie: 'pie', donut: 'doughnut' };"));
+        assert!(html.contains("function buildPieData(entries) {"));
+        assert!(
+            html.contains("function buildCircularChartConfig(chartType, entries, legendLabels) {")
+        );
+        assert!(html.contains("function makeCircularTooltipLabel(total) {"));
+        assert!(html.contains("function isCircularChartType(chartType) {"));
     }
 
     #[tokio::test]
@@ -4071,12 +5050,155 @@ mod tests {
         let (_, html) = index_html().await;
 
         assert!(html.contains("readViewerChartType(viewer)"));
+        assert!(html.contains("viewerSupportsMetricCharts(viewer)"));
+        assert!(html.contains("metricChartValue(entry)"));
+        assert!(html.contains("readViewerPlaceholder(signal)"));
+        assert!(html.contains("chartTypeLabel(chartType)"));
         assert!(html.contains("readDashboardColumns(data.columns)"));
         assert!(html.contains("const value = Number(input.value);"));
         assert!(!html.contains("viewer.chart_type || 'table'"));
+        assert!(!html.contains("viewer.signals.includes('metrics')"));
         assert!(!html.contains("v.chart_type || 'table'"));
+        assert!(!html.contains("v.signals.includes('metrics')"));
+        assert!(!html.contains("entry.metric_value ?? 0"));
+        assert!(!html.contains("Number(v) || 0"));
+        assert!(!html.contains("Number(context.raw) || 0"));
+        assert!(!html.contains("tryCircularChart("));
+        assert!(!html.contains("VIEWER_PLACEHOLDERS[signal] || signal"));
+        assert!(!html.contains("CHART_TYPE_LABELS[chartType] || chartType"));
         assert!(!html.contains("data.columns || 2"));
         assert!(!html.contains("dash.columns || 2"));
         assert!(!html.contains("Number.parseInt(input.value, 10)"));
+    }
+    #[tokio::test]
+    async fn test_root_contains_filter_ui_elements() {
+        let (_, html) = index_html().await;
+
+        // create form filter elements
+        assert!(
+            html.contains("filter-rows-container"),
+            "create form filter rows container must be present"
+        );
+        assert!(
+            html.contains("add-filter-button"),
+            "create form add filter button must be present"
+        );
+        assert!(
+            html.contains("filter-mode-toggle"),
+            "create form filter mode toggle must be present"
+        );
+        assert!(
+            html.contains("filter-mode-and"),
+            "create form AND button must be present"
+        );
+        assert!(
+            html.contains("filter-mode-or"),
+            "create form OR button must be present"
+        );
+
+        // viewer detail filter elements
+        assert!(
+            html.contains("viewer-filter-badges"),
+            "detail filter badges container must be present"
+        );
+        assert!(
+            html.contains("viewer-filter-section"),
+            "detail filter section must be present"
+        );
+        assert!(
+            html.contains("detail-filter-mode-toggle"),
+            "detail filter mode toggle must be present"
+        );
+        assert!(
+            html.contains("detail-filter-rows-container"),
+            "detail filter rows container must be present"
+        );
+        assert!(
+            html.contains("detail-add-filter-button"),
+            "detail add filter button must be present"
+        );
+        assert!(
+            html.contains("detail-save-filters-button"),
+            "detail save filters button must be present"
+        );
+    }
+
+    #[test]
+    fn test_apply_filters_to_definition_sets_filters_and_mode() {
+        let mut def = json!({});
+        let filters = vec![ViewerFilterInput {
+            field: "service_name".into(),
+            op: "eq".into(),
+            value: "svc-a".into(),
+        }];
+        apply_filters_to_definition(&mut def, Some(&filters), Some("or"));
+        assert_eq!(def["filters"][0]["field"], "service_name");
+        assert_eq!(def["filters"][0]["op"], "eq");
+        assert_eq!(def["filters"][0]["value"], "svc-a");
+        assert_eq!(def["filter_mode"], "or");
+    }
+
+    #[test]
+    fn test_apply_filters_to_definition_empty_mode_removes_filter_mode() {
+        let mut def = json!({ "filter_mode": "or" });
+        let filters = vec![ViewerFilterInput {
+            field: "service_name".into(),
+            op: "eq".into(),
+            value: "x".into(),
+        }];
+        apply_filters_to_definition(&mut def, Some(&filters), Some(""));
+        assert_eq!(def["filters"][0]["value"], "x");
+        assert!(
+            def.get("filter_mode").is_none(),
+            "empty mode string should remove filter_mode"
+        );
+    }
+
+    #[test]
+    fn test_apply_filters_to_definition_empty_slice_removes_filters_and_mode() {
+        let mut def = json!({ "filters": [{"field":"service_name","op":"eq","value":"x"}], "filter_mode": "and" });
+        apply_filters_to_definition(&mut def, Some(&[]), Some("and"));
+        assert!(
+            def.get("filters").is_none(),
+            "empty filters slice should remove filters key"
+        );
+        assert!(
+            def.get("filter_mode").is_none(),
+            "empty filters slice should remove filter_mode key"
+        );
+    }
+
+    #[test]
+    fn test_apply_filters_to_definition_none_does_not_touch_existing() {
+        let mut def = json!({ "filters": [{"field":"service_name","op":"eq","value":"existing"}], "filter_mode": "or" });
+        apply_filters_to_definition(&mut def, None, None);
+        assert_eq!(
+            def["filters"][0]["value"], "existing",
+            "None filters should leave existing filters untouched"
+        );
+        assert_eq!(
+            def["filter_mode"], "or",
+            "None filters should leave existing filter_mode untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_root_returns_billboard_option_in_chart_type_select() {
+        let (_, html) = index_html().await;
+
+        assert!(
+            html.contains(r#"<option value="billboard">Billboard</option>"#),
+            "create viewer form must include billboard option"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_root_returns_billboard_in_chart_type_labels() {
+        let (_, html) = index_html().await;
+
+        assert!(
+            html.contains("billboard: 'Billboard'"),
+            "CHART_TYPE_LABELS must include billboard entry"
+        );
     }
 }
