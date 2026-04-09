@@ -953,6 +953,38 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         white-space: nowrap;
         padding-left: 4px;
       }
+
+      .preview-panel {
+        background: rgba(240, 246, 244, 0.92);
+        gap: 14px;
+      }
+
+      .preview-panel-header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      .preview-summary {
+        font-size: 0.85rem;
+        color: var(--muted);
+      }
+
+      .preview-status {
+        font-size: 0.8rem;
+        color: var(--muted);
+        margin-left: auto;
+      }
+
+      .preview-content {
+        max-height: 300px;
+        overflow-y: auto;
+      }
+
+      #preview-chart-container {
+        max-height: 220px;
+      }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
   </head>
@@ -991,7 +1023,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         </div>
         <div class="toolbar-row" id="filter-builder-row">
           <input id="viewer-query-input" data-testid="viewer-query-input" name="viewer-query"
-                 type="text" placeholder="Query filter (e.g. checkout)" maxlength="200"
+                 type="search" placeholder="Filter by service name or keyword" maxlength="200"
                  aria-label="Text search query" style="flex:1;min-width:180px;" />
           <div class="filter-mode-toggle" id="filter-mode-toggle">
             <button id="filter-mode-and" class="active" type="button" title="All filters must match" aria-pressed="true">AND</button>
@@ -1008,38 +1040,43 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         </div>
       </section>
 
-      <section id="viewer-preview-panel" class="panel panel-strong stack" hidden>
-        <div class="toolbar-row">
-          <strong>Preview</strong>
-          <span id="viewer-preview-count" style="color: var(--muted); font-size: 0.9rem;"></span>
+      <section id="viewer-preview-panel" class="panel preview-panel" aria-labelledby="preview-label" hidden>
+        <div class="preview-panel-header">
+          <span id="preview-label" class="label">Preview</span>
+          <span id="viewer-preview-count" class="preview-summary"></span>
+          <span id="preview-status" class="preview-status" role="status" aria-live="polite"></span>
           <button id="viewer-preview-close" class="secondary btn-compact" type="button">×</button>
         </div>
-        <div id="viewer-preview-entries" class="entries-table-wrap" hidden>
-          <table>
-            <thead>
-              <tr>
-                <th>Time</th><th>Signal</th><th>Service</th><th>Preview</th>
-              </tr>
-            </thead>
-            <tbody id="viewer-preview-entries-body"></tbody>
-          </table>
+        <div class="preview-content">
+          <div id="preview-chart-container" hidden>
+            <canvas id="preview-chart-canvas"></canvas>
+          </div>
+          <div id="viewer-preview-entries" class="entries-table-wrap" hidden>
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th><th>Signal</th><th>Service</th><th>Preview</th>
+                </tr>
+              </thead>
+              <tbody id="viewer-preview-entries-body"></tbody>
+            </table>
+          </div>
+          <div id="viewer-preview-traces" class="entries-table-wrap" hidden>
+            <table>
+              <thead>
+                <tr>
+                  <th>Trace ID</th><th>Root Span</th><th>Services</th>
+                  <th>Spans</th><th>Duration</th><th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="viewer-preview-traces-body"></tbody>
+            </table>
+          </div>
+          <p id="viewer-preview-empty" hidden style="text-align:center; color: var(--muted);">
+            No matching entries.
+          </p>
         </div>
-        <div id="viewer-preview-traces" class="entries-table-wrap" hidden>
-          <table>
-            <thead>
-              <tr>
-                <th>Trace ID</th><th>Root Span</th><th>Services</th>
-                <th>Spans</th><th>Duration</th><th>Status</th>
-              </tr>
-            </thead>
-            <tbody id="viewer-preview-traces-body"></tbody>
-          </table>
-        </div>
-        <p id="viewer-preview-empty" hidden style="text-align:center; color: var(--muted);">
-          No matching entries.
-        </p>
       </section>
-
       <section class="panel panel-strong stack table-wrap">
         <div id="viewer-table-scroll" class="table-scroll" hidden>
           <table data-testid="viewer-table">
@@ -1155,6 +1192,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const viewerSignalSelect = document.getElementById('viewer-signal-select');
       const viewerChartTypeSelect = document.getElementById('viewer-chart-type-select');
       const viewerNameInput = document.getElementById('viewer-name-input');
+      const viewerQueryInput = document.getElementById('viewer-query-input');
       const createViewerButton = document.getElementById('create-viewer-button');
       const refreshViewersButton = document.getElementById('refresh-viewers-button');
       const viewerEmpty = document.getElementById('viewer-empty');
@@ -1185,6 +1223,9 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const viewerPreviewTraces = document.getElementById('viewer-preview-traces');
       const viewerPreviewTracesBody = document.getElementById('viewer-preview-traces-body');
       const viewerPreviewEmpty = document.getElementById('viewer-preview-empty');
+      const previewStatusEl = document.getElementById('preview-status');
+      const previewChartContainer = document.getElementById('preview-chart-container');
+      const previewChartCanvas = document.getElementById('preview-chart-canvas');
       const viewerDetailQueryRow = document.getElementById('viewer-detail-query-row');
       const viewerDetailQueryInput = document.getElementById('viewer-detail-query-input');
       const viewerDetailQueryUpdate = document.getElementById('viewer-detail-query-update');
@@ -1212,7 +1253,11 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       let viewerLoadState = 'loading';
       let selectedViewerId = null;
       let currentChart = null;
-
+      let previewChart = null;
+      let previewAbortController = null;
+      let previewDebounceTimer = null;
+      let previewRequestSeq = 0;
+      let latestPreviewPayload = null;
 
       function setStatus(kind, message) {
         statusBox.dataset.state = kind;
@@ -1259,9 +1304,12 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
       // --- Filter builder helpers ---
 
-      function makeFilterRow(filter = null, onRemove = null) {
+      function makeFilterRow(filter = null, onRemove = null, onChange = null) {
         const row = document.createElement('div');
         row.className = 'filter-row';
+        const notifyChange = () => {
+          if (onChange) onChange();
+        };
 
         const fieldSel = document.createElement('select');
         fieldSel.setAttribute('aria-label', 'Filter field');
@@ -1295,7 +1343,15 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         removeBtn.textContent = '\u00d7';
         removeBtn.title = 'Remove filter';
         removeBtn.setAttribute('aria-label', 'Remove filter');
-        removeBtn.addEventListener('click', () => { row.remove(); if (onRemove) onRemove(); });
+        removeBtn.addEventListener('click', () => {
+          row.remove();
+          if (onRemove) onRemove();
+          notifyChange();
+        });
+
+        fieldSel.addEventListener('change', notifyChange);
+        opSel.addEventListener('change', notifyChange);
+        valueInput.addEventListener('input', notifyChange);
 
         row.appendChild(fieldSel);
         row.appendChild(opSel);
@@ -1417,9 +1473,17 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       // --- Filter builder event wiring (create form) ---
       wireFilterModeToggle(filterModeAndBtn, filterModeOrBtn);
       addFilterButton.addEventListener('click', () => {
-        const row = makeFilterRow(null, syncCreateFilterHelper);
+        const row = makeFilterRow(
+          null,
+          () => {
+            syncCreateFilterHelper();
+            previewViewer();
+          },
+          () => previewViewer(),
+        );
         filterRowsContainer.appendChild(row);
         syncCreateFilterHelper();
+        previewViewer();
       });
 
       // --- Filter editor event wiring (viewer detail) ---
@@ -2234,6 +2298,132 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
       }
 
+      function clearPreviewDebounce() {
+        if (previewDebounceTimer) { clearTimeout(previewDebounceTimer); previewDebounceTimer = null; }
+      }
+
+      function clearPreviewContent() {
+        if (previewChart) { previewChart.destroy(); previewChart = null; }
+        previewChartContainer.hidden = true;
+        viewerPreviewEntries.hidden = true;
+        viewerPreviewTraces.hidden = true;
+        viewerPreviewEmpty.hidden = true;
+        viewerPreviewEntriesBody.replaceChildren();
+        viewerPreviewTracesBody.replaceChildren();
+      }
+
+      function showPreviewMessage(message) {
+        clearPreviewContent();
+        viewerPreviewEmpty.textContent = message;
+        viewerPreviewEmpty.hidden = false;
+      }
+
+      function cancelPreview() {
+        clearPreviewDebounce();
+        if (previewAbortController) { previewAbortController.abort(); previewAbortController = null; }
+        latestPreviewPayload = null;
+        viewerPreviewCount.textContent = '';
+        previewStatusEl.textContent = '';
+        clearPreviewContent();
+        viewerPreviewPanel.hidden = true;
+        previewViewerButton.disabled = false;
+      }
+
+      function renderPreview(payload) {
+        latestPreviewPayload = payload;
+        const chartType = viewerChartTypeSelect.value;
+        const signal = payload.signal;
+        const entries = payload.entries || [];
+        const traces = payload.traces || [];
+        const filters = readFiltersFromBuilder(filterRowsContainer);
+        const hasMatcher = !!viewerQueryInput.value.trim() || filters !== null;
+        const shown = signal === 'traces' && traces.length ? traces.length : entries.length;
+
+        viewerPreviewCount.textContent = hasMatcher
+          ? `${payload.entry_count} matching entries (showing ${shown})`
+          : `${payload.entry_count} entries (showing ${shown})`;
+        previewStatusEl.textContent = '';
+
+        clearPreviewContent();
+
+        if (!entries.length && !traces.length) {
+          showPreviewMessage('No matching entries.');
+          viewerPreviewPanel.hidden = false;
+          return;
+        }
+
+        if (signal === 'metrics' && chartType !== 'table' && entries.length) {
+          previewChartContainer.hidden = false;
+          previewChart = renderPanelChart(chartType, entries, 5 * 60 * 1000, previewChartCanvas);
+          if (!previewChart) previewChartContainer.hidden = true;
+        }
+        if (signal === 'traces' && traces.length) {
+          renderTraceList(traces, viewerPreviewTracesBody, viewerPreviewTraces, false);
+        } else if (entries.length) {
+          renderEntriesTable(entries, viewerPreviewEntriesBody, viewerPreviewEntries);
+        } else if (previewChartContainer.hidden) {
+          showPreviewMessage('No matching entries.');
+        }
+
+        viewerPreviewPanel.hidden = false;
+      }
+
+      async function fetchPreview() {
+        const signalType = viewerSignalSelect.value;
+        const query = viewerQueryInput.value.trim() || null;
+        const filters = readFiltersFromBuilder(filterRowsContainer);
+        const seq = ++previewRequestSeq;
+
+        previewAbortController = new AbortController();
+        latestPreviewPayload = null;
+        previewViewerButton.disabled = true;
+
+        viewerPreviewCount.textContent = '';
+        previewStatusEl.textContent = 'Loading...';
+        clearPreviewContent();
+        viewerPreviewPanel.hidden = false;
+
+        try {
+          const body = { signal: signalType };
+          if (query) body.query = query;
+          if (filters !== null) {
+            body.filters = filters;
+            body.filter_mode = readFilterMode(filterModeAndBtn);
+          }
+          const resp = await fetch('/api/viewers/preview', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'accept': 'application/json' },
+            body: JSON.stringify(body),
+            signal: previewAbortController.signal,
+          });
+          if (seq !== previewRequestSeq) return;
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const payload = await resp.json();
+          if (seq !== previewRequestSeq) return;
+          renderPreview(payload);
+        } catch (err) {
+          if (err.name === 'AbortError') return;
+          if (seq !== previewRequestSeq) return;
+          latestPreviewPayload = null;
+          viewerPreviewCount.textContent = '';
+          previewStatusEl.textContent = `Error: ${err.message}`;
+          showPreviewMessage('Preview unavailable.');
+        } finally {
+          if (seq === previewRequestSeq) previewAbortController = null;
+          previewViewerButton.disabled = false;
+        }
+      }
+
+      function previewViewer(immediate = false) {
+        clearPreviewDebounce();
+        if (previewAbortController) previewAbortController.abort();
+        if (immediate) {
+          fetchPreview();
+        } else {
+          previewDebounceTimer = setTimeout(fetchPreview, 500);
+        }
+      }
+
       async function createViewer() {
         const name = viewerNameInput.value.trim();
         const signal = viewerSignalSelect.value;
@@ -2276,57 +2466,6 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
       }
 
-      async function previewViewer() {
-        const signal = viewerSignalSelect.value;
-        const query = viewerQueryInput.value.trim() || null;
-        const filters = readFiltersFromBuilder(filterRowsContainer);
-        const body = { signal };
-        if (query) body.query = query;
-        if (filters !== null) {
-          body.filters = filters;
-          body.filter_mode = readFilterMode(filterModeAndBtn);
-        }
-        const hasMatcher = !!query || filters !== null;
-
-        previewViewerButton.disabled = true;
-        setStatus('working', 'Running preview...');
-
-        try {
-          const response = await fetch('/api/viewers/preview', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json', 'accept': 'application/json' },
-            body: JSON.stringify(body)
-          });
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-          const data = await response.json();
-          const total = data.entry_count;
-          const isTrace = signal === 'traces';
-          const shown = (isTrace && data.traces) ? data.traces.length : data.entries.length;
-          viewerPreviewCount.textContent = hasMatcher
-            ? `${total} matching entries (showing ${shown})`
-            : `${total} entries (showing ${shown})`;
-
-          viewerPreviewEntries.hidden = true;
-          viewerPreviewTraces.hidden = true;
-          viewerPreviewEmpty.hidden = true;
-          if (isTrace && data.traces) {
-            renderTraceList(data.traces, viewerPreviewTracesBody, viewerPreviewTraces, false);
-          } else if (data.entries.length > 0) {
-            renderEntriesTable(data.entries, viewerPreviewEntriesBody, viewerPreviewEntries);
-          } else {
-            viewerPreviewEmpty.hidden = false;
-          }
-
-          viewerPreviewPanel.hidden = false;
-          setStatus('ok', `Preview complete. ${total} matching entries.`);
-        } catch (error) {
-          setStatus('error', `Preview failed: ${error.message}`);
-        } finally {
-          previewViewerButton.disabled = false;
-        }
-      }
-
       async function deleteViewer(viewerId, viewerName) {
         if (!confirm(`Delete viewer "${viewerName}"?`)) return;
         setStatus('working', 'Deleting viewer...');
@@ -2345,20 +2484,36 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       }
 
       createViewerButton.addEventListener('click', createViewer);
-      previewViewerButton.addEventListener('click', previewViewer);
+      previewViewerButton.addEventListener('click', () => previewViewer(true));
       viewerDetailQueryUpdate.addEventListener('click', () => {
         const query = viewerDetailQueryInput.value.trim();
         patchViewer(selectedViewerId, { query }, query ? 'Query filter updated.' : 'Query filter cleared.');
       });
-      viewerPreviewClose.addEventListener('click', () => { viewerPreviewPanel.hidden = true; });
+      viewerPreviewClose.addEventListener('click', cancelPreview);
+      refreshViewersButton.addEventListener('click', () => {
+        refreshViewers();
+        previewViewer(true);
+      });
+      viewerSignalSelect.addEventListener('change', () => {
+        syncCreateForm();
+        previewViewer(true);
+      });
+      viewerQueryInput.addEventListener('input', () => previewViewer());
       viewerQueryInput.addEventListener('keydown', event => {
         if (event.key === 'Enter') {
           event.preventDefault();
-          previewViewer();
+          previewViewer(true);
         }
       });
-      refreshViewersButton.addEventListener('click', () => refreshViewers());
-      viewerSignalSelect.addEventListener('change', syncCreateForm);
+      viewerChartTypeSelect.addEventListener('change', () => {
+        if (latestPreviewPayload) {
+          renderPreview(latestPreviewPayload);
+        } else {
+          previewViewer(true);
+        }
+      });
+      filterModeAndBtn.addEventListener('click', () => previewViewer());
+      filterModeOrBtn.addEventListener('click', () => previewViewer());
       viewerNameInput.addEventListener('keydown', event => {
         if (event.key === 'Enter') {
           event.preventDefault();
@@ -2367,6 +2522,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       });
 
       syncCreateForm();
+      previewViewer(true);
       refreshViewers({ silent: true });
       window.setInterval(() => refreshViewers({ silent: true }), 5000);
 
@@ -2399,6 +2555,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       });
 
       function navigateTo(page, dashboardId) {
+        cancelPreview();
         currentPage = page;
         currentDashboardId = dashboardId || null;
 
@@ -2413,6 +2570,9 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
         if (page === 'dashboard' && dashboardId) {
           loadDashboard(dashboardId);
+        }
+        if (page === 'viewers') {
+          previewViewer(true);
         }
 
         sidebar.classList.remove('open');
@@ -4710,6 +4870,65 @@ mod tests {
         );
         assert!(html.contains("function makeCircularTooltipLabel(total) {"));
         assert!(html.contains("function isCircularChartType(chartType) {"));
+    }
+
+    #[tokio::test]
+    async fn test_root_returns_query_input_and_preview_panel() {
+        let (_, html) = index_html().await;
+
+        assert!(
+            html.contains("viewer-query-input"),
+            "query input element must exist"
+        );
+        assert!(
+            html.contains("preview-panel"),
+            "preview panel container must exist"
+        );
+        assert!(
+            html.contains("preview-summary"),
+            "preview summary element must exist"
+        );
+        assert!(html.contains("Preview"), "Preview label must appear");
+        assert!(
+            html.contains("if (page === 'viewers') {\n          previewViewer(true);\n        }"),
+            "returning to viewers must restore the preview"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_root_initializes_preview_on_first_load_and_refresh() {
+        let (_, html) = index_html().await;
+
+        assert!(
+            html.contains("syncCreateForm();\n      previewViewer(true);\n      refreshViewers({ silent: true });"),
+            "initial page load must trigger the preview before the first viewer list refresh"
+        );
+        assert!(
+            html.contains(
+                "refreshViewersButton.addEventListener('click', () => {\n        refreshViewers();\n        previewViewer(true);\n      });"
+            ),
+            "manual refresh must also refresh the preview panel"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_root_clears_stale_preview_state_during_reload_and_errors() {
+        let (_, html) = index_html().await;
+
+        assert!(
+            html.contains("function clearPreviewContent()"),
+            "preview content reset helper must exist"
+        );
+        assert!(
+            html.contains(
+                "previewStatusEl.textContent = 'Loading...';\n        clearPreviewContent();"
+            ),
+            "loading a preview must clear stale content"
+        );
+        assert!(
+            html.contains("showPreviewMessage('Preview unavailable.');"),
+            "failed previews must replace stale content with an explicit empty state"
+        );
     }
 
     #[tokio::test]
