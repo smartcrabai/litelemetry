@@ -299,6 +299,92 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         min-width: 160px;
       }
 
+      .filter-row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+        width: 100%;
+      }
+
+      .filter-row select,
+      .filter-row input[type="text"] {
+        min-height: 38px;
+        padding: 6px 10px;
+        border-radius: 12px;
+        width: auto;
+      }
+
+      .filter-row select {
+        min-width: 110px;
+        flex-shrink: 0;
+      }
+
+      .filter-row input[type="text"] {
+        flex: 1;
+        min-width: 120px;
+      }
+
+      .filter-mode-toggle {
+        display: flex;
+        border-radius: 999px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        flex-shrink: 0;
+      }
+
+      .filter-mode-toggle button {
+        min-height: 36px;
+        padding: 0 14px;
+        border-radius: 0;
+        font-size: 0.82rem;
+        background: rgba(255,255,255,0.85);
+        color: var(--ink);
+        font-weight: 600;
+        border: 0;
+      }
+
+      .filter-mode-toggle button.active {
+        background: var(--teal);
+        color: #fff;
+      }
+
+      .filter-helper-text {
+        font-size: 0.82rem;
+        color: var(--muted);
+        font-style: italic;
+      }
+
+      .filter-badges {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      .filter-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 0.78rem;
+        background: var(--teal-soft);
+        color: var(--teal);
+        border: 1px solid rgba(13,109,98,0.2);
+        border-radius: 999px;
+        padding: 3px 10px;
+        font-weight: 600;
+      }
+
+      .filter-badge-mode {
+        background: var(--accent-soft);
+        color: var(--accent);
+        border-color: rgba(183,84,50,0.2);
+      }
+
+      .filter-section {
+        display: grid;
+        gap: 10px;
+      }
+
       .table-wrap {
         overflow: hidden;
       }
@@ -900,13 +986,23 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             <option value="billboard">Billboard</option>
           </select>
           <input id="viewer-name-input" data-testid="viewer-name-input" name="viewer-name" placeholder="checkout traces" maxlength="80" style="max-width: 200px;" />
-          <input id="viewer-query-input" data-testid="viewer-query-input" name="viewer-query"
-                 placeholder="Query filter (e.g. checkout)" maxlength="200" />
-          <button id="preview-viewer-button" data-testid="preview-viewer-button"
-                  class="secondary" type="button">Preview</button>
           <button id="create-viewer-button" data-testid="create-viewer-button" class="primary" type="button">+ Create viewer</button>
           <button id="refresh-viewers-button" class="secondary" type="button">Refresh</button>
         </div>
+        <div class="toolbar-row" id="filter-builder-row">
+          <input id="viewer-query-input" data-testid="viewer-query-input" name="viewer-query"
+                 type="text" placeholder="Query filter (e.g. checkout)" maxlength="200"
+                 aria-label="Text search query" style="flex:1;min-width:180px;" />
+          <div class="filter-mode-toggle" id="filter-mode-toggle">
+            <button id="filter-mode-and" class="active" type="button" title="All filters must match" aria-pressed="true">AND</button>
+            <button id="filter-mode-or" type="button" title="Any filter must match" aria-pressed="false">OR</button>
+          </div>
+          <div id="filter-rows-container" style="display:contents;"></div>
+          <button id="add-filter-button" class="secondary" type="button" data-testid="add-filter-button">+ Add filter</button>
+          <button id="preview-viewer-button" data-testid="preview-viewer-button"
+                  class="secondary" type="button">Preview</button>
+        </div>
+        <div id="filter-helper-text" class="filter-helper-text" hidden>Advanced filters are active — they take priority over the query field.</div>
         <div id="status-box" data-testid="status-box" class="status-box" data-state="working">
           Loading viewers...
         </div>
@@ -979,6 +1075,24 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           <input id="viewer-detail-query-input" placeholder="Query filter" maxlength="200"
                  style="flex:1; min-width: 120px;" />
           <button id="viewer-detail-query-update" class="secondary btn-compact" type="button">Update</button>
+        </div>
+        <div id="viewer-filter-section" class="filter-section" hidden>
+          <div class="filter-badges" id="viewer-filter-badges"></div>
+          <div id="viewer-filter-editor" hidden>
+            <div class="toolbar-row" style="margin-top:6px;">
+              <input id="detail-query-input" type="text" placeholder="Simple text search (optional)" aria-label="Text search query" style="flex:1;min-width:180px;" />
+              <div class="filter-mode-toggle" id="detail-filter-mode-toggle">
+                <button id="detail-filter-mode-and" class="active" type="button" title="All filters must match" aria-pressed="true">AND</button>
+                <button id="detail-filter-mode-or" type="button" title="Any filter must match" aria-pressed="false">OR</button>
+              </div>
+            </div>
+            <div id="detail-filter-rows-container" style="display:grid;gap:6px;margin-top:8px;"></div>
+            <div style="display:flex;gap:8px;margin-top:8px;">
+              <button id="detail-add-filter-button" class="secondary" type="button">+ Add filter</button>
+              <button id="detail-save-filters-button" class="primary" type="button">Save filters</button>
+            </div>
+          </div>
+          <button id="edit-viewer-filters-button" class="secondary btn-compact" type="button" aria-expanded="false" aria-controls="viewer-filter-editor">Edit filters</button>
         </div>
         <div id="viewer-chart-container">
           <canvas id="viewer-chart-canvas"></canvas>
@@ -1075,10 +1189,30 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const viewerDetailQueryInput = document.getElementById('viewer-detail-query-input');
       const viewerDetailQueryUpdate = document.getElementById('viewer-detail-query-update');
 
+      // --- Filter builder (create form) ---
+      const filterModeAndBtn = document.getElementById('filter-mode-and');
+      const filterModeOrBtn = document.getElementById('filter-mode-or');
+      const filterRowsContainer = document.getElementById('filter-rows-container');
+      const addFilterButton = document.getElementById('add-filter-button');
+      const filterHelperText = document.getElementById('filter-helper-text');
+
+      // --- Filter section (viewer detail) ---
+      const viewerFilterSection = document.getElementById('viewer-filter-section');
+      const viewerFilterBadges = document.getElementById('viewer-filter-badges');
+      const viewerFilterEditor = document.getElementById('viewer-filter-editor');
+      const detailQueryInput = document.getElementById('detail-query-input');
+      const detailFilterModeAndBtn = document.getElementById('detail-filter-mode-and');
+      const detailFilterModeOrBtn = document.getElementById('detail-filter-mode-or');
+      const detailFilterRowsContainer = document.getElementById('detail-filter-rows-container');
+      const detailAddFilterButton = document.getElementById('detail-add-filter-button');
+      const detailSaveFiltersButton = document.getElementById('detail-save-filters-button');
+      const editViewerFiltersButton = document.getElementById('edit-viewer-filters-button');
+
       let latestViewers = [];
       let viewerLoadState = 'loading';
       let selectedViewerId = null;
       let currentChart = null;
+
 
       function setStatus(kind, message) {
         statusBox.dataset.state = kind;
@@ -1122,6 +1256,186 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         element.textContent = text;
         return element;
       }
+
+      // --- Filter builder helpers ---
+
+      function makeFilterRow(filter = null, onRemove = null) {
+        const row = document.createElement('div');
+        row.className = 'filter-row';
+
+        const fieldSel = document.createElement('select');
+        fieldSel.setAttribute('aria-label', 'Filter field');
+        for (const [val, label] of [['service_name', 'Service name'], ['payload', 'Payload']]) {
+          const opt = document.createElement('option');
+          opt.value = val;
+          opt.textContent = label;
+          if (filter && filter.field === val) opt.selected = true;
+          fieldSel.appendChild(opt);
+        }
+
+        const opSel = document.createElement('select');
+        opSel.setAttribute('aria-label', 'Filter operator');
+        for (const [val, label] of [['contains', 'contains'], ['eq', 'equals'], ['regex', 'regex']]) {
+          const opt = document.createElement('option');
+          opt.value = val;
+          opt.textContent = label;
+          if (filter && filter.op === val) opt.selected = true;
+          opSel.appendChild(opt);
+        }
+
+        const valueInput = document.createElement('input');
+        valueInput.type = 'text';
+        valueInput.placeholder = 'value';
+        valueInput.setAttribute('aria-label', 'Filter value');
+        if (filter && filter.value) valueInput.value = filter.value;
+
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'secondary btn-compact';
+        removeBtn.textContent = '\u00d7';
+        removeBtn.title = 'Remove filter';
+        removeBtn.setAttribute('aria-label', 'Remove filter');
+        removeBtn.addEventListener('click', () => { row.remove(); if (onRemove) onRemove(); });
+
+        row.appendChild(fieldSel);
+        row.appendChild(opSel);
+        row.appendChild(valueInput);
+        row.appendChild(removeBtn);
+        return row;
+      }
+
+      function readFiltersFromBuilder(container) {
+        const rows = container.querySelectorAll('.filter-row');
+        if (rows.length === 0) return null;
+        const filters = [];
+        for (const row of rows) {
+          const selects = row.querySelectorAll('select');
+          const input = row.querySelector('input[type="text"]');
+          if (!selects[0] || !selects[1] || !input) continue;
+          const value = input.value.trim();
+          if (!value) continue;
+          filters.push({ field: selects[0].value, op: selects[1].value, value });
+        }
+        return filters.length > 0 ? filters : [];
+      }
+
+      function syncCreateFilterHelper() {
+        const rows = filterRowsContainer.querySelectorAll('.filter-row');
+        filterHelperText.hidden = rows.length === 0;
+      }
+
+      function setFilterModeToggle(andBtn, orBtn, mode) {
+        andBtn.classList.toggle('active', mode === 'and');
+        orBtn.classList.toggle('active', mode === 'or');
+        andBtn.setAttribute('aria-pressed', String(mode === 'and'));
+        orBtn.setAttribute('aria-pressed', String(mode === 'or'));
+      }
+
+      function readFilterMode(andBtn) {
+        return andBtn.classList.contains('active') ? 'and' : 'or';
+      }
+
+      function wireFilterModeToggle(andBtn, orBtn) {
+        andBtn.addEventListener('click', () => setFilterModeToggle(andBtn, orBtn, 'and'));
+        orBtn.addEventListener('click', () => setFilterModeToggle(andBtn, orBtn, 'or'));
+      }
+
+      function renderFilterBadges(viewer) {
+        viewerFilterBadges.replaceChildren();
+        const filters = viewer.filters;
+        const mode = viewer.filter_mode || 'and';
+        const query = viewer.query;
+
+        if ((!filters || filters.length === 0) && !query) {
+          viewerFilterSection.hidden = true;
+          return;
+        }
+
+        viewerFilterSection.hidden = false;
+
+        if (filters && filters.length > 0) {
+          const modeEl = document.createElement('span');
+          modeEl.className = 'filter-badge filter-badge-mode';
+          modeEl.textContent = mode.toUpperCase();
+          viewerFilterBadges.appendChild(modeEl);
+
+          for (const f of filters) {
+            const badge = document.createElement('span');
+            badge.className = 'filter-badge';
+            badge.textContent = `${f.field} ${f.op} "${f.value}"`;
+            viewerFilterBadges.appendChild(badge);
+          }
+        } else if (query) {
+          const badge = document.createElement('span');
+          badge.className = 'filter-badge';
+          badge.textContent = `search: "${query}"`;
+          viewerFilterBadges.appendChild(badge);
+        }
+      }
+
+      function hydrateFilterEditor(viewer) {
+        detailQueryInput.value = viewer.query || '';
+        detailFilterRowsContainer.replaceChildren();
+
+        const filters = viewer.filters;
+        const mode = viewer.filter_mode || 'and';
+        setFilterModeToggle(detailFilterModeAndBtn, detailFilterModeOrBtn, mode);
+
+        if (Array.isArray(filters)) {
+          for (const f of filters) {
+            detailFilterRowsContainer.appendChild(makeFilterRow(f));
+          }
+        }
+      }
+
+      async function patchViewerFilters(viewerId) {
+        const filters = readFiltersFromBuilder(detailFilterRowsContainer);
+        const payload = {
+          query: detailQueryInput.value.trim(),
+          filters: filters ?? [],
+          filter_mode: readFilterMode(detailFilterModeAndBtn),
+        };
+        setStatus('working', 'Saving filters...');
+        try {
+          const response = await fetch(`/api/viewers/${viewerId}`, {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          if (!response.ok) {
+            const text = await response.text().catch(() => '');
+            throw new Error(`HTTP ${response.status}${text ? ': ' + text : ''}`);
+          }
+          await refreshViewers({ silent: true });
+          await showViewerDetail(viewerId);
+          setStatus('ok', 'Filters saved.');
+        } catch (error) {
+          setStatus('error', `Failed to save filters: ${error.message}`);
+        }
+      }
+
+      // --- Filter builder event wiring (create form) ---
+      wireFilterModeToggle(filterModeAndBtn, filterModeOrBtn);
+      addFilterButton.addEventListener('click', () => {
+        const row = makeFilterRow(null, syncCreateFilterHelper);
+        filterRowsContainer.appendChild(row);
+        syncCreateFilterHelper();
+      });
+
+      // --- Filter editor event wiring (viewer detail) ---
+      wireFilterModeToggle(detailFilterModeAndBtn, detailFilterModeOrBtn);
+      detailAddFilterButton.addEventListener('click', () => {
+        detailFilterRowsContainer.appendChild(makeFilterRow());
+      });
+      detailSaveFiltersButton.addEventListener('click', () => {
+        if (selectedViewerId) patchViewerFilters(selectedViewerId);
+      });
+      editViewerFiltersButton.addEventListener('click', () => {
+        const hidden = viewerFilterEditor.hidden;
+        viewerFilterEditor.hidden = !hidden;
+        editViewerFiltersButton.textContent = hidden ? 'Cancel' : 'Edit filters';
+        editViewerFiltersButton.setAttribute('aria-expanded', String(hidden));
+      });
 
       function createViewerItem(v, checked) {
         const item = document.createElement('div');
@@ -1849,6 +2163,12 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           viewerDetailSection.classList.add('visible');
           hideAllDetailPanels();
 
+          renderFilterBadges(viewer);
+          hydrateFilterEditor(viewer);
+          viewerFilterEditor.hidden = true;
+          editViewerFiltersButton.textContent = 'Edit filters';
+          editViewerFiltersButton.setAttribute('aria-expanded', 'false');
+
           const isTraceViewer = viewer.signals.includes('traces');
           if (chartType !== 'table' && viewerSupportsMetricCharts(viewer)) {
             renderChart(chartType, viewer.entries, viewer.lookback_ms);
@@ -1925,17 +2245,22 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           return;
         }
 
+        const filters = readFiltersFromBuilder(filterRowsContainer);
+
         createViewerButton.disabled = true;
         setStatus('working', `Creating ${signal} viewer "${name}"...`);
 
         try {
+          const body = { name, signal, chart_type };
+          if (query) body.query = query;
+          if (filters !== null) { body.filters = filters; body.filter_mode = readFilterMode(filterModeAndBtn); }
           const response = await fetch('/api/viewers', {
             method: 'POST',
             headers: {
               'content-type': 'application/json',
               'accept': 'application/json'
             },
-            body: JSON.stringify({ name, signal, chart_type, query })
+            body: JSON.stringify(body)
           });
 
           if (!response.ok) {
@@ -1954,6 +2279,14 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       async function previewViewer() {
         const signal = viewerSignalSelect.value;
         const query = viewerQueryInput.value.trim() || null;
+        const filters = readFiltersFromBuilder(filterRowsContainer);
+        const body = { signal };
+        if (query) body.query = query;
+        if (filters !== null) {
+          body.filters = filters;
+          body.filter_mode = readFilterMode(filterModeAndBtn);
+        }
+        const hasMatcher = !!query || filters !== null;
 
         previewViewerButton.disabled = true;
         setStatus('working', 'Running preview...');
@@ -1962,7 +2295,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           const response = await fetch('/api/viewers/preview', {
             method: 'POST',
             headers: { 'content-type': 'application/json', 'accept': 'application/json' },
-            body: JSON.stringify({ signal, query })
+            body: JSON.stringify(body)
           });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
@@ -1970,7 +2303,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           const total = data.entry_count;
           const isTrace = signal === 'traces';
           const shown = (isTrace && data.traces) ? data.traces.length : data.entries.length;
-          viewerPreviewCount.textContent = query
+          viewerPreviewCount.textContent = hasMatcher
             ? `${total} matching entries (showing ${shown})`
             : `${total} entries (showing ${shown})`;
 
@@ -2625,6 +2958,14 @@ fn dashboard_columns_from_layout(layout_json: &serde_json::Value) -> Result<u32,
     Ok(columns)
 }
 
+/// Raw filter condition sent by the client in create / patch / preview requests.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct ViewerFilterInput {
+    field: String,
+    op: String,
+    value: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateViewerRequest {
     name: String,
@@ -2633,6 +2974,10 @@ struct CreateViewerRequest {
     chart_type: String,
     #[serde(default)]
     query: Option<String>,
+    #[serde(default)]
+    filters: Option<Vec<ViewerFilterInput>>,
+    #[serde(default)]
+    filter_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2640,6 +2985,10 @@ struct PatchViewerRequest {
     chart_type: Option<String>,
     #[serde(default)]
     query: Option<String>,
+    #[serde(default)]
+    filters: Option<Vec<ViewerFilterInput>>,
+    #[serde(default)]
+    filter_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2647,12 +2996,21 @@ struct PreviewViewerRequest {
     signal: String,
     #[serde(default)]
     query: Option<String>,
+    #[serde(default)]
+    filters: Option<Vec<ViewerFilterInput>>,
+    #[serde(default)]
+    filter_mode: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct ViewerPreviewResponse {
     signal: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     query: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filters: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filter_mode: Option<String>,
     entry_count: usize,
     entries: Vec<ViewerEntryRow>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -2678,6 +3036,10 @@ struct ViewerSummary {
     chart_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     query: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filters: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filter_mode: Option<String>,
     refresh_interval_ms: u32,
     lookback_ms: i64,
     entry_count: usize,
@@ -2824,6 +3186,36 @@ fn apply_query_to_definition(definition_json: &mut serde_json::Value, query: Opt
     }
 }
 
+/// Applies filter conditions and mode to definition_json.
+/// `filters: None` → no change (keep existing).
+/// `filters: Some([])` → clear "filters" and "filter_mode".
+/// `filters: Some([...])` → set "filters"; apply filter_mode if provided.
+fn apply_filters_to_definition(
+    definition_json: &mut serde_json::Value,
+    filters: Option<&[ViewerFilterInput]>,
+    filter_mode: Option<&str>,
+) {
+    let Some(filters) = filters else { return };
+    if filters.is_empty() {
+        if let Some(o) = definition_json.as_object_mut() {
+            o.remove("filters");
+            o.remove("filter_mode");
+        }
+        return;
+    }
+    definition_json["filters"] = json!(filters);
+    if let Some(mode) = filter_mode {
+        let trimmed = mode.trim();
+        if trimmed.is_empty() {
+            if let Some(o) = definition_json.as_object_mut() {
+                o.remove("filter_mode");
+            }
+        } else {
+            definition_json["filter_mode"] = json!(trimmed);
+        }
+    }
+}
+
 async fn create_viewer(
     State(state): State<AppState>,
     Json(payload): Json<CreateViewerRequest>,
@@ -2851,6 +3243,11 @@ async fn create_viewer(
         "signal": signal_name(signal)
     });
     apply_query_to_definition(&mut definition_json, payload.query.as_deref());
+    apply_filters_to_definition(
+        &mut definition_json,
+        payload.filters.as_deref(),
+        payload.filter_mode.as_deref(),
+    );
     let definition = ViewerDefinition {
         id,
         slug: format!("viewer-{}", id.simple()),
@@ -2865,6 +3262,11 @@ async fn create_viewer(
         revision: 1,
         enabled: true,
     };
+
+    compile(definition.clone()).map_err(|e| {
+        tracing::error!("create_viewer: compile failed: {e}");
+        StatusCode::BAD_REQUEST
+    })?;
 
     viewer_store
         .insert_viewer_definition(&definition)
@@ -2898,8 +3300,14 @@ async fn patch_viewer(
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let runtime = state.require_viewer_runtime()?;
 
+    if let Some(ct) = &payload.chart_type
+        && !is_valid_chart_type(ct)
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     // Read current state under lock, then release before DB write
-    let (definition_json, layout_json, query_changed) = {
+    let (definition_json, layout_json, matcher_changed, signal_mask) = {
         let rt = runtime.lock().await;
         let (viewer, _) = rt
             .viewers()
@@ -2919,16 +3327,45 @@ async fn patch_viewer(
             return Err(StatusCode::BAD_REQUEST);
         }
         let current_query = viewer.query().map(str::to_string);
-        let mut definition_json = viewer.definition().definition_json.clone();
+        let old_def_json = &viewer.definition().definition_json;
+        let mut definition_json = old_def_json.clone();
         definition_json["kind"] = json!(new_chart_type);
         apply_query_to_definition(&mut definition_json, payload.query.as_deref());
+        apply_filters_to_definition(
+            &mut definition_json,
+            payload.filters.as_deref(),
+            payload.filter_mode.as_deref(),
+        );
         let query_changed = query_from_definition(&definition_json) != current_query;
-        if new_chart_type == current_kind && !query_changed {
+        let filters_changed = definition_json.get("filters") != old_def_json.get("filters")
+            || definition_json.get("filter_mode") != old_def_json.get("filter_mode");
+        let matcher_changed = query_changed || filters_changed;
+        if new_chart_type == current_kind && !matcher_changed {
             return Ok(StatusCode::OK);
         }
         let layout_json = viewer.definition().layout_json.clone();
-        (definition_json, layout_json, query_changed)
-    }; // lock released here
+        let signal_mask = viewer.definition().signal_mask;
+        (definition_json, layout_json, matcher_changed, signal_mask)
+    };
+
+    if matcher_changed {
+        let temp_def = ViewerDefinition {
+            id,
+            slug: String::new(),
+            name: String::new(),
+            refresh_interval_ms: DEFAULT_VIEWER_REFRESH_MS,
+            lookback_ms: DEFAULT_VIEWER_LOOKBACK_MS,
+            signal_mask,
+            definition_json: definition_json.clone(),
+            layout_json: serde_json::Value::Object(Default::default()),
+            revision: 1,
+            enabled: true,
+        };
+        compile(temp_def).map_err(|e| {
+            tracing::error!("patch_viewer: compile failed: {e}");
+            StatusCode::BAD_REQUEST
+        })?;
+    }
 
     let updated = viewer_store
         .update_viewer_definition_json(id, &definition_json, &layout_json)
@@ -2942,10 +3379,8 @@ async fn patch_viewer(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    // Re-acquire lock to update in-memory state.
-    // When the query changes, rebuild from scratch to evict stale entries.
     let mut rt = runtime.lock().await;
-    if query_changed {
+    if matcher_changed {
         rt.rebuild_viewer(id, definition_json, layout_json)
             .await
             .map_err(|error| {
@@ -2970,6 +3405,11 @@ async fn preview_viewer(
         "signal": signal_name(signal)
     });
     apply_query_to_definition(&mut definition_json, payload.query.as_deref());
+    apply_filters_to_definition(
+        &mut definition_json,
+        payload.filters.as_deref(),
+        payload.filter_mode.as_deref(),
+    );
 
     let temp_def = ViewerDefinition {
         id: Uuid::new_v4(),
@@ -3020,16 +3460,22 @@ async fn preview_viewer(
         vec![]
     };
 
-    let query = viewer
-        .definition()
-        .definition_json
+    let def_json = &viewer.definition().definition_json;
+    let query = def_json
         .get("query")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let filters = def_json.get("filters").cloned();
+    let filter_mode = def_json
+        .get("filter_mode")
         .and_then(|v| v.as_str())
         .map(str::to_string);
 
     Ok(Json(ViewerPreviewResponse {
         signal: signal_name(signal).to_string(),
         query,
+        filters,
+        filter_mode,
         entry_count: viewer_state.entries.len(),
         entries: entry_rows,
         traces,
@@ -3431,6 +3877,12 @@ fn viewer_summary(
         .get("query")
         .and_then(|v| v.as_str())
         .map(str::to_string);
+    let filters = definition.definition_json.get("filters").cloned();
+    let filter_mode = definition
+        .definition_json
+        .get("filter_mode")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
 
     let entries = if include_entries {
         map_entries_to_rows(
@@ -3451,6 +3903,8 @@ fn viewer_summary(
         signals: signal_mask_labels(definition.signal_mask),
         chart_type,
         query,
+        filters,
+        filter_mode,
         refresh_interval_ms: definition.refresh_interval_ms,
         lookback_ms: definition.lookback_ms,
         entry_count: viewer_state.entries.len(),
@@ -4396,6 +4850,117 @@ mod tests {
         assert!(!html.contains("data.columns || 2"));
         assert!(!html.contains("dash.columns || 2"));
         assert!(!html.contains("Number.parseInt(input.value, 10)"));
+    }
+    #[tokio::test]
+    async fn test_root_contains_filter_ui_elements() {
+        let (_, html) = index_html().await;
+
+        // create form filter elements
+        assert!(
+            html.contains("filter-rows-container"),
+            "create form filter rows container must be present"
+        );
+        assert!(
+            html.contains("add-filter-button"),
+            "create form add filter button must be present"
+        );
+        assert!(
+            html.contains("filter-mode-toggle"),
+            "create form filter mode toggle must be present"
+        );
+        assert!(
+            html.contains("filter-mode-and"),
+            "create form AND button must be present"
+        );
+        assert!(
+            html.contains("filter-mode-or"),
+            "create form OR button must be present"
+        );
+
+        // viewer detail filter elements
+        assert!(
+            html.contains("viewer-filter-badges"),
+            "detail filter badges container must be present"
+        );
+        assert!(
+            html.contains("viewer-filter-section"),
+            "detail filter section must be present"
+        );
+        assert!(
+            html.contains("detail-filter-mode-toggle"),
+            "detail filter mode toggle must be present"
+        );
+        assert!(
+            html.contains("detail-filter-rows-container"),
+            "detail filter rows container must be present"
+        );
+        assert!(
+            html.contains("detail-add-filter-button"),
+            "detail add filter button must be present"
+        );
+        assert!(
+            html.contains("detail-save-filters-button"),
+            "detail save filters button must be present"
+        );
+    }
+
+    #[test]
+    fn test_apply_filters_to_definition_sets_filters_and_mode() {
+        let mut def = json!({});
+        let filters = vec![ViewerFilterInput {
+            field: "service_name".into(),
+            op: "eq".into(),
+            value: "svc-a".into(),
+        }];
+        apply_filters_to_definition(&mut def, Some(&filters), Some("or"));
+        assert_eq!(def["filters"][0]["field"], "service_name");
+        assert_eq!(def["filters"][0]["op"], "eq");
+        assert_eq!(def["filters"][0]["value"], "svc-a");
+        assert_eq!(def["filter_mode"], "or");
+    }
+
+    #[test]
+    fn test_apply_filters_to_definition_empty_mode_removes_filter_mode() {
+        let mut def = json!({ "filter_mode": "or" });
+        let filters = vec![ViewerFilterInput {
+            field: "service_name".into(),
+            op: "eq".into(),
+            value: "x".into(),
+        }];
+        apply_filters_to_definition(&mut def, Some(&filters), Some(""));
+        assert_eq!(def["filters"][0]["value"], "x");
+        assert!(
+            def.get("filter_mode").is_none(),
+            "empty mode string should remove filter_mode"
+        );
+    }
+
+    #[test]
+    fn test_apply_filters_to_definition_empty_slice_removes_filters_and_mode() {
+        let mut def = json!({ "filters": [{"field":"service_name","op":"eq","value":"x"}], "filter_mode": "and" });
+        apply_filters_to_definition(&mut def, Some(&[]), Some("and"));
+        assert!(
+            def.get("filters").is_none(),
+            "empty filters slice should remove filters key"
+        );
+        assert!(
+            def.get("filter_mode").is_none(),
+            "empty filters slice should remove filter_mode key"
+        );
+    }
+
+    #[test]
+    fn test_apply_filters_to_definition_none_does_not_touch_existing() {
+        let mut def = json!({ "filters": [{"field":"service_name","op":"eq","value":"existing"}], "filter_mode": "or" });
+        apply_filters_to_definition(&mut def, None, None);
+        assert_eq!(
+            def["filters"][0]["value"], "existing",
+            "None filters should leave existing filters untouched"
+        );
+        assert_eq!(
+            def["filter_mode"], "or",
+            "None filters should leave existing filter_mode untouched"
+        );
     }
 
     #[tokio::test]
