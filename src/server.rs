@@ -857,6 +857,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             <option value="table">Table</option>
             <option value="stacked_bar">Stacked Bar</option>
             <option value="line">Line</option>
+            <option value="area">Area</option>
           </select>
           <input id="viewer-name-input" data-testid="viewer-name-input" name="viewer-name" placeholder="checkout traces" maxlength="80" style="max-width: 200px;" />
           <input id="viewer-query-input" data-testid="viewer-query-input" name="viewer-query"
@@ -1162,9 +1163,25 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       }
 
       const VIEWER_PLACEHOLDERS = { traces: 'checkout traces', metrics: 'orders metrics', logs: 'billing logs' };
-      const CHART_TYPE_LABELS = { table: 'Table', stacked_bar: 'Stacked Bar', line: 'Line' };
+      const CHART_TYPE_LABELS = { table: 'Table', stacked_bar: 'Stacked Bar', line: 'Line', area: 'Area' };
       const MIN_DASHBOARD_COLUMNS = 1;
       const MAX_DASHBOARD_COLUMNS = 4;
+
+      function readViewerPlaceholder(signal) {
+        const placeholder = VIEWER_PLACEHOLDERS[signal];
+        if (typeof placeholder !== 'string') {
+          throw new Error('Viewer create form is missing a valid signal.');
+        }
+        return placeholder;
+      }
+
+      function chartTypeLabel(chartType) {
+        const label = CHART_TYPE_LABELS[chartType];
+        if (typeof label !== 'string') {
+          throw new Error('Unknown chart type.');
+        }
+        return label;
+      }
 
       function readViewerChartType(viewer) {
         const chartType = viewer.chart_type;
@@ -1198,7 +1215,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
       function syncCreateForm() {
         const signal = viewerSignalSelect.value;
-        viewerNameInput.placeholder = VIEWER_PLACEHOLDERS[signal] || signal;
+        viewerNameInput.placeholder = readViewerPlaceholder(signal);
         const isMetrics = signal === 'metrics';
         viewerChartTypeSelect.disabled = !isMetrics;
         if (!isMetrics) {
@@ -1276,7 +1293,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             }
             sel.addEventListener('change', (e) => {
               e.stopPropagation();
-              patchViewer(viewer.id, { chart_type: sel.value }, `Chart type updated to ${CHART_TYPE_LABELS[sel.value] || sel.value}.`);
+              patchViewer(viewer.id, { chart_type: sel.value }, `Chart type updated to ${chartTypeLabel(sel.value)}.`);
             });
             sel.addEventListener('click', (e) => e.stopPropagation());
             chartCell.appendChild(sel);
@@ -1318,10 +1335,11 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         return new Date(Math.floor(t / bucketMs) * bucketMs).toISOString();
       }
 
-      function buildChartData(entries, lookbackMs) {
+      function buildChartData(entries, lookbackMs, chartType) {
         const bucketMs = getBucketSizeMs(lookbackMs);
         const grouped = {};
         const allBuckets = new Set();
+        const isArea = chartType === 'area';
 
         for (const entry of entries) {
           const key = bucketKey(entry.observed_at, bucketMs);
@@ -1337,10 +1355,10 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           return {
             label: series,
             data: labels.map(l => buckets[l] || 0),
-            backgroundColor: `hsla(${hue}, 60%, 55%, 0.7)`,
+            backgroundColor: `hsla(${hue}, 60%, 55%, ${isArea ? '0.3' : '0.7'})`,
             borderColor: `hsl(${hue}, 60%, 45%)`,
             borderWidth: 1,
-            fill: false,
+            fill: isArea,
           };
         });
 
@@ -1351,6 +1369,11 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           }),
           datasets,
         };
+      }
+
+      function resolveChartConfig(chartType) {
+        const isStacked = chartType === 'stacked_bar';
+        return { type: isStacked ? 'bar' : 'line', isStacked };
       }
 
       function renderChart(chartType, entries, lookbackMs) {
@@ -1365,9 +1388,8 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
 
         viewerChartContainer.hidden = false;
-        const data = buildChartData(entries, lookbackMs);
-        const isStacked = chartType === 'stacked_bar';
-        const type = isStacked ? 'bar' : 'line';
+        const data = buildChartData(entries, lookbackMs, chartType);
+        const { type, isStacked } = resolveChartConfig(chartType);
 
         currentChart = new Chart(viewerChartCanvas, {
           type,
@@ -1954,11 +1976,11 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       }
 
       function renderPanelChart(chartType, entries, lookbackMs, canvas) {
-        const data = buildChartData(entries, lookbackMs);
+        const data = buildChartData(entries, lookbackMs, chartType);
         if (!data.datasets.length) return null;
-        const isStacked = chartType === 'stacked_bar';
+        const { type, isStacked } = resolveChartConfig(chartType);
         return new Chart(canvas, {
-          type: isStacked ? 'bar' : 'line',
+          type,
           data,
           options: {
             responsive: true,
@@ -2293,7 +2315,15 @@ fn default_chart_type() -> String {
 }
 
 fn is_valid_chart_type(chart_type: &str) -> bool {
-    matches!(chart_type, "table" | "stacked_bar" | "line")
+    matches!(chart_type, "table" | "stacked_bar" | "line" | "area")
+}
+
+fn is_chart_type_supported_for_signal_mask(chart_type: &str, signal_mask: SignalMask) -> bool {
+    match chart_type {
+        "table" => true,
+        "stacked_bar" | "line" | "area" => signal_mask == Signal::Metrics.into(),
+        _ => false,
+    }
 }
 
 fn chart_type_from_definition(definition_json: &serde_json::Value) -> Result<&str, &'static str> {
@@ -2555,7 +2585,7 @@ async fn create_viewer(
 
     let signal = parse_signal_name(payload.signal.trim()).ok_or(StatusCode::BAD_REQUEST)?;
 
-    if !is_valid_chart_type(&payload.chart_type) {
+    if !is_chart_type_supported_for_signal_mask(&payload.chart_type, signal.into()) {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -2634,6 +2664,10 @@ async fn patch_viewer(
             })?;
 
         let new_chart_type = payload.chart_type.as_deref().unwrap_or(current_kind);
+        if !is_chart_type_supported_for_signal_mask(new_chart_type, viewer.definition().signal_mask)
+        {
+            return Err(StatusCode::BAD_REQUEST);
+        }
         let current_query = viewer.query().map(str::to_string);
         let mut definition_json = viewer.definition().definition_json.clone();
         definition_json["kind"] = json!(new_chart_type);
@@ -3755,8 +3789,57 @@ mod tests {
             chart_type_from_definition(&serde_json::json!({ "kind": "line" })).unwrap(),
             "line"
         );
+        assert_eq!(
+            chart_type_from_definition(&serde_json::json!({ "kind": "area" })).unwrap(),
+            "area"
+        );
         assert!(chart_type_from_definition(&serde_json::json!({ "kind": 1 })).is_err());
         assert!(chart_type_from_definition(&serde_json::json!({ "kind": "heatmap" })).is_err());
+    }
+
+    #[test]
+    fn test_chart_type_support_is_metrics_only_for_non_table_views() {
+        let metrics_only = Signal::Metrics.into();
+        let traces_only = Signal::Traces.into();
+        let logs_only = Signal::Logs.into();
+
+        assert!(is_chart_type_supported_for_signal_mask(
+            "table",
+            metrics_only
+        ));
+        assert!(is_chart_type_supported_for_signal_mask(
+            "table",
+            traces_only
+        ));
+        assert!(is_chart_type_supported_for_signal_mask("table", logs_only));
+        assert!(is_chart_type_supported_for_signal_mask(
+            "line",
+            metrics_only
+        ));
+        assert!(is_chart_type_supported_for_signal_mask(
+            "stacked_bar",
+            metrics_only
+        ));
+        assert!(is_chart_type_supported_for_signal_mask(
+            "area",
+            metrics_only
+        ));
+        assert!(!is_chart_type_supported_for_signal_mask(
+            "line",
+            traces_only
+        ));
+        assert!(!is_chart_type_supported_for_signal_mask(
+            "stacked_bar",
+            logs_only
+        ));
+        assert!(!is_chart_type_supported_for_signal_mask(
+            "area",
+            traces_only
+        ));
+        assert!(!is_chart_type_supported_for_signal_mask(
+            "pie",
+            metrics_only
+        ));
     }
 
     #[test]
@@ -3827,6 +3910,29 @@ mod tests {
         assert!(html.contains("sidebar-toggle"));
         assert!(html.contains("viewer-sortable-item"));
         assert!(html.contains("viewer-drag-handle"));
+    }
+
+    #[tokio::test]
+    async fn test_root_exposes_area_chart_type_in_metrics_ui() {
+        let (_, html) = index_html().await;
+
+        assert!(html.contains("<option value=\"area\">Area</option>"));
+        assert!(html.contains("area: 'Area'"));
+    }
+
+    #[tokio::test]
+    async fn test_root_contains_area_chart_rendering_branch() {
+        let (_, html) = index_html().await;
+        assert!(html.contains("function buildChartData(entries, lookbackMs, chartType) {"));
+        assert!(html.contains("const isArea = chartType === 'area';"));
+        assert!(html.contains("fill: isArea"));
+        assert!(html.contains("${isArea ? '0.3' : '0.7'}"));
+        assert!(html.contains("function resolveChartConfig(chartType) {"));
+        assert!(html.contains("buildChartData(entries, lookbackMs, chartType)"));
+        assert!(html.contains("resolveChartConfig(chartType)"));
+        assert!(
+            html.contains("function renderPanelChart(chartType, entries, lookbackMs, canvas) {")
+        );
     }
 
     #[tokio::test]
@@ -3948,10 +4054,14 @@ mod tests {
         let (_, html) = index_html().await;
 
         assert!(html.contains("readViewerChartType(viewer)"));
+        assert!(html.contains("readViewerPlaceholder(signal)"));
+        assert!(html.contains("chartTypeLabel(chartType)"));
         assert!(html.contains("readDashboardColumns(data.columns)"));
         assert!(html.contains("const value = Number(input.value);"));
         assert!(!html.contains("viewer.chart_type || 'table'"));
         assert!(!html.contains("v.chart_type || 'table'"));
+        assert!(!html.contains("VIEWER_PLACEHOLDERS[signal] || signal"));
+        assert!(!html.contains("CHART_TYPE_LABELS[chartType] || chartType"));
         assert!(!html.contains("data.columns || 2"));
         assert!(!html.contains("dash.columns || 2"));
         assert!(!html.contains("Number.parseInt(input.value, 10)"));
