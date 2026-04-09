@@ -5,14 +5,18 @@ use bytes::Bytes;
 ///
 /// Lexicographic string comparison is incorrect when seq exceeds one digit (`"10" < "9"`),
 /// so numeric comparison is required.
+pub(crate) fn parse_stream_id(id: &str) -> Option<(u64, u64)> {
+    let (ms, seq) = id.split_once('-')?;
+    Some((ms.parse().ok()?, seq.parse().ok()?))
+}
+
 pub fn cmp_stream_id(a: &str, b: &str) -> std::cmp::Ordering {
-    fn parse(s: &str) -> (u64, u64) {
-        let mut p = s.splitn(2, '-');
-        let ms = p.next().and_then(|x| x.parse().ok()).unwrap_or(0);
-        let seq = p.next().and_then(|x| x.parse().ok()).unwrap_or(0);
-        (ms, seq)
+    fn expect_stream_id_parts(id: &str) -> (u64, u64) {
+        parse_stream_id(id)
+            .unwrap_or_else(|| panic!("invalid Redis stream ID {id:?}; expected <ms>-<seq>"))
     }
-    parse(a).cmp(&parse(b))
+
+    expect_stream_id_parts(a).cmp(&expect_stream_id_parts(b))
 }
 
 /// Returns the Redis stream key name corresponding to the given signal.
@@ -184,5 +188,27 @@ mod tests {
                 "key {key:?} should start with 'lt:stream:'"
             );
         }
+    }
+
+    #[test]
+    fn test_cmp_stream_id_uses_numeric_sequence_order() {
+        assert!(cmp_stream_id("1710000000000-10", "1710000000000-9").is_gt());
+    }
+
+    #[test]
+    fn test_parse_stream_id_rejects_invalid_ids() {
+        assert_eq!(
+            parse_stream_id("1710000000000-1"),
+            Some((1_710_000_000_000, 1))
+        );
+        assert_eq!(parse_stream_id("1710000000000"), None);
+        assert_eq!(parse_stream_id("1710000000000-"), None);
+        assert_eq!(parse_stream_id("abc-1"), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid Redis stream ID")]
+    fn test_cmp_stream_id_panics_for_invalid_ids() {
+        let _ = cmp_stream_id("invalid", "1710000000000-1");
     }
 }
