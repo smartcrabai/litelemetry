@@ -1,7 +1,7 @@
 use crate::domain::telemetry::Signal;
 use crate::domain::viewer::ViewerDefinition;
 use crate::storage::postgres::ViewerSnapshotRow;
-use crate::storage::redis::cmp_stream_id;
+use crate::storage::redis::{cmp_stream_id, parse_stream_id};
 use crate::storage::{StorageError, StreamStore, ViewerStore};
 use crate::viewer_runtime::compiler::{CompileError, CompiledViewer, compile};
 use crate::viewer_runtime::reducer::{apply_entry, prune_stale_buckets};
@@ -27,6 +27,29 @@ pub struct ViewerRuntime {
     viewers: Vec<(CompiledViewer, ViewerState)>,
     stream_store: StreamStore,
     viewer_store: ViewerStore,
+}
+
+fn sanitize_stream_cursor(viewer_id: Uuid, mut cursor: StreamCursor) -> StreamCursor {
+    for signal in Signal::all() {
+        let Some(cursor_id) = cursor.get(signal).map(str::to_string) else {
+            continue;
+        };
+        if parse_stream_id(&cursor_id).is_some() {
+            continue;
+        }
+
+        let signal_name = match signal {
+            Signal::Traces => "traces",
+            Signal::Metrics => "metrics",
+            Signal::Logs => "logs",
+        };
+        tracing::warn!(
+            "viewer {viewer_id}: invalid snapshot cursor {cursor_id:?} for {signal_name}, clearing it"
+        );
+        cursor.clear(signal);
+    }
+
+    cursor
 }
 
 impl ViewerRuntime {
@@ -79,7 +102,7 @@ impl ViewerRuntime {
             };
 
             let mut state = ViewerState::new(def_id, def_revision);
-            state.last_cursor = cursor;
+            state.last_cursor = sanitize_stream_cursor(def_id, cursor);
             viewers.push((viewer, state));
         }
 
@@ -281,4 +304,24 @@ async fn fan_out_signal_entries(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_stream_cursor_clears_only_invalid_ids() {
+        let cursor = StreamCursor {
+            traces: Some("1710000000000-1".to_string()),
+            metrics: Some("not-a-stream-id".to_string()),
+            logs: Some("1710000000000-2".to_string()),
+        };
+
+        let sanitized = sanitize_stream_cursor(Uuid::nil(), cursor);
+
+        assert_eq!(sanitized.traces.as_deref(), Some("1710000000000-1"));
+        assert_eq!(sanitized.metrics, None);
+        assert_eq!(sanitized.logs.as_deref(), Some("1710000000000-2"));
+    }
 }

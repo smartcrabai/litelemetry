@@ -23,6 +23,7 @@ async fn main() {
         .init();
 
     let port: u16 = std::env::var("HTTP_PORT")
+        .or_else(|_| std::env::var("PORT"))
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(DEFAULT_HTTP_PORT);

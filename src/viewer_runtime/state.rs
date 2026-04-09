@@ -20,6 +20,14 @@ impl StreamCursor {
         }
     }
 
+    pub fn clear(&mut self, signal: Signal) {
+        match signal {
+            Signal::Traces => self.traces = None,
+            Signal::Metrics => self.metrics = None,
+            Signal::Logs => self.logs = None,
+        }
+    }
+
     pub fn set(&mut self, signal: Signal, id: String) {
         match signal {
             Signal::Traces => self.traces = Some(id),
