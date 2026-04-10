@@ -580,14 +580,45 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       /* --- Dashboard page --- */
       .dashboard-page-header {
         display: flex;
-        align-items: center;
+        align-items: flex-start;
+        justify-content: space-between;
+        flex-wrap: wrap;
         gap: 16px;
         padding: 8px 0;
+      }
+
+      .dashboard-page-title-wrap {
+        display: grid;
+        gap: 6px;
+        flex: 1;
+        min-width: 220px;
       }
 
       .dashboard-page-header h2 {
         font-size: clamp(1.4rem, 2vw, 2rem);
         flex: 1;
+        margin: 0;
+      }
+
+      .dashboard-refresh-controls {
+        justify-content: flex-end;
+      }
+
+      .dashboard-refresh-controls label {
+        display: grid;
+        gap: 6px;
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+
+      .dashboard-refresh-controls select {
+        width: auto;
+        min-width: 92px;
+      }
+
+      .dashboard-last-updated {
+        color: var(--muted);
+        font-size: 0.85rem;
       }
 
       .dashboard-grid {
@@ -644,6 +675,15 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         main.with-sidebar {
           margin-left: 0;
           width: min(1200px, calc(100% - 48px));
+        }
+
+        .dashboard-page-header {
+          flex-direction: column;
+          align-items: stretch;
+        }
+
+        .dashboard-refresh-controls {
+          justify-content: flex-start;
         }
 
         .dashboard-grid {
@@ -1180,8 +1220,25 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
       <div id="page-dashboard" hidden>
         <div class="dashboard-page-header">
-          <h2 id="dashboard-title"></h2>
-          <button id="dashboard-settings-button" class="secondary" type="button" hidden>Settings</button>
+          <div class="dashboard-page-title-wrap">
+            <h2 id="dashboard-title"></h2>
+            <span id="dashboard-last-updated" class="dashboard-last-updated">Last updated: --</span>
+          </div>
+          <div class="toolbar-row dashboard-refresh-controls">
+            <label for="dashboard-refresh-interval">
+              Auto refresh
+              <select id="dashboard-refresh-interval">
+                <option value="off">Off</option>
+                <option value="5000">5s</option>
+                <option value="10000">10s</option>
+                <option value="30000" selected>30s</option>
+                <option value="60000">60s</option>
+              </select>
+            </label>
+            <button id="dashboard-refresh-toggle" class="secondary btn-compact" type="button">Pause</button>
+            <button id="dashboard-refresh-button" class="secondary btn-compact" type="button">Refresh now</button>
+            <button id="dashboard-settings-button" class="secondary" type="button" hidden>Settings</button>
+          </div>
         </div>
         <div id="dashboard-grid" class="dashboard-grid"></div>
       </div><!-- #page-dashboard -->
@@ -1638,6 +1695,95 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           return null;
         }
         return value;
+      }
+
+      function readDashboardRefreshInterval(value) {
+        if (value === DASHBOARD_REFRESH_OFF_VALUE) {
+          return null;
+        }
+
+        const interval = Number(value);
+        if (!Number.isInteger(interval) || interval <= 0) {
+          throw new Error('Dashboard refresh interval must be a positive integer or Off.');
+        }
+        return interval;
+      }
+
+      function formatDashboardRefreshTime(date) {
+        return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      }
+
+      function setDashboardLastUpdated(dateOrNull) {
+        dashboardLastUpdatedLabel.textContent = dateOrNull
+          ? `Last updated: ${formatDashboardRefreshTime(dateOrNull)}`
+          : 'Last updated: --';
+      }
+
+      function stopDashboardRefresh() {
+        if (dashboardRefreshTimer !== null) {
+          clearInterval(dashboardRefreshTimer);
+          dashboardRefreshTimer = null;
+        }
+      }
+
+      function updateDashboardRefreshControls() {
+        const hasDashboard = currentPage === 'dashboard' && !!currentDashboardId;
+        const refreshOff = dashboardRefreshIntervalMs === null;
+
+        dashboardRefreshIntervalSelect.disabled = !hasDashboard;
+        dashboardManualRefreshButton.disabled = !hasDashboard;
+        dashboardRefreshToggleButton.disabled = !hasDashboard || refreshOff;
+        dashboardRefreshToggleButton.textContent = dashboardRefreshPaused ? 'Resume' : 'Pause';
+        dashboardRefreshToggleButton.title = refreshOff
+          ? 'Auto refresh is off.'
+          : dashboardRefreshPaused
+            ? 'Resume auto refresh.'
+            : 'Pause auto refresh.';
+        dashboardRefreshToggleButton.setAttribute('aria-pressed', String(!refreshOff && dashboardRefreshPaused));
+      }
+
+      async function refreshActiveDashboard() {
+        if (dashboardRefreshRequest) {
+          return dashboardRefreshRequest;
+        }
+
+        if (currentPage !== 'dashboard' || !currentDashboardId) {
+          return false;
+        }
+
+        const dashboardId = currentDashboardId;
+        dashboardRefreshRequest = (async () => {
+          await refreshDashboardList();
+
+          if (currentPage !== 'dashboard' || !currentDashboardId || currentDashboardId !== dashboardId) {
+            return false;
+          }
+
+          return loadDashboard(currentDashboardId, { refresh: true });
+        })();
+
+        try {
+          return await dashboardRefreshRequest;
+        } finally {
+          dashboardRefreshRequest = null;
+        }
+      }
+
+      function restartDashboardRefresh({ immediate = false } = {}) {
+        stopDashboardRefresh();
+        updateDashboardRefreshControls();
+
+        if (currentPage !== 'dashboard' || !currentDashboardId || dashboardRefreshPaused || dashboardRefreshIntervalMs === null) {
+          return;
+        }
+
+        if (immediate) {
+          refreshActiveDashboard();
+        }
+
+        dashboardRefreshTimer = window.setInterval(() => {
+          refreshActiveDashboard();
+        }, dashboardRefreshIntervalMs);
       }
 
       function formatStatus(status) {
@@ -2536,11 +2682,21 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const pageDashboard = document.getElementById('page-dashboard');
       const dashboardTitle = document.getElementById('dashboard-title');
       const dashboardGrid = document.getElementById('dashboard-grid');
+      const dashboardRefreshIntervalSelect = document.getElementById('dashboard-refresh-interval');
+      const dashboardRefreshToggleButton = document.getElementById('dashboard-refresh-toggle');
+      const dashboardLastUpdatedLabel = document.getElementById('dashboard-last-updated');
+      const dashboardManualRefreshButton = document.getElementById('dashboard-refresh-button');
       const dashboardSettingsButton = document.getElementById('dashboard-settings-button');
 
       let currentPage = 'viewers';
       let currentDashboardId = null;
       let dashboardPanelCharts = [];
+      const DASHBOARD_REFRESH_OFF_VALUE = 'off';
+      let dashboardRefreshIntervalMs = 30000;
+      let dashboardRefreshRequest = null;
+      let dashboardRefreshTimer = null;
+      let dashboardRefreshPaused = false;
+      let dashboardLoadRequestSeq = 0;
 
       sidebarToggle.addEventListener('click', () => {
         sidebar.classList.toggle('open');
@@ -2555,6 +2711,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       });
 
       function navigateTo(page, dashboardId) {
+        stopDashboardRefresh();
         cancelPreview();
         currentPage = page;
         currentDashboardId = dashboardId || null;
@@ -2568,8 +2725,12 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           el.classList.toggle('active', el.dataset.id === dashboardId);
         });
 
+        updateDashboardRefreshControls();
+
         if (page === 'dashboard' && dashboardId) {
+          setDashboardLastUpdated(null);
           loadDashboard(dashboardId);
+          restartDashboardRefresh();
         }
         if (page === 'viewers') {
           previewViewer(true);
@@ -2581,6 +2742,41 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       navViewers.addEventListener('click', (e) => {
         e.preventDefault();
         navigateTo('viewers');
+      });
+
+      dashboardRefreshIntervalSelect.addEventListener('change', () => {
+        try {
+          dashboardRefreshIntervalMs = readDashboardRefreshInterval(dashboardRefreshIntervalSelect.value);
+        } catch (err) {
+          setStatus('error', `Invalid dashboard refresh interval: ${err.message}`);
+          dashboardRefreshIntervalSelect.value = dashboardRefreshIntervalMs === null
+            ? DASHBOARD_REFRESH_OFF_VALUE
+            : String(dashboardRefreshIntervalMs);
+          return;
+        }
+
+        dashboardRefreshPaused = false;
+        updateDashboardRefreshControls();
+        restartDashboardRefresh({ immediate: true });
+      });
+
+      dashboardRefreshToggleButton.addEventListener('click', () => {
+        if (dashboardRefreshIntervalMs === null) {
+          return;
+        }
+
+        dashboardRefreshPaused = !dashboardRefreshPaused;
+        updateDashboardRefreshControls();
+
+        if (dashboardRefreshPaused) {
+          stopDashboardRefresh();
+        } else {
+          restartDashboardRefresh({ immediate: true });
+        }
+      });
+
+      dashboardManualRefreshButton.addEventListener('click', () => {
+        refreshActiveDashboard();
       });
 
       // --- Dashboard list in sidebar ---------------------------------------
@@ -2621,6 +2817,8 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       }
 
       async function loadDashboard(id, { refresh = false } = {}) {
+        const seq = ++dashboardLoadRequestSeq;
+
         if (!refresh) {
           destroyPanelCharts();
           dashboardGrid.replaceChildren();
@@ -2632,6 +2830,10 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           const resp = await fetch(`/api/dashboards/${id}`, { headers: { accept: 'application/json' } });
           if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
           const data = await resp.json();
+
+          if (seq !== dashboardLoadRequestSeq || currentDashboardId !== id) {
+            return false;
+          }
 
           const sorted = [...data.panels].sort((a, b) => a.position - b.position);
           const columns = readDashboardColumns(data.columns);
@@ -2652,9 +2854,18 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             empty.innerHTML = '<p class="dashboard-panel-empty">No viewers in this dashboard yet. Use Settings to add viewers.</p>';
             dashboardGrid.appendChild(empty);
           }
+
+          setDashboardLastUpdated(new Date());
+          updateDashboardRefreshControls();
+          return true;
         } catch (err) {
+          if (seq !== dashboardLoadRequestSeq || currentDashboardId !== id) {
+            return false;
+          }
+
           if (!refresh) {
             dashboardTitle.textContent = 'Error';
+            setDashboardLastUpdated(null);
             const errEl = document.createElement('div');
             errEl.className = 'dashboard-panel';
             const msgEl = document.createElement('p');
@@ -2664,6 +2875,8 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             dashboardGrid.appendChild(errEl);
           }
         }
+
+        return false;
       }
 
       function buildPanelEl(panel) {
@@ -2904,7 +3117,9 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
             overlay.remove();
             await refreshDashboardList();
-            loadDashboard(dashboardId);
+            setDashboardLastUpdated(null);
+            await loadDashboard(dashboardId);
+            restartDashboardRefresh();
           } catch (err) {
             saveBtn.disabled = false;
           }
@@ -3016,12 +3231,8 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       // --- Polling ---------------------------------------------------------
 
       refreshDashboardList();
-      window.setInterval(() => {
-        refreshDashboardList();
-        if (currentPage === 'dashboard' && currentDashboardId) {
-          loadDashboard(currentDashboardId, { refresh: true });
-        }
-      }, 30000);
+      setDashboardLastUpdated(null);
+      updateDashboardRefreshControls();
     </script>
   </body>
 </html>
@@ -4824,6 +5035,38 @@ mod tests {
         assert!(html.contains("sidebar-toggle"));
         assert!(html.contains("viewer-sortable-item"));
         assert!(html.contains("viewer-drag-handle"));
+    }
+
+    #[tokio::test]
+    async fn test_root_returns_dashboard_refresh_controls() {
+        let (_, html) = index_html().await;
+
+        assert!(html.contains("dashboard-refresh-interval"));
+        assert!(html.contains("dashboard-refresh-toggle"));
+        assert!(html.contains("dashboard-last-updated"));
+        assert!(html.contains("dashboard-refresh-button"));
+        assert!(html.contains("<option value=\"off\">Off</option>"));
+        assert!(html.contains("<option value=\"30000\" selected>30s</option>"));
+        assert!(html.contains("Last updated: --"));
+        assert!(html.contains("Refresh now"));
+    }
+
+    #[tokio::test]
+    async fn test_root_contains_dashboard_refresh_wiring() {
+        let (_, html) = index_html().await;
+
+        assert!(html.contains("let dashboardRefreshIntervalMs = 30000;"));
+        assert!(html.contains("let dashboardRefreshRequest = null;"));
+        assert!(html.contains("let dashboardRefreshTimer = null;"));
+        assert!(html.contains("let dashboardRefreshPaused = false;"));
+        assert!(html.contains("function stopDashboardRefresh() {"));
+        assert!(html.contains("if (dashboardRefreshRequest) {"));
+        assert!(html.contains("function restartDashboardRefresh({ immediate = false } = {}) {"));
+        assert!(html.contains("dashboardRefreshIntervalSelect.addEventListener('change',"));
+        assert!(html.contains("dashboardRefreshToggleButton.addEventListener('click',"));
+        assert!(html.contains("dashboardManualRefreshButton.addEventListener('click',"));
+        assert!(html.contains("stopDashboardRefresh();"));
+        assert!(html.contains("loadDashboard(currentDashboardId, { refresh: true })"));
     }
 
     #[tokio::test]
