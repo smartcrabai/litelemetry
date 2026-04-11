@@ -1,12 +1,13 @@
-use crate::domain::telemetry::Signal;
+use crate::domain::telemetry::{NormalizedEntry, Signal};
 use crate::domain::viewer::ViewerDefinition;
+use crate::domain::viewer::ViewerStatus;
 use crate::storage::postgres::ViewerSnapshotRow;
 use crate::storage::redis::{cmp_stream_id, parse_stream_id};
 use crate::storage::{StorageError, StreamStore, ViewerStore};
 use crate::viewer_runtime::compiler::{CompileError, CompiledViewer, compile};
-use crate::viewer_runtime::reducer::{apply_entry, prune_stale_buckets};
+use crate::viewer_runtime::reducer::{apply_entry, lookback_start_index, prune_stale_buckets};
 use crate::viewer_runtime::state::{StreamCursor, ViewerState};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use std::collections::HashMap;
 use thiserror::Error;
@@ -231,6 +232,22 @@ impl ViewerRuntime {
 
     pub fn viewers(&self) -> &[(CompiledViewer, ViewerState)] {
         &self.viewers
+    }
+
+    pub fn get_dashboard_viewer(
+        &self,
+        viewer_id: &Uuid,
+        lookback_override: Option<i64>,
+        now: DateTime<Utc>,
+    ) -> Option<(&CompiledViewer, &[NormalizedEntry], &ViewerStatus, i64)> {
+        let (viewer, state) = self
+            .viewers
+            .iter()
+            .find(|(v, _)| v.definition().id == *viewer_id)?;
+        let effective_lookback = lookback_override.unwrap_or(viewer.lookback_ms());
+        let start_idx = lookback_start_index(&state.entries, effective_lookback, now);
+        let filtered_entries = &state.entries[start_idx..];
+        Some((viewer, filtered_entries, &state.status, effective_lookback))
     }
 }
 
