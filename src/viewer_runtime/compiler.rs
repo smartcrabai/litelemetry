@@ -169,7 +169,7 @@ fn eval_filter(filter: &CompiledFilter, entry: &NormalizedEntry) -> bool {
 
 /// Extracts searchable text from the payload for each signal type.
 /// Returns None if the payload is not parseable or contains no relevant fields.
-fn extract_searchable_payload_text(signal: Signal, payload: &Bytes) -> Option<String> {
+pub(crate) fn extract_searchable_payload_text(signal: Signal, payload: &Bytes) -> Option<String> {
     let value: Value = serde_json::from_slice(payload).ok()?;
     match signal {
         Signal::Traces => {
@@ -731,7 +731,7 @@ mod tests {
     fn test_filters_from_definition_empty_array_returns_none() {
         // Given: definition_json with "filters": []
         // When: filters_from_definition
-        // Then: Ok(None) — empty is treated as absent
+        // Then: Ok(None) -- empty is treated as absent
         let result = filters_from_definition(&json!({ "filters": [] }));
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
@@ -1070,7 +1070,7 @@ mod tests {
         let compiled = compile(def).unwrap();
         let entry = make_entry_with_service(Signal::Traces, "checkout-ui");
 
-        // When/Then: "checkout-ui" starts with "checkout" → regex matches
+        // When/Then: "checkout-ui" starts with "checkout" -> regex matches
         assert!(compiled.matches_entry(&entry));
     }
 
@@ -1091,7 +1091,7 @@ mod tests {
 
     #[test]
     fn test_matches_entry_filters_and_mode_all_must_match() {
-        // Given: two contains filters in AND mode — both must be satisfied
+        // Given: two contains filters in AND mode -- both must be satisfied
         let def = make_viewer_with_filters(
             Signal::Traces.into(),
             json!([
@@ -1127,7 +1127,7 @@ mod tests {
 
     #[test]
     fn test_matches_entry_filters_or_mode_any_matches() {
-        // Given: two eq filters in OR mode — any one is sufficient
+        // Given: two eq filters in OR mode -- any one is sufficient
         let def = make_viewer_with_filters(
             Signal::Traces.into(),
             json!([
@@ -1175,7 +1175,7 @@ mod tests {
         let orders_entry = make_entry_with_service(Signal::Traces, "orders-api");
         let checkout_entry = make_entry_with_service(Signal::Traces, "checkout-ui");
 
-        // When/Then: the filter wins — "orders-api" should not pass
+        // When/Then: the filter wins -- "orders-api" should not pass
         assert!(
             !compiled.matches_entry(&orders_entry),
             "filters must take priority: orders-api should not pass the checkout-ui filter"
@@ -1186,7 +1186,7 @@ mod tests {
 
     #[test]
     fn test_matches_entry_no_filters_falls_back_to_query() {
-        // Given: viewer with only a query (no filters) — existing behavior preserved
+        // Given: viewer with only a query (no filters) -- existing behavior preserved
         let compiled = compile(make_viewer_with_query(Signal::Traces.into(), "checkout")).unwrap();
 
         let checkout_entry = make_entry_with_service(Signal::Traces, "checkout-ui");

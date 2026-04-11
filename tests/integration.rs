@@ -109,6 +109,15 @@ fn make_traces_entry(age_ms: i64) -> NormalizedEntry {
     }
 }
 
+fn make_traces_entry_with_service(age_ms: i64, service_name: &str) -> NormalizedEntry {
+    NormalizedEntry {
+        signal: Signal::Traces,
+        observed_at: Utc::now() - Duration::milliseconds(age_ms),
+        service_name: Some(service_name.to_string()),
+        payload: Bytes::from_static(b"\x0a\x01\x02"),
+    }
+}
+
 fn make_trace_payload(service_name: &str, span_name: &str) -> Bytes {
     Bytes::from(
         json!({
@@ -4420,7 +4429,7 @@ async fn test_create_viewer_with_query_filters_matching_entries_memory() {
     );
 }
 
-/// Create viewer with `filters` (AND mode) — only entries matching all filters appear
+/// Create viewer with `filters` (AND mode) -- only entries matching all filters appear
 #[tokio::test]
 async fn test_create_viewer_with_filters_and_mode_memory() {
     let env = setup_memory_viewer_app().await;
@@ -4510,7 +4519,7 @@ async fn test_create_viewer_with_filters_and_mode_memory() {
     assert_eq!(viewer["filters"][0]["op"], "eq");
 }
 
-/// Create viewer with `filters` (OR mode) — entries matching any filter appear
+/// Create viewer with `filters` (OR mode) -- entries matching any filter appear
 #[tokio::test]
 async fn test_create_viewer_with_filters_or_mode_memory() {
     let env = setup_memory_viewer_app().await;
@@ -4593,7 +4602,7 @@ async fn test_create_viewer_with_filters_or_mode_memory() {
     assert_eq!(viewer["filter_mode"], "or");
 }
 
-/// Preview viewer with filters — filters apply to preview results
+/// Preview viewer with filters -- filters apply to preview results
 #[tokio::test]
 async fn test_preview_viewer_with_filters_memory() {
     let env = setup_memory_viewer_app().await;
@@ -4838,7 +4847,7 @@ async fn test_patch_viewer_remove_filters_memory() {
     .unwrap();
     let viewer: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
 
-    // Then: no filters → match-all → both entries visible
+    // Then: no filters -> match-all -> both entries visible
     assert_eq!(
         viewer["entry_count"], 2,
         "after clearing filters, all entries should match"
@@ -4849,7 +4858,7 @@ async fn test_patch_viewer_remove_filters_memory() {
     );
 }
 
-/// Create viewer with invalid regex filter — should return 400
+/// Create viewer with invalid regex filter -- should return 400
 #[tokio::test]
 async fn test_create_viewer_with_invalid_regex_returns_400_memory() {
     let env = setup_memory_viewer_app().await;
@@ -4876,7 +4885,7 @@ async fn test_create_viewer_with_invalid_regex_returns_400_memory() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-/// `query` backward compat — existing query field still filters when no filters present
+/// `query` backward compat -- existing query field still filters when no filters present
 #[tokio::test]
 async fn test_query_backward_compat_memory() {
     let env = setup_memory_viewer_app().await;
@@ -4978,7 +4987,7 @@ async fn test_filters_take_priority_over_query_memory() {
         );
     }
 
-    // query="beta" but filter=service_name eq "alpha" → filter wins, only alpha appears
+    // query="beta" but filter=service_name eq "alpha" -> filter wins, only alpha appears
     let create_body = axum::body::to_bytes(
         app.clone()
             .oneshot(
@@ -5725,5 +5734,298 @@ async fn test_index_html_contains_query_filter_and_preview_elements() {
     assert!(
         html.contains("id=\"viewer-detail-query-update\""),
         "query edit row should contain update button"
+    );
+}
+
+// --- Global filter tests ---------------------------------------------------
+
+#[tokio::test]
+async fn test_list_services_returns_unique_service_names_memory() {
+    // Given: a viewer with entries from two services (one duplicated)
+    let stream_store = MemoryStreamStore::new(100_000);
+    let viewer_store = MemoryViewerStore::new();
+
+    let def = make_viewer_def(Signal::Traces.into(), 300_000, 1);
+    viewer_store.insert_viewer_definition(&def).await.unwrap();
+
+    let mut stream_write = stream_store.clone();
+    stream_write
+        .append_entry(&make_traces_entry_with_service(10_000, "svc-a"))
+        .await
+        .unwrap();
+    stream_write
+        .append_entry(&make_traces_entry_with_service(20_000, "svc-a")) // duplicate
+        .await
+        .unwrap();
+    stream_write
+        .append_entry(&make_traces_entry_with_service(30_000, "svc-b"))
+        .await
+        .unwrap();
+
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Memory(viewer_store.clone()),
+        StreamStore::Memory(stream_store.clone()),
+    )
+    .await
+    .unwrap();
+    let runtime = Arc::new(Mutex::new(runtime));
+
+    let app = build_app_with_services(
+        StreamStore::Memory(stream_store),
+        Some(ViewerStore::Memory(viewer_store)),
+        Some(runtime),
+    );
+
+    // When: GET /api/services
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/services")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Then: unique, sorted service names are returned
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let services = payload["services"].as_array().unwrap();
+    assert_eq!(services.len(), 2, "should deduplicate service names");
+    assert_eq!(
+        services[0].as_str().unwrap(),
+        "svc-a",
+        "should be sorted alphabetically"
+    );
+    assert_eq!(
+        services[1].as_str().unwrap(),
+        "svc-b",
+        "should be sorted alphabetically"
+    );
+}
+
+#[tokio::test]
+async fn test_get_dashboard_with_service_name_filter_memory() {
+    // Given: a viewer with 2 entries for svc-a and 1 entry for svc-b
+    let stream_store = MemoryStreamStore::new(100_000);
+    let viewer_store = MemoryViewerStore::new();
+
+    let def = make_viewer_def(Signal::Traces.into(), 300_000, 1);
+    viewer_store.insert_viewer_definition(&def).await.unwrap();
+
+    let mut stream_write = stream_store.clone();
+    stream_write
+        .append_entry(&make_traces_entry_with_service(10_000, "svc-a"))
+        .await
+        .unwrap();
+    stream_write
+        .append_entry(&make_traces_entry_with_service(20_000, "svc-a"))
+        .await
+        .unwrap();
+    stream_write
+        .append_entry(&make_traces_entry_with_service(30_000, "svc-b"))
+        .await
+        .unwrap();
+
+    let dashboard = DashboardDefinition {
+        id: Uuid::new_v4(),
+        slug: "test-service-filter".to_string(),
+        name: "Test Service Filter".to_string(),
+        layout_json: json!({ "panels": [{ "viewer_id": def.id, "position": 0 }] }),
+        revision: 1,
+        enabled: true,
+    };
+    viewer_store.insert_dashboard(&dashboard).await.unwrap();
+    let dashboard_id = dashboard.id;
+
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Memory(viewer_store.clone()),
+        StreamStore::Memory(stream_store.clone()),
+    )
+    .await
+    .unwrap();
+    let runtime = Arc::new(Mutex::new(runtime));
+
+    let app = build_app_with_services(
+        StreamStore::Memory(stream_store),
+        Some(ViewerStore::Memory(viewer_store)),
+        Some(runtime),
+    );
+
+    // When: GET /api/dashboards/{id}?service_name=svc-a
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/dashboards/{dashboard_id}?service_name=svc-a"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Then: only the 2 svc-a entries are counted
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let panels = payload["panels"].as_array().unwrap();
+    assert_eq!(panels.len(), 1);
+    assert_eq!(
+        panels[0]["viewer"]["entry_count"], 2,
+        "service_name=svc-a should include only the 2 svc-a entries"
+    );
+}
+
+#[tokio::test]
+async fn test_get_dashboard_with_query_filter_matches_service_name_memory() {
+    // Given: a viewer with entries from svc-alpha and svc-beta
+    let stream_store = MemoryStreamStore::new(100_000);
+    let viewer_store = MemoryViewerStore::new();
+
+    let def = make_viewer_def(Signal::Traces.into(), 300_000, 1);
+    viewer_store.insert_viewer_definition(&def).await.unwrap();
+
+    let mut stream_write = stream_store.clone();
+    stream_write
+        .append_entry(&make_traces_entry_with_service(10_000, "svc-alpha"))
+        .await
+        .unwrap();
+    stream_write
+        .append_entry(&make_traces_entry_with_service(20_000, "svc-beta"))
+        .await
+        .unwrap();
+
+    let dashboard = DashboardDefinition {
+        id: Uuid::new_v4(),
+        slug: "test-query-svcname".to_string(),
+        name: "Test Query Service Name".to_string(),
+        layout_json: json!({ "panels": [{ "viewer_id": def.id, "position": 0 }] }),
+        revision: 1,
+        enabled: true,
+    };
+    viewer_store.insert_dashboard(&dashboard).await.unwrap();
+    let dashboard_id = dashboard.id;
+
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Memory(viewer_store.clone()),
+        StreamStore::Memory(stream_store.clone()),
+    )
+    .await
+    .unwrap();
+    let runtime = Arc::new(Mutex::new(runtime));
+
+    let app = build_app_with_services(
+        StreamStore::Memory(stream_store),
+        Some(ViewerStore::Memory(viewer_store)),
+        Some(runtime),
+    );
+
+    // When: GET /api/dashboards/{id}?query=alpha  (partial match on service name)
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/dashboards/{dashboard_id}?query=alpha"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Then: only the svc-alpha entry is returned
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let panels = payload["panels"].as_array().unwrap();
+    assert_eq!(panels.len(), 1);
+    assert_eq!(
+        panels[0]["viewer"]["entry_count"], 1,
+        "query=alpha should match only the svc-alpha entry via service name"
+    );
+}
+
+#[tokio::test]
+async fn test_get_dashboard_with_query_filter_matches_payload_text_memory() {
+    // Given: a viewer with entries whose span names differ
+    let stream_store = MemoryStreamStore::new(100_000);
+    let viewer_store = MemoryViewerStore::new();
+
+    let def = make_viewer_def(Signal::Traces.into(), 300_000, 1);
+    viewer_store.insert_viewer_definition(&def).await.unwrap();
+
+    let mut stream_write = stream_store.clone();
+    // Entry with span name "grpc.order.create" -- should match query "grpc.order"
+    stream_write
+        .append_entry(&NormalizedEntry {
+            signal: Signal::Traces,
+            observed_at: Utc::now() - Duration::milliseconds(10_000),
+            service_name: Some("svc-a".to_string()),
+            payload: make_trace_payload("svc-a", "grpc.order.create"),
+        })
+        .await
+        .unwrap();
+    // Entry with span name "http.checkout" -- should not match query "grpc.order"
+    stream_write
+        .append_entry(&NormalizedEntry {
+            signal: Signal::Traces,
+            observed_at: Utc::now() - Duration::milliseconds(20_000),
+            service_name: Some("svc-b".to_string()),
+            payload: make_trace_payload("svc-b", "http.checkout"),
+        })
+        .await
+        .unwrap();
+
+    let dashboard = DashboardDefinition {
+        id: Uuid::new_v4(),
+        slug: "test-query-payload".to_string(),
+        name: "Test Query Payload Text".to_string(),
+        layout_json: json!({ "panels": [{ "viewer_id": def.id, "position": 0 }] }),
+        revision: 1,
+        enabled: true,
+    };
+    viewer_store.insert_dashboard(&dashboard).await.unwrap();
+    let dashboard_id = dashboard.id;
+
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Memory(viewer_store.clone()),
+        StreamStore::Memory(stream_store.clone()),
+    )
+    .await
+    .unwrap();
+    let runtime = Arc::new(Mutex::new(runtime));
+
+    let app = build_app_with_services(
+        StreamStore::Memory(stream_store),
+        Some(ViewerStore::Memory(viewer_store)),
+        Some(runtime),
+    );
+
+    // When: GET /api/dashboards/{id}?query=grpc.order  (partial match on span name)
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/dashboards/{dashboard_id}?query=grpc.order"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Then: only the entry with span "grpc.order.create" is returned
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let panels = payload["panels"].as_array().unwrap();
+    assert_eq!(panels.len(), 1);
+    assert_eq!(
+        panels[0]["viewer"]["entry_count"], 1,
+        "query=grpc.order should match only the entry with span name grpc.order.create"
     );
 }

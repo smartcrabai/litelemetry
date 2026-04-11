@@ -9,7 +9,7 @@ use crate::viewer_runtime::reducer::{apply_entry, lookback_start_index, prune_st
 use crate::viewer_runtime::state::{StreamCursor, ViewerState};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -232,6 +232,18 @@ impl ViewerRuntime {
 
     pub fn viewers(&self) -> &[(CompiledViewer, ViewerState)] {
         &self.viewers
+    }
+
+    pub fn collect_service_names(&self) -> Vec<String> {
+        let mut names: BTreeSet<String> = BTreeSet::new();
+        for (_, state) in &self.viewers {
+            for entry in &state.entries {
+                if let Some(ref name) = entry.service_name {
+                    names.insert(name.clone());
+                }
+            }
+        }
+        names.into_iter().collect()
     }
 
     pub fn get_dashboard_viewer(
