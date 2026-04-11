@@ -655,6 +655,46 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         font-size: 0.85rem;
       }
 
+      .dashboard-page-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .dashboard-panel-media {
+        max-height: 220px;
+      }
+
+      .dashboard-panel-scroll {
+        overflow: auto;
+        max-height: 220px;
+      }
+
+      body.fullscreen #sidebar {
+        display: none;
+      }
+
+      body.fullscreen main.with-sidebar {
+        margin-left: 0;
+        width: calc(100vw - 32px);
+        max-width: none;
+        padding: 0 16px 24px;
+      }
+
+      body.fullscreen .dashboard-page-header {
+        padding: 8px 0;
+        gap: 8px;
+      }
+
+      body.fullscreen .dashboard-grid {
+        gap: 12px;
+      }
+
+      body.fullscreen .dashboard-panel-media,
+      body.fullscreen .dashboard-panel-scroll {
+        max-height: calc(100vh - 120px);
+      }
+
       .dashboard-grid {
         display: grid;
         grid-template-columns: repeat(var(--dash-cols, 2), 1fr);
@@ -1287,6 +1327,9 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             </label>
             <button id="dashboard-refresh-toggle" class="secondary btn-compact" type="button">Pause</button>
             <button id="dashboard-refresh-button" class="secondary btn-compact" type="button">Refresh now</button>
+          </div>
+          <div id="dashboard-page-actions">
+            <button id="dashboard-fullscreen-button" class="secondary" type="button" hidden aria-label="Enter fullscreen" title="Enter fullscreen">[ ]</button>
             <button id="dashboard-settings-button" class="secondary" type="button" hidden>Settings</button>
           </div>
         </div>
@@ -2737,6 +2780,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const dashboardLastUpdatedLabel = document.getElementById('dashboard-last-updated');
       const dashboardManualRefreshButton = document.getElementById('dashboard-refresh-button');
       const dashboardSettingsButton = document.getElementById('dashboard-settings-button');
+      const dashboardFullscreenButton = document.getElementById('dashboard-fullscreen-button');
 
       let currentPage = 'viewers';
       let currentDashboardId = null;
@@ -2919,7 +2963,42 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           previewViewer(true);
         }
         sidebar.classList.remove('open');
+
+        if (page !== 'dashboard' && document.body.classList.contains('fullscreen')) {
+          exitDashboardFullscreen();
+        }
       }
+
+      function resizeDashboardPanelCharts() {
+        for (const chart of dashboardPanelCharts) {
+          try { chart.resize(); } catch (_) {}
+        }
+      }
+
+      function applyFullscreenLayout(enabled) {
+        document.body.classList.toggle('fullscreen', enabled);
+        dashboardFullscreenButton.textContent = enabled ? 'X' : '[ ]';
+        dashboardFullscreenButton.setAttribute('aria-label', enabled ? 'Exit fullscreen' : 'Enter fullscreen');
+        if (dashboardPanelCharts.length) requestAnimationFrame(resizeDashboardPanelCharts);
+      }
+
+      function enterDashboardFullscreen() {
+        document.documentElement.requestFullscreen().catch(() => {});
+      }
+
+      function exitDashboardFullscreen() {
+        document.exitFullscreen().catch(() => {});
+      }
+
+      function toggleDashboardFullscreen() {
+        document.fullscreenElement ? exitDashboardFullscreen() : enterDashboardFullscreen();
+      }
+
+      document.addEventListener('fullscreenchange', () => {
+        applyFullscreenLayout(!!document.fullscreenElement);
+      });
+
+      dashboardFullscreenButton.addEventListener('click', toggleDashboardFullscreen);
 
       dashboardRefreshIntervalSelect.addEventListener('change', () => {
         try {
@@ -2935,6 +3014,11 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         dashboardRefreshPaused = false;
         updateDashboardRefreshControls();
         restartDashboardRefresh({ immediate: true });
+      });
+
+      navViewers.addEventListener('click', (e) => {
+        e.preventDefault();
+        navigateTo('viewers');
       });
 
       dashboardRefreshToggleButton.addEventListener('click', () => {
@@ -2998,6 +3082,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           dashboardGrid.replaceChildren();
           dashboardTitle.textContent = 'Loading...';
           dashboardSettingsButton.hidden = true;
+          dashboardFullscreenButton.hidden = true;
         }
 
         try {
@@ -3024,6 +3109,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           dashboardGrid.replaceChildren();
           dashboardTitle.textContent = data.name;
           dashboardSettingsButton.hidden = false;
+          dashboardFullscreenButton.hidden = false;
           dashboardGrid.style.setProperty('--dash-cols', String(columns));
 
           for (const panel of sorted) {
@@ -3099,12 +3185,12 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
         if (chartType === 'billboard' && supportsMetricCharts) {
           const host = document.createElement('div');
-          host.style.maxHeight = '220px';
+          host.classList.add('dashboard-panel-media');
           div.appendChild(host);
           renderBillboard(v.entries, v.lookback_ms, host, { compact: true });
         } else if (chartType !== 'table' && supportsMetricCharts && v.entries.length) {
           const canvas = document.createElement('canvas');
-          canvas.style.maxHeight = '220px';
+          canvas.classList.add('dashboard-panel-media');
           div.appendChild(canvas);
           const chart = renderPanelChart(chartType, v.entries, v.lookback_ms, canvas);
           if (chart) dashboardPanelCharts.push(chart);
@@ -3146,8 +3232,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
       function buildScrollablePanelTable(container, headHtml, renderRows) {
         const wrap = document.createElement('div');
-        wrap.style.overflow = 'auto';
-        wrap.style.maxHeight = '220px';
+        wrap.classList.add('dashboard-panel-scroll');
         const table = document.createElement('table');
         table.style.width = '100%';
         table.style.fontSize = '0.8rem';
@@ -5823,5 +5908,39 @@ mod tests {
             html.contains("billboard: 'Billboard'"),
             "CHART_TYPE_LABELS must include billboard entry"
         );
+    }
+
+    #[tokio::test]
+    async fn test_root_contains_dashboard_fullscreen() {
+        let (_, html) = index_html().await;
+
+        for (needle, label) in [
+            ("dashboard-fullscreen-button", "fullscreen button"),
+            ("dashboard-page-actions", "actions wrapper"),
+            ("dashboard-panel-media", "panel media class"),
+            ("dashboard-panel-scroll", "panel scroll class"),
+            ("toggleDashboardFullscreen", "toggle function"),
+            ("requestFullscreen", "enter fullscreen API"),
+            ("exitFullscreen", "exit fullscreen API"),
+            ("fullscreenchange", "fullscreen event listener"),
+            ("chart.resize()", "chart resize on toggle"),
+            ("exitDashboardFullscreen", "cleanup helper"),
+        ] {
+            assert!(html.contains(needle), "must contain {label}");
+        }
+
+        for css in [
+            "body.fullscreen #sidebar",
+            "body.fullscreen main.with-sidebar",
+            "body.fullscreen .dashboard-page-header",
+            "body.fullscreen .dashboard-grid",
+            "body.fullscreen .dashboard-panel-media",
+            "body.fullscreen .dashboard-panel-scroll",
+        ] {
+            assert!(
+                html.contains(css),
+                "must contain fullscreen CSS rule: {css}"
+            );
+        }
     }
 }
