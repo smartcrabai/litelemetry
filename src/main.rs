@@ -7,11 +7,22 @@ use litelemetry::storage::redis::RedisStore;
 use litelemetry::storage::{StreamStore, ViewerStore};
 use litelemetry::viewer_runtime::runtime::ViewerRuntime;
 use std::time::Duration;
+use thiserror::Error;
 use tokio::sync::Mutex;
 
 const DEFAULT_HTTP_PORT: u16 = 8080;
 const DEFAULT_VIEWER_RUNTIME_POLL_MS: u64 = 1_000;
 const DEFAULT_MEMORY_STREAM_MAX_ENTRIES: usize = 100_000;
+
+#[derive(Debug, Error, PartialEq, Eq)]
+enum ConfigError {
+    #[error("{var_name} must be {expected}, got {value:?}")]
+    InvalidEnv {
+        var_name: &'static str,
+        expected: &'static str,
+        value: String,
+    },
+}
 
 #[tokio::main]
 async fn main() {
@@ -22,28 +33,26 @@ async fn main() {
         )
         .init();
 
-    let port: u16 = std::env::var("HTTP_PORT")
-        .or_else(|_| std::env::var("PORT"))
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(DEFAULT_HTTP_PORT);
-    let viewer_runtime_poll_ms: u64 = std::env::var("VIEWER_RUNTIME_POLL_MS")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(DEFAULT_VIEWER_RUNTIME_POLL_MS);
-    let standalone = std::env::var("STANDALONE")
-        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-        .unwrap_or(true);
+    let http_port = std::env::var("HTTP_PORT").ok();
+    let port = std::env::var("PORT").ok();
+    let viewer_runtime_poll_ms_raw = std::env::var("VIEWER_RUNTIME_POLL_MS").ok();
+    let standalone_raw = std::env::var("STANDALONE").ok();
+
+    let port = exit_on_config_error(read_http_port(http_port.as_deref(), port.as_deref()));
+    let viewer_runtime_poll_ms = exit_on_config_error(read_viewer_runtime_poll_ms(
+        viewer_runtime_poll_ms_raw.as_deref(),
+    ));
+    let standalone = exit_on_config_error(read_standalone(standalone_raw.as_deref()));
 
     let (stream_store, viewer_store, viewer_runtime) = if standalone {
         tracing::warn!(
             "starting in standalone (in-memory) mode; set STANDALONE=false to use persistent storage"
         );
 
-        let max_entries = std::env::var("MEMORY_STREAM_MAX_ENTRIES")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_MEMORY_STREAM_MAX_ENTRIES);
+        let memory_stream_max_entries_raw = std::env::var("MEMORY_STREAM_MAX_ENTRIES").ok();
+        let max_entries = exit_on_config_error(read_memory_stream_max_entries(
+            memory_stream_max_entries_raw.as_deref(),
+        ));
 
         let memory_viewer_store = MemoryViewerStore::new();
         let viewer_defs = default_viewer_definitions();
@@ -159,7 +168,7 @@ fn redact_redis_url_for_log(redis_url: &str) -> String {
 
 fn spawn_viewer_runtime(runtime: SharedViewerRuntime, poll_ms: u64) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(poll_ms.max(1)));
+        let mut interval = tokio::time::interval(Duration::from_millis(poll_ms));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
@@ -171,9 +180,97 @@ fn spawn_viewer_runtime(runtime: SharedViewerRuntime, poll_ms: u64) {
     });
 }
 
+fn exit_on_config_error<T>(result: Result<T, ConfigError>) -> T {
+    result.unwrap_or_else(|error| {
+        tracing::error!("{error}");
+        std::process::exit(2);
+    })
+}
+
+fn read_http_port(http_port: Option<&str>, port: Option<&str>) -> Result<u16, ConfigError> {
+    match http_port {
+        Some(value) => parse_env_with_message(
+            "HTTP_PORT",
+            Some(value),
+            DEFAULT_HTTP_PORT,
+            "a valid u16 TCP port",
+        ),
+        None => parse_env_with_message("PORT", port, DEFAULT_HTTP_PORT, "a valid u16 TCP port"),
+    }
+}
+
+fn read_viewer_runtime_poll_ms(raw: Option<&str>) -> Result<u64, ConfigError> {
+    let poll_ms = parse_env_with_message(
+        "VIEWER_RUNTIME_POLL_MS",
+        raw,
+        DEFAULT_VIEWER_RUNTIME_POLL_MS,
+        "a positive integer",
+    )?;
+
+    if poll_ms == 0 {
+        return Err(invalid_env(
+            "VIEWER_RUNTIME_POLL_MS",
+            "a positive integer",
+            "0",
+        ));
+    }
+
+    Ok(poll_ms)
+}
+
+fn read_standalone(raw: Option<&str>) -> Result<bool, ConfigError> {
+    match raw {
+        None => Ok(true),
+        Some(value) if value.eq_ignore_ascii_case("true") || value == "1" => Ok(true),
+        Some(value) if value.eq_ignore_ascii_case("false") || value == "0" => Ok(false),
+        Some(value) => Err(invalid_env(
+            "STANDALONE",
+            "`true`, `false`, `1`, or `0`",
+            value,
+        )),
+    }
+}
+
+fn read_memory_stream_max_entries(raw: Option<&str>) -> Result<usize, ConfigError> {
+    parse_env_with_message(
+        "MEMORY_STREAM_MAX_ENTRIES",
+        raw,
+        DEFAULT_MEMORY_STREAM_MAX_ENTRIES,
+        "a non-negative integer",
+    )
+}
+
+fn parse_env_with_message<T>(
+    var_name: &'static str,
+    raw: Option<&str>,
+    default: T,
+    expected: &'static str,
+) -> Result<T, ConfigError>
+where
+    T: std::str::FromStr,
+{
+    match raw {
+        Some(value) => value
+            .parse()
+            .map_err(|_| invalid_env(var_name, expected, value)),
+        None => Ok(default),
+    }
+}
+
+fn invalid_env(var_name: &'static str, expected: &'static str, value: &str) -> ConfigError {
+    ConfigError::InvalidEnv {
+        var_name,
+        expected,
+        value: value.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::redact_redis_url_for_log;
+    use super::{
+        invalid_env, read_http_port, read_standalone, read_viewer_runtime_poll_ms,
+        redact_redis_url_for_log,
+    };
 
     #[test]
     fn redis_url_without_credentials_is_logged_as_is() {
@@ -188,6 +285,40 @@ mod tests {
         assert_eq!(
             redact_redis_url_for_log("redis://user:secret@redis.example.com:6379/1"),
             "redis://[REDACTED]@redis.example.com:6379/1"
+        );
+    }
+
+    #[test]
+    fn http_port_prefers_http_port_over_port() {
+        assert_eq!(read_http_port(Some("9090"), Some("8081")).unwrap(), 9090);
+    }
+
+    #[test]
+    fn http_port_rejects_invalid_http_port_even_when_port_is_valid() {
+        assert_eq!(
+            read_http_port(Some("abc"), Some("8081")).unwrap_err(),
+            invalid_env("HTTP_PORT", "a valid u16 TCP port", "abc")
+        );
+    }
+
+    #[test]
+    fn viewer_runtime_poll_ms_rejects_zero() {
+        assert_eq!(
+            read_viewer_runtime_poll_ms(Some("0")).unwrap_err(),
+            invalid_env("VIEWER_RUNTIME_POLL_MS", "a positive integer", "0")
+        );
+    }
+
+    #[test]
+    fn standalone_accepts_false_literal() {
+        assert!(!read_standalone(Some("false")).unwrap());
+    }
+
+    #[test]
+    fn standalone_rejects_invalid_value() {
+        assert_eq!(
+            read_standalone(Some("sometimes")).unwrap_err(),
+            invalid_env("STANDALONE", "`true`, `false`, `1`, or `0`", "sometimes")
         );
     }
 }

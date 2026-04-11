@@ -45,12 +45,15 @@ OTLP/HTTP Client
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `STANDALONE` | `true` | When `true` or `1`, uses in-memory storage (no Redis or PostgreSQL required). Set to `false` to use Redis + PostgreSQL. |
+| `STANDALONE` | `true` | Accepts `true` / `1` for in-memory mode and `false` / `0` for Redis + PostgreSQL mode. |
 | `REDIS_URL` | `redis://127.0.0.1:6379` | Redis connection URL (used only when `STANDALONE=false`) |
 | `DATABASE_URL` | — | PostgreSQL connection URL (used only when `STANDALONE=false`). When set, the app bootstraps the PostgreSQL schema and starts the viewer runtime. |
 | `PORT` | `8080` | HTTP server listen port (shorthand; overridden by `HTTP_PORT`) |
 | `HTTP_PORT` | — | HTTP server listen port (takes precedence over `PORT`) |
 | `VIEWER_RUNTIME_POLL_MS` | `1000` | Poll interval for the background viewer runtime |
+| `MEMORY_STREAM_MAX_ENTRIES` | `100000` | Maximum number of in-memory stream entries retained per signal when `STANDALONE=true`. |
+
+When set, numeric environment variables must parse cleanly. Invalid values fail fast at startup instead of silently falling back to defaults.
 
 ## Build & Run
 
