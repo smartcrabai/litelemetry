@@ -1,4 +1,6 @@
-use crate::domain::dashboard::{DashboardDefinition, build_layout_json};
+use crate::domain::dashboard::{
+    DashboardDefinition, PanelInput, build_layout_json, panel_inputs_from_viewer_ids,
+};
 use crate::domain::telemetry::{NormalizedEntry, Signal, SignalMask};
 use crate::domain::viewer::{ViewerDefinition, ViewerStatus};
 use crate::ingest::decode::DecodeError;
@@ -3629,7 +3631,6 @@ fn chart_type_from_definition(definition_json: &serde_json::Value) -> Result<&st
 const MIN_DASHBOARD_COLUMNS: u32 = 1;
 const MAX_DASHBOARD_COLUMNS: u32 = 4;
 const DEFAULT_DASHBOARD_COLUMNS: u32 = 2;
-
 fn default_dashboard_columns() -> u32 {
     DEFAULT_DASHBOARD_COLUMNS
 }
@@ -4194,11 +4195,44 @@ async fn preview_viewer(
 
 // --- Dashboard API ----------------------------------------------------------
 
+#[derive(Debug)]
+struct PanelEntry {
+    viewer_id: Uuid,
+    position: usize,
+    col_span: u32,
+    row_span: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct PanelRequestItem {
+    viewer_id: Uuid,
+    #[serde(default = "default_span")]
+    col_span: u32,
+    #[serde(default = "default_span")]
+    row_span: u32,
+}
+
+fn default_span() -> u32 {
+    1
+}
+
+impl PanelRequestItem {
+    fn into_panel_input(self, max_col: u32) -> PanelInput {
+        PanelInput {
+            viewer_id: self.viewer_id,
+            col_span: self.col_span.clamp(1, max_col),
+            row_span: self.row_span.max(1),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateDashboardRequest {
     name: String,
     #[serde(default)]
     viewer_ids: Vec<Uuid>,
+    #[serde(default)]
+    panels: Vec<PanelRequestItem>,
     #[serde(default = "default_dashboard_columns")]
     columns: u32,
 }
@@ -4226,6 +4260,8 @@ struct DashboardListResponse {
 struct DashboardPanel {
     viewer_id: Uuid,
     position: usize,
+    col_span: u32,
+    row_span: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     viewer: Option<ViewerSummary>,
 }
@@ -4245,10 +4281,11 @@ struct DashboardDetailResponse {
 struct PatchDashboardRequest {
     name: Option<String>,
     viewer_ids: Option<Vec<Uuid>>,
+    panels: Option<Vec<PanelRequestItem>>,
     columns: Option<u32>,
 }
 
-fn dashboard_panels_from_layout(layout_json: &serde_json::Value) -> Vec<(Uuid, usize)> {
+fn dashboard_panels_from_layout(layout_json: &serde_json::Value) -> Vec<PanelEntry> {
     let Some(panels) = layout_json.get("panels").and_then(|v| v.as_array()) else {
         return Vec::new();
     };
@@ -4263,7 +4300,22 @@ fn dashboard_panels_from_layout(layout_json: &serde_json::Value) -> Vec<(Uuid, u
                 .get("position")
                 .and_then(|v| v.as_u64())
                 .and_then(|v| usize::try_from(v).ok())?;
-            Some((viewer_id, position))
+            let col_span = p
+                .get("col_span")
+                .and_then(|v| v.as_u64())
+                .and_then(|v| u32::try_from(v).ok())
+                .unwrap_or(1);
+            let row_span = p
+                .get("row_span")
+                .and_then(|v| v.as_u64())
+                .and_then(|v| u32::try_from(v).ok())
+                .unwrap_or(1);
+            Some(PanelEntry {
+                viewer_id,
+                position,
+                col_span,
+                row_span,
+            })
         })
         .collect()
 }
@@ -4281,13 +4333,12 @@ async fn list_dashboards(
         .into_iter()
         .map(|d| {
             let panels = dashboard_panels_from_layout(&d.layout_json);
-            let viewer_ids: Vec<Uuid> = panels.iter().map(|(id, _)| *id).collect();
             DashboardListItem {
                 id: d.id,
                 slug: d.slug,
                 name: d.name,
-                panel_count: viewer_ids.len(),
-                viewer_ids,
+                panel_count: panels.len(),
+                viewer_ids: panels.into_iter().map(|e| e.viewer_id).collect(),
             }
         })
         .collect();
@@ -4310,7 +4361,16 @@ async fn create_dashboard(
     }
 
     let id = Uuid::new_v4();
-    let layout_json = build_layout_json(&payload.viewer_ids, payload.columns);
+    let panel_inputs: Vec<PanelInput> = if !payload.panels.is_empty() {
+        payload
+            .panels
+            .into_iter()
+            .map(|p| p.into_panel_input(payload.columns))
+            .collect()
+    } else {
+        panel_inputs_from_viewer_ids(&payload.viewer_ids)
+    };
+    let layout_json = build_layout_json(&panel_inputs, payload.columns);
     let dashboard = DashboardDefinition {
         id,
         slug: format!("dashboard-{}", id.simple()),
@@ -4370,10 +4430,10 @@ async fn get_dashboard(
         let rt = runtime.lock().await;
         let max_lookback_ms = panel_entries
             .iter()
-            .filter_map(|(viewer_id, _)| {
+            .filter_map(|entry| {
                 rt.viewers()
                     .iter()
-                    .find(|(viewer, _)| viewer.definition().id == *viewer_id)
+                    .find(|(viewer, _)| viewer.definition().id == entry.viewer_id)
                     .map(|(viewer, _)| viewer.lookback_ms())
             })
             .min();
@@ -4387,21 +4447,23 @@ async fn get_dashboard(
         let now = chrono::Utc::now();
         let mut panels = Vec::with_capacity(panel_entries.len());
 
-        for (viewer_id, position) in panel_entries {
-            let Some((viewer, entries, status, effective_lookback)) =
-                rt.get_dashboard_viewer(&viewer_id, lookback_override, now)
-            else {
-                continue;
-            };
-            let viewer_summary = viewer_summary(viewer, entries, status, effective_lookback, true)
+        for entry in panel_entries {
+            let viewer = rt
+                .get_dashboard_viewer(&entry.viewer_id, lookback_override, now)
+                .map(|(viewer, entries, status, effective_lookback)| {
+                    viewer_summary(viewer, entries, status, effective_lookback, true)
+                })
+                .transpose()
                 .map_err(|error| {
-                    tracing::error!("viewer {viewer_id}: {error}");
+                    tracing::error!("viewer {}: {error}", entry.viewer_id);
                     StatusCode::INTERNAL_SERVER_ERROR
                 })?;
             panels.push(DashboardPanel {
-                viewer_id,
-                position,
-                viewer: Some(viewer_summary),
+                viewer_id: entry.viewer_id,
+                position: entry.position,
+                col_span: entry.col_span,
+                row_span: entry.row_span,
+                viewer,
             });
         }
 
@@ -4410,9 +4472,11 @@ async fn get_dashboard(
         (
             panel_entries
                 .into_iter()
-                .map(|(viewer_id, position)| DashboardPanel {
-                    viewer_id,
-                    position,
+                .map(|e| DashboardPanel {
+                    viewer_id: e.viewer_id,
+                    position: e.position,
+                    col_span: e.col_span,
+                    row_span: e.row_span,
                     viewer: None,
                 })
                 .collect(),
@@ -4460,24 +4524,46 @@ async fn patch_dashboard(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let new_layout = if payload.viewer_ids.is_some() || payload.columns.is_some() {
-        let current_columns =
-            dashboard_columns_from_layout(&current.layout_json).map_err(|error| {
-                tracing::error!("dashboard {id}: {error}");
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-        let columns = payload.columns.unwrap_or(current_columns);
+    let new_layout =
+        if payload.panels.is_some() || payload.viewer_ids.is_some() || payload.columns.is_some() {
+            let current_columns =
+                dashboard_columns_from_layout(&current.layout_json).map_err(|error| {
+                    tracing::error!("dashboard {id}: {error}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+            let columns = payload.columns.unwrap_or(current_columns);
 
-        let current_panels = dashboard_panels_from_layout(&current.layout_json);
-        let viewer_ids: Vec<Uuid> = if let Some(ids) = payload.viewer_ids {
-            ids
+            let panel_inputs: Vec<PanelInput> = if let Some(panels) = payload.panels {
+                panels
+                    .into_iter()
+                    .map(|p| p.into_panel_input(columns))
+                    .collect()
+            } else {
+                // viewer_ids only: change order while preserving existing spans
+                let current_panels = dashboard_panels_from_layout(&current.layout_json);
+                let viewer_ids = payload
+                    .viewer_ids
+                    .unwrap_or_else(|| current_panels.iter().map(|e| e.viewer_id).collect());
+                viewer_ids
+                    .iter()
+                    .map(|vid| {
+                        let (col_span, row_span) = current_panels
+                            .iter()
+                            .find(|e| e.viewer_id == *vid)
+                            .map(|e| (e.col_span, e.row_span))
+                            .unwrap_or((1, 1));
+                        PanelInput {
+                            viewer_id: *vid,
+                            col_span,
+                            row_span,
+                        }
+                    })
+                    .collect()
+            };
+            build_layout_json(&panel_inputs, columns)
         } else {
-            current_panels.into_iter().map(|(id, _)| id).collect()
+            current.layout_json.clone()
         };
-        build_layout_json(&viewer_ids, columns)
-    } else {
-        current.layout_json.clone()
-    };
 
     let updated = store
         .update_dashboard(id, new_name, &new_layout)
@@ -5368,7 +5454,47 @@ mod tests {
             ]
         }));
 
-        assert_eq!(panels, vec![(Uuid::max(), 2)]);
+        assert_eq!(panels.len(), 1);
+        assert_eq!(panels[0].viewer_id, Uuid::max());
+        assert_eq!(panels[0].position, 2);
+        assert_eq!(panels[0].col_span, 1); // default
+        assert_eq!(panels[0].row_span, 1); // default
+    }
+
+    #[test]
+    fn test_dashboard_panels_from_layout_defaults_missing_spans_to_one() {
+        let id = Uuid::new_v4();
+        let panels = dashboard_panels_from_layout(&serde_json::json!({
+            "panels": [{ "viewer_id": id.to_string(), "position": 0 }]
+        }));
+
+        assert_eq!(panels.len(), 1);
+        assert_eq!(panels[0].col_span, 1);
+        assert_eq!(panels[0].row_span, 1);
+    }
+
+    #[test]
+    fn test_dashboard_panels_from_layout_reads_explicit_spans() {
+        let id = Uuid::new_v4();
+        let panels = dashboard_panels_from_layout(&serde_json::json!({
+            "panels": [{
+                "viewer_id": id.to_string(),
+                "position": 0,
+                "col_span": 3,
+                "row_span": 2
+            }]
+        }));
+
+        assert_eq!(panels.len(), 1);
+        assert_eq!(panels[0].col_span, 3);
+        assert_eq!(panels[0].row_span, 2);
+    }
+
+    #[test]
+    fn test_dashboard_panels_from_layout_returns_empty_when_no_panels_key() {
+        let panels = dashboard_panels_from_layout(&serde_json::json!({ "columns": 2 }));
+
+        assert!(panels.is_empty());
     }
 
     async fn index_html() -> (StatusCode, String) {

@@ -1,4 +1,6 @@
-use crate::domain::dashboard::DashboardDefinition;
+use crate::domain::dashboard::{
+    DashboardDefinition, build_layout_json, panel_inputs_from_viewer_ids,
+};
 use crate::domain::telemetry::{NormalizedEntry, Signal};
 use crate::domain::viewer::ViewerDefinition;
 use crate::storage::StorageError;
@@ -285,7 +287,7 @@ pub fn default_dashboard_definitions(viewer_ids: &[Uuid]) -> Vec<DashboardDefini
         id: Uuid::new_v4(),
         slug: "overview".to_string(),
         name: "Overview".to_string(),
-        layout_json: crate::domain::dashboard::build_layout_json(viewer_ids, 2),
+        layout_json: build_layout_json(&panel_inputs_from_viewer_ids(viewer_ids), 2),
         revision: 1,
         enabled: true,
     }]
