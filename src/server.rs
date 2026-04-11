@@ -11,7 +11,7 @@ use crate::viewer_runtime::state::ViewerState;
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::Html,
     routing::{get, post},
@@ -630,6 +630,41 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         max-height: calc(100vh - 120px);
       }
 
+      #dashboard-range-controls {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      #dashboard-range-selector {
+        padding: 4px 8px;
+        border-radius: 6px;
+        border: 1px solid var(--line);
+        background: var(--panel-strong);
+        font-size: 0.85rem;
+      }
+
+      #dashboard-range-label {
+        font-size: 0.85rem;
+        color: var(--muted);
+        min-width: 50px;
+      }
+
+      #dashboard-range-custom-lookback {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      #dashboard-range-custom-lookback input {
+        padding: 4px 8px;
+        border-radius: 6px;
+        border: 1px solid var(--line);
+        background: var(--panel-strong);
+        font-size: 0.85rem;
+      }
+
+
       .dashboard-grid {
         display: grid;
         grid-template-columns: repeat(var(--dash-cols, 2), 1fr);
@@ -1033,7 +1068,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
     <aside id="sidebar" class="sidebar">
       <div class="sidebar-brand">litelemetry</div>
       <nav class="sidebar-nav">
-        <a id="nav-viewers" class="sidebar-item active" href="#" data-page="viewers">Viewers</a>
+        <a id="nav-viewers" class="sidebar-item active" href="#viewers" data-page="viewers">Viewers</a>
         <div class="sidebar-section-label">Dashboards</div>
         <div id="dashboard-list"></div>
         <button id="new-dashboard-button" class="secondary sidebar-new-btn" type="button">+ New Dashboard</button>
@@ -1221,6 +1256,22 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       <div id="page-dashboard" hidden>
         <div class="dashboard-page-header">
           <h2 id="dashboard-title"></h2>
+          <div id="dashboard-range-controls">
+            <select id="dashboard-range-selector">
+              <option value="default">Default</option>
+              <option value="5m">5m</option>
+              <option value="15m">15m</option>
+              <option value="1h">1h</option>
+              <option value="6h">6h</option>
+              <option value="24h">24h</option>
+              <option value="custom">Custom</option>
+            </select>
+            <span id="dashboard-range-label"></span>
+            <div id="dashboard-range-custom-lookback" hidden>
+              <input type="number" id="dashboard-custom-lookback-minutes" min="1" step="1" inputmode="numeric">
+              <span>min</span>
+            </div>
+          </div>
           <div id="dashboard-page-actions">
             <button id="dashboard-fullscreen-button" class="secondary" type="button" hidden aria-label="Enter fullscreen" title="Enter fullscreen">[ ]</button>
             <button id="dashboard-settings-button" class="secondary" type="button" hidden>Settings</button>
@@ -2586,6 +2637,25 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       let currentDashboardId = null;
       let dashboardPanelCharts = [];
 
+      const LOOKBACK_PRESETS = {
+        'default': null,
+        '5m': 5 * 60 * 1000,
+        '15m': 15 * 60 * 1000,
+        '1h': 60 * 60 * 1000,
+        '6h': 6 * 60 * 60 * 1000,
+        '24h': 24 * 60 * 60 * 1000,
+        'custom': null,
+      };
+      let dashboardRangeMode = 'default';
+      let dashboardLookbackMs = null;
+      let dashboardMaxLookbackMs = null;
+      let dashboardCustomLookbackMinutes = '';
+
+      const dashboardRangeSelect = document.getElementById('dashboard-range-selector');
+      const dashboardRangeLabel = document.getElementById('dashboard-range-label');
+      const dashboardRangeCustomLookback = document.getElementById('dashboard-range-custom-lookback');
+      const dashboardCustomLookbackInput = document.getElementById('dashboard-custom-lookback-minutes');
+
       sidebarToggle.addEventListener('click', () => {
         sidebar.classList.toggle('open');
       });
@@ -2597,6 +2667,110 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           sidebar.classList.remove('open');
         }
       });
+
+      function buildDashboardHash(id, lookbackMs) {
+        if (lookbackMs) {
+          return `#dashboard/${id}/lookback/${lookbackMs}`;
+        }
+        return `#dashboard/${id}`;
+      }
+
+      function parseDashboardHash() {
+        const hash = window.location.hash;
+        const match = hash.match(/^#dashboard\/([^/]+)(?:\/lookback\/(\d+))?$/);
+        if (!match) return null;
+        return { id: match[1], lookbackMs: match[2] ? parseInt(match[2], 10) : null };
+      }
+
+      function dashboardRangeModeFromLookbackMs(lookbackMs) {
+        if (!lookbackMs) {
+          return 'default';
+        }
+        for (const [mode, presetMs] of Object.entries(LOOKBACK_PRESETS)) {
+          if (mode !== 'default' && mode !== 'custom' && presetMs === lookbackMs) {
+            return mode;
+          }
+        }
+        return 'custom';
+      }
+
+      function syncDashboardRangeControls() {
+        for (const option of dashboardRangeSelect.options) {
+          if (option.value === 'default' || option.value === 'custom') {
+            option.hidden = false;
+            option.disabled = false;
+            continue;
+          }
+          const presetMs = LOOKBACK_PRESETS[option.value];
+          const unavailable =
+            dashboardMaxLookbackMs !== null && presetMs > dashboardMaxLookbackMs;
+          option.hidden = unavailable;
+          option.disabled = unavailable;
+        }
+
+        dashboardRangeSelect.value = dashboardRangeMode;
+
+        if (dashboardRangeMode === 'custom') {
+          dashboardRangeCustomLookback.hidden = false;
+          if (dashboardCustomLookbackMinutes) {
+            dashboardCustomLookbackInput.value = dashboardCustomLookbackMinutes;
+          } else if (dashboardLookbackMs) {
+            dashboardCustomLookbackInput.value = String(Math.ceil(dashboardLookbackMs / 60000));
+          } else {
+            dashboardCustomLookbackInput.value = '';
+          }
+        } else {
+          dashboardRangeCustomLookback.hidden = true;
+          dashboardCustomLookbackInput.value = '';
+        }
+
+        if (dashboardLookbackMs) {
+          dashboardRangeLabel.textContent = formatLookbackMs(dashboardLookbackMs);
+        } else {
+          dashboardRangeLabel.textContent = '';
+        }
+      }
+
+      function applyDashboardRangeSelection() {
+        dashboardRangeMode = dashboardRangeSelect.value;
+        let nextLookbackMs = null;
+        let nextCustomLookbackMinutes = '';
+
+        if (dashboardRangeMode === 'custom') {
+          const candidateMinutes =
+            dashboardCustomLookbackInput.value ||
+            dashboardCustomLookbackMinutes ||
+            (dashboardLookbackMs ? String(Math.ceil(dashboardLookbackMs / 60000)) : '');
+          const minutes = Number.parseInt(candidateMinutes, 10);
+          if (!Number.isFinite(minutes) || minutes <= 0) {
+            setStatus('error', 'Enter a positive custom lookback in minutes.');
+            dashboardCustomLookbackMinutes = candidateMinutes;
+            syncDashboardRangeControls();
+            return false;
+          }
+          nextLookbackMs = minutes * 60 * 1000;
+          nextCustomLookbackMinutes = String(minutes);
+        } else if (dashboardRangeMode !== 'default') {
+          nextLookbackMs = LOOKBACK_PRESETS[dashboardRangeMode];
+        }
+
+        if (
+          dashboardMaxLookbackMs !== null &&
+          nextLookbackMs !== null &&
+          nextLookbackMs > dashboardMaxLookbackMs
+        ) {
+          setStatus(
+            'error',
+            `Lookback exceeds dashboard limit (${formatLookbackMs(dashboardMaxLookbackMs)}).`,
+          );
+          return false;
+        }
+
+        dashboardLookbackMs = nextLookbackMs;
+        dashboardCustomLookbackMinutes = nextCustomLookbackMinutes;
+        syncDashboardRangeControls();
+        return true;
+      }
 
       function navigateTo(page, dashboardId) {
         cancelPreview();
@@ -2613,12 +2787,21 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         });
 
         if (page === 'dashboard' && dashboardId) {
+          const hashData = parseDashboardHash();
+          dashboardLookbackMs =
+            hashData && hashData.id === dashboardId ? hashData.lookbackMs : null;
+          dashboardMaxLookbackMs = null;
+          dashboardRangeMode = dashboardRangeModeFromLookbackMs(dashboardLookbackMs);
+          dashboardCustomLookbackMinutes =
+            dashboardRangeMode === 'custom' && dashboardLookbackMs
+              ? String(Math.ceil(dashboardLookbackMs / 60000))
+              : '';
+          syncDashboardRangeControls();
           loadDashboard(dashboardId);
         }
         if (page === 'viewers') {
           previewViewer(true);
         }
-
         sidebar.classList.remove('open');
 
         if (page !== 'dashboard' && document.body.classList.contains('fullscreen')) {
@@ -2657,10 +2840,6 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
       dashboardFullscreenButton.addEventListener('click', toggleDashboardFullscreen);
 
-      navViewers.addEventListener('click', (e) => {
-        e.preventDefault();
-        navigateTo('viewers');
-      });
 
       // --- Dashboard list in sidebar ---------------------------------------
 
@@ -2678,14 +2857,10 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         for (const d of dashboards) {
           const a = document.createElement('a');
           a.className = 'sidebar-dashboard-item';
-          a.href = '#';
+          a.href = buildDashboardHash(d.id);
           a.dataset.id = d.id;
           a.textContent = d.name;
           if (d.id === currentDashboardId) a.classList.add('active');
-          a.addEventListener('click', (e) => {
-            e.preventDefault();
-            navigateTo('dashboard', d.id);
-          });
           dashboardListEl.appendChild(a);
         }
       }
@@ -2709,9 +2884,17 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
 
         try {
-          const resp = await fetch(`/api/dashboards/${id}`, { headers: { accept: 'application/json' } });
+          const url = new URL(`/api/dashboards/${id}`, window.location.origin);
+          if (dashboardLookbackMs) {
+            const params = new URLSearchParams();
+            params.set('lookback_ms', String(dashboardLookbackMs));
+            url.search = params.toString();
+          }
+          const resp = await fetch(url.toString(), { headers: { accept: 'application/json' } });
           if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
           const data = await resp.json();
+          dashboardMaxLookbackMs = data.max_lookback_ms ?? null;
+          syncDashboardRangeControls();
 
           const sorted = [...data.panels].sort((a, b) => a.position - b.position);
           const columns = readDashboardColumns(data.columns);
@@ -2734,6 +2917,16 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             dashboardGrid.appendChild(empty);
           }
         } catch (err) {
+          if (err.message === 'HTTP 400' && dashboardLookbackMs !== null) {
+            dashboardRangeMode = 'default';
+            dashboardLookbackMs = null;
+            dashboardMaxLookbackMs = null;
+            dashboardCustomLookbackMinutes = '';
+            syncDashboardRangeControls();
+            updateDashboardHash();
+            loadDashboard(id, { refresh });
+            return;
+          }
           if (!refresh) {
             dashboardTitle.textContent = 'Error';
             const errEl = document.createElement('div');
@@ -2894,6 +3087,32 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         if (!currentDashboardId) return;
         openDashboardSettings(currentDashboardId);
       });
+
+      dashboardRangeSelect.addEventListener('change', () => {
+        if (!applyDashboardRangeSelection()) {
+          return;
+        }
+        if (currentPage === 'dashboard' && currentDashboardId) {
+          updateDashboardHash();
+          loadDashboard(currentDashboardId);
+        }
+      });
+
+      function onCustomLookbackChange() {
+        if (currentPage === 'dashboard' && currentDashboardId) {
+          if (!applyDashboardRangeSelection()) {
+            return;
+          }
+          updateDashboardHash();
+          loadDashboard(currentDashboardId);
+        }
+      }
+      dashboardCustomLookbackInput.addEventListener('change', onCustomLookbackChange);
+
+      function updateDashboardHash() {
+        const hash = buildDashboardHash(currentDashboardId, dashboardLookbackMs);
+        window.history.replaceState(null, '', hash);
+      }
 
       async function openDashboardSettings(dashboardId) {
         // Fetch current dashboard and all viewers
@@ -3077,7 +3296,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             const { id } = await r.json();
             overlay.remove();
             await refreshDashboardList();
-            navigateTo('dashboard', id);
+            window.location.hash = buildDashboardHash(id);
           } catch (err) {
             createBtn.disabled = false;
           }
@@ -3091,6 +3310,27 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
         document.body.appendChild(overlay);
         nameInput.focus();
+      }
+
+      function routeFromHash() {
+        const hashData = parseDashboardHash();
+        if (hashData) {
+          navigateTo('dashboard', hashData.id);
+          return;
+        }
+        if (
+          window.location.hash === '#viewers' ||
+          window.location.hash === ''
+        ) {
+          navigateTo('viewers');
+        }
+      }
+
+      window.addEventListener('hashchange', routeFromHash);
+
+      // Handle initial hash on page load
+      if (window.location.hash !== '') {
+        routeFromHash();
       }
 
       // --- Polling ---------------------------------------------------------
@@ -3383,7 +3623,14 @@ async fn get_viewer(
         .iter()
         .find(|(viewer, _)| viewer.definition().id == id)
         .ok_or(StatusCode::NOT_FOUND)?;
-    let summary = viewer_summary(viewer, viewer_state, true).map_err(|error| {
+    let summary = viewer_summary(
+        viewer,
+        &viewer_state.entries,
+        &viewer_state.status,
+        viewer.lookback_ms(),
+        true,
+    )
+    .map_err(|error| {
         tracing::error!("viewer {id}: {error}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
@@ -3404,7 +3651,14 @@ async fn list_viewers(
         .viewers()
         .iter()
         .map(|(viewer, viewer_state)| {
-            viewer_summary(viewer, viewer_state, false).map_err(|error| {
+            viewer_summary(
+                viewer,
+                &viewer_state.entries,
+                &viewer_state.status,
+                viewer.lookback_ms(),
+                false,
+            )
+            .map_err(|error| {
                 tracing::error!("viewer {}: {error}", viewer.definition().id);
                 StatusCode::INTERNAL_SERVER_ERROR
             })
@@ -3766,6 +4020,8 @@ struct DashboardDetailResponse {
     slug: String,
     name: String,
     columns: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_lookback_ms: Option<i64>,
     panels: Vec<DashboardPanel>,
 }
 
@@ -3856,10 +4112,25 @@ async fn create_dashboard(
     Ok((StatusCode::CREATED, Json(CreateDashboardResponse { id })))
 }
 
+#[derive(Debug, Deserialize)]
+struct DashboardLookbackQuery {
+    lookback_ms: Option<i64>,
+}
+
 async fn get_dashboard(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    Query(query): Query<DashboardLookbackQuery>,
 ) -> Result<Json<DashboardDetailResponse>, StatusCode> {
+    let lookback_override = if let Some(ms) = query.lookback_ms {
+        if ms <= 0 {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        Some(ms)
+    } else {
+        None
+    };
+
     let store = state.require_viewer_store()?;
 
     let dashboard = store
@@ -3879,38 +4150,58 @@ async fn get_dashboard(
     let panel_entries = dashboard_panels_from_layout(&dashboard.layout_json);
 
     // Fetch viewer data for panels from ViewerRuntime (empty if runtime is unavailable)
-    let panels = if let Some(runtime) = state.viewer_runtime.as_ref() {
+    let (panels, max_lookback_ms) = if let Some(runtime) = state.viewer_runtime.as_ref() {
         let rt = runtime.lock().await;
-        let viewers = rt.viewers();
+        let max_lookback_ms = panel_entries
+            .iter()
+            .filter_map(|(viewer_id, _)| {
+                rt.viewers()
+                    .iter()
+                    .find(|(viewer, _)| viewer.definition().id == *viewer_id)
+                    .map(|(viewer, _)| viewer.lookback_ms())
+            })
+            .min();
+
+        if let Some(ms) = lookback_override
+            && max_lookback_ms.is_some_and(|limit| ms > limit)
+        {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+
+        let now = chrono::Utc::now();
         let mut panels = Vec::with_capacity(panel_entries.len());
 
         for (viewer_id, position) in panel_entries {
-            let Some((viewer, state)) =
-                viewers.iter().find(|(v, _)| v.definition().id == viewer_id)
+            let Some((viewer, entries, status, effective_lookback)) =
+                rt.get_dashboard_viewer(&viewer_id, lookback_override, now)
             else {
                 continue;
             };
-            let viewer = viewer_summary(viewer, state, true).map_err(|error| {
-                tracing::error!("viewer {viewer_id}: {error}");
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
+            let viewer_summary = viewer_summary(viewer, entries, status, effective_lookback, true)
+                .map_err(|error| {
+                    tracing::error!("viewer {viewer_id}: {error}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
             panels.push(DashboardPanel {
                 viewer_id,
                 position,
-                viewer: Some(viewer),
+                viewer: Some(viewer_summary),
             });
         }
 
-        panels
+        (panels, max_lookback_ms)
     } else {
-        panel_entries
-            .into_iter()
-            .map(|(viewer_id, position)| DashboardPanel {
-                viewer_id,
-                position,
-                viewer: None,
-            })
-            .collect()
+        (
+            panel_entries
+                .into_iter()
+                .map(|(viewer_id, position)| DashboardPanel {
+                    viewer_id,
+                    position,
+                    viewer: None,
+                })
+                .collect(),
+            None,
+        )
     };
 
     Ok(Json(DashboardDetailResponse {
@@ -3918,6 +4209,7 @@ async fn get_dashboard(
         slug: dashboard.slug,
         name: dashboard.name,
         columns,
+        max_lookback_ms,
         panels,
     }))
 }
@@ -4107,7 +4399,9 @@ fn map_entries_to_rows<'a>(
 
 fn viewer_summary(
     viewer: &CompiledViewer,
-    viewer_state: &ViewerState,
+    entries: &[NormalizedEntry],
+    status: &ViewerStatus,
+    effective_lookback_ms: i64,
     include_entries: bool,
 ) -> Result<ViewerSummary, &'static str> {
     let definition = viewer.definition();
@@ -4124,14 +4418,8 @@ fn viewer_summary(
         .and_then(|v| v.as_str())
         .map(str::to_string);
 
-    let entries = if include_entries {
-        map_entries_to_rows(
-            viewer_state
-                .entries
-                .iter()
-                .rev()
-                .take(VIEWER_ENTRY_PREVIEW_LIMIT),
-        )
+    let entries_for_response = if include_entries {
+        map_entries_to_rows(entries.iter().rev().take(VIEWER_ENTRY_PREVIEW_LIMIT))
     } else {
         vec![]
     };
@@ -4146,12 +4434,12 @@ fn viewer_summary(
         filters,
         filter_mode,
         refresh_interval_ms: definition.refresh_interval_ms,
-        lookback_ms: definition.lookback_ms,
-        entry_count: viewer_state.entries.len(),
-        status: viewer_state.status.clone(),
-        entries,
+        lookback_ms: effective_lookback_ms,
+        entry_count: entries.len(),
+        status: status.clone(),
+        entries: entries_for_response,
         traces: if include_entries && definition.signal_mask.contains(Signal::Traces) {
-            extract_traces_from_entries(&viewer_state.entries)
+            extract_traces_from_entries(entries)
         } else {
             vec![]
         },
@@ -4904,6 +5192,98 @@ mod tests {
         assert!(html.contains("sidebar-toggle"));
         assert!(html.contains("viewer-sortable-item"));
         assert!(html.contains("viewer-drag-handle"));
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_header_contains_lookback_selector() {
+        let (_, html) = index_html().await;
+
+        assert!(
+            html.contains("id=\"dashboard-range-selector\""),
+            "dashboard header should contain lookback selector"
+        );
+        assert!(
+            html.contains("id=\"dashboard-range-label\""),
+            "dashboard header should contain lookback label"
+        );
+        assert!(
+            html.contains("id=\"dashboard-custom-lookback-minutes\""),
+            "dashboard header should contain custom lookback minutes input"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_lookback_presets_are_available() {
+        let (_, html) = index_html().await;
+
+        assert!(
+            html.contains("value=\"default\""),
+            "dashboard range selector should have default preset"
+        );
+        assert!(
+            html.contains("value=\"5m\""),
+            "dashboard range selector should have 5m preset"
+        );
+        assert!(
+            html.contains("value=\"15m\""),
+            "dashboard range selector should have 15m preset"
+        );
+        assert!(
+            html.contains("value=\"1h\""),
+            "dashboard range selector should have 1h preset"
+        );
+        assert!(
+            html.contains("value=\"6h\""),
+            "dashboard range selector should have 6h preset"
+        );
+        assert!(
+            html.contains("value=\"24h\""),
+            "dashboard range selector should have 24h preset"
+        );
+        assert!(
+            html.contains("value=\"custom\""),
+            "dashboard range selector should have custom preset"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_js_contains_hash_sync_functions() {
+        let (_, html) = index_html().await;
+
+        assert!(
+            html.contains("function buildDashboardHash("),
+            "dashboard JS should contain buildDashboardHash function"
+        );
+        assert!(
+            html.contains("function parseDashboardHash("),
+            "dashboard JS should contain parseDashboardHash function"
+        );
+        assert!(
+            html.contains("function syncDashboardRangeControls("),
+            "dashboard JS should contain syncDashboardRangeControls function"
+        );
+        assert!(
+            html.contains("function applyDashboardRangeSelection("),
+            "dashboard JS should contain applyDashboardRangeSelection function"
+        );
+        assert!(
+            html.contains("function routeFromHash("),
+            "dashboard JS should contain routeFromHash function"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_js_loads_with_lookback_query_param() {
+        let (_, html) = index_html().await;
+
+        assert!(
+            html.contains("function loadDashboard("),
+            "dashboard JS should contain loadDashboard function"
+        );
+        assert!(
+            html.contains("URLSearchParams"),
+            "loadDashboard should use URLSearchParams for query building"
+        );
     }
 
     #[tokio::test]

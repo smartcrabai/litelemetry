@@ -3158,6 +3158,274 @@ async fn test_get_dashboard_invalid_uuid_returns_400_memory() {
 }
 
 #[tokio::test]
+async fn test_get_dashboard_with_lookback_ms_filters_entries_memory() {
+    let stream_store = MemoryStreamStore::new(100_000);
+    let viewer_store = MemoryViewerStore::new();
+
+    let def = make_viewer_def(Signal::Traces.into(), 300_000, 1);
+    viewer_store.insert_viewer_definition(&def).await.unwrap();
+
+    let mut stream_write = stream_store.clone();
+    stream_write
+        .append_entry(&make_traces_entry(120_000))
+        .await
+        .unwrap();
+    stream_write
+        .append_entry(&make_traces_entry(90_000))
+        .await
+        .unwrap();
+    stream_write
+        .append_entry(&make_traces_entry(30_000))
+        .await
+        .unwrap();
+    stream_write
+        .append_entry(&make_traces_entry(10_000))
+        .await
+        .unwrap();
+
+    let dashboard = DashboardDefinition {
+        id: Uuid::new_v4(),
+        slug: "test-lookback".to_string(),
+        name: "Test Lookback".to_string(),
+        layout_json: json!({ "panels": [{ "viewer_id": def.id, "position": 0 }] }),
+        revision: 1,
+        enabled: true,
+    };
+    viewer_store.insert_dashboard(&dashboard).await.unwrap();
+    let dashboard_id = dashboard.id;
+
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Memory(viewer_store.clone()),
+        StreamStore::Memory(stream_store.clone()),
+    )
+    .await
+    .unwrap();
+    let runtime = Arc::new(Mutex::new(runtime));
+
+    let app = build_app_with_services(
+        StreamStore::Memory(stream_store),
+        Some(ViewerStore::Memory(viewer_store)),
+        Some(runtime),
+    );
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/dashboards/{dashboard_id}?lookback_ms=60000"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let panels = payload["panels"].as_array().unwrap();
+    assert_eq!(panels.len(), 1);
+    assert_eq!(
+        panels[0]["viewer"]["entry_count"], 2,
+        "only entries within 60s lookback should be included (30s and 10s old)"
+    );
+}
+
+#[tokio::test]
+async fn test_get_dashboard_with_invalid_lookback_ms_returns_400_memory() {
+    let stream_store = MemoryStreamStore::new(100_000);
+    let viewer_store = MemoryViewerStore::new();
+
+    let dashboard = DashboardDefinition {
+        id: Uuid::new_v4(),
+        slug: "test-invalid".to_string(),
+        name: "Test Invalid".to_string(),
+        layout_json: json!({ "panels": [] }),
+        revision: 1,
+        enabled: true,
+    };
+    viewer_store.insert_dashboard(&dashboard).await.unwrap();
+    let dashboard_id = dashboard.id;
+
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Memory(viewer_store.clone()),
+        StreamStore::Memory(stream_store.clone()),
+    )
+    .await
+    .unwrap();
+    let runtime = Arc::new(Mutex::new(runtime));
+
+    let app = build_app_with_services(
+        StreamStore::Memory(stream_store),
+        Some(ViewerStore::Memory(viewer_store)),
+        Some(runtime),
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/dashboards/{dashboard_id}?lookback_ms=0"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "lookback_ms=0 should be rejected"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/dashboards/{dashboard_id}?lookback_ms=-5000"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "negative lookback_ms should be rejected"
+    );
+}
+
+#[tokio::test]
+async fn test_get_dashboard_rejects_lookback_ms_above_dashboard_limit_memory() {
+    let stream_store = MemoryStreamStore::new(100_000);
+    let viewer_store = MemoryViewerStore::new();
+
+    let def = make_viewer_def(Signal::Traces.into(), 60_000, 1);
+    viewer_store.insert_viewer_definition(&def).await.unwrap();
+
+    let dashboard = DashboardDefinition {
+        id: Uuid::new_v4(),
+        slug: "test-too-large".to_string(),
+        name: "Test Too Large".to_string(),
+        layout_json: json!({ "panels": [{ "viewer_id": def.id, "position": 0 }] }),
+        revision: 1,
+        enabled: true,
+    };
+    viewer_store.insert_dashboard(&dashboard).await.unwrap();
+    let dashboard_id = dashboard.id;
+
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Memory(viewer_store.clone()),
+        StreamStore::Memory(stream_store.clone()),
+    )
+    .await
+    .unwrap();
+    let runtime = Arc::new(Mutex::new(runtime));
+
+    let app = build_app_with_services(
+        StreamStore::Memory(stream_store),
+        Some(ViewerStore::Memory(viewer_store)),
+        Some(runtime),
+    );
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/dashboards/{dashboard_id}?lookback_ms=120000"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "lookback_ms above the dashboard limit should be rejected"
+    );
+}
+
+#[tokio::test]
+async fn test_get_dashboard_without_lookback_ms_uses_viewer_default_memory() {
+    let stream_store = MemoryStreamStore::new(100_000);
+    let viewer_store = MemoryViewerStore::new();
+
+    let def = make_viewer_def(Signal::Traces.into(), 60000, 1);
+    viewer_store.insert_viewer_definition(&def).await.unwrap();
+
+    let mut stream_write = stream_store.clone();
+    stream_write
+        .append_entry(&make_traces_entry(120_000))
+        .await
+        .unwrap();
+    stream_write
+        .append_entry(&make_traces_entry(90_000))
+        .await
+        .unwrap();
+    stream_write
+        .append_entry(&make_traces_entry(30_000))
+        .await
+        .unwrap();
+    stream_write
+        .append_entry(&make_traces_entry(10_000))
+        .await
+        .unwrap();
+
+    let dashboard = DashboardDefinition {
+        id: Uuid::new_v4(),
+        slug: "test-default".to_string(),
+        name: "Test Default".to_string(),
+        layout_json: json!({ "panels": [{ "viewer_id": def.id, "position": 0 }] }),
+        revision: 1,
+        enabled: true,
+    };
+    viewer_store.insert_dashboard(&dashboard).await.unwrap();
+    let dashboard_id = dashboard.id;
+
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Memory(viewer_store.clone()),
+        StreamStore::Memory(stream_store.clone()),
+    )
+    .await
+    .unwrap();
+    let runtime = Arc::new(Mutex::new(runtime));
+
+    let app = build_app_with_services(
+        StreamStore::Memory(stream_store),
+        Some(ViewerStore::Memory(viewer_store)),
+        Some(runtime),
+    );
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/dashboards/{dashboard_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let panels = payload["panels"].as_array().unwrap();
+    assert_eq!(
+        panels[0]["viewer"]["entry_count"], 2,
+        "viewer with 60s lookback should only include entries within 60s"
+    );
+    assert_eq!(
+        panels[0]["viewer"]["lookback_ms"], 60000,
+        "response should include the viewer's lookback_ms"
+    );
+    assert_eq!(
+        payload["max_lookback_ms"], 60000,
+        "response should expose the dashboard-wide lookback ceiling"
+    );
+}
+
+#[tokio::test]
 async fn test_patch_dashboard_name_and_columns_memory() {
     let env = setup_memory_viewer_app().await;
     let app = env.app;
