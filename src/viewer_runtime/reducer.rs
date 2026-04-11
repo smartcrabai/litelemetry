@@ -21,11 +21,22 @@ pub fn apply_entry(state: &mut ViewerState, viewer: &CompiledViewer, entry: Norm
 /// - Entries satisfying `entry.observed_at <= now - lookback_ms` are removed (boundary included).
 /// - Assumes state.entries is in ascending time order (oldest first).
 pub fn prune_stale_buckets(state: &mut ViewerState, lookback_ms: i64, now: DateTime<Utc>) -> usize {
-    let cutoff = now - chrono::Duration::milliseconds(lookback_ms);
-    // Assumes ascending time order; use binary search to find the cut position in O(log n + removed count)
-    let pos = state.entries.partition_point(|e| e.observed_at <= cutoff);
+    let pos = lookback_start_index(&state.entries, lookback_ms, now);
     state.entries.drain(..pos);
     pos
+}
+
+/// Returns the index of the first entry that should be included for the given lookback window.
+/// - Entries at indices < returned index are older than lookback_ms and should be excluded.
+/// - Entries satisfying `entry.observed_at <= now - lookback_ms` are excluded (boundary included).
+/// - Assumes entries is in ascending time order (oldest first).
+pub fn lookback_start_index(
+    entries: &[NormalizedEntry],
+    lookback_ms: i64,
+    now: DateTime<Utc>,
+) -> usize {
+    let cutoff = now - chrono::Duration::milliseconds(lookback_ms);
+    entries.partition_point(|e| e.observed_at <= cutoff)
 }
 
 #[cfg(test)]
