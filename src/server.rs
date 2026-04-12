@@ -6,7 +6,9 @@ use crate::domain::viewer::{ViewerDefinition, ViewerStatus};
 use crate::ingest::decode::DecodeError;
 use crate::ingest::otlp_http::parse_ingest_request;
 use crate::storage::{StreamStore, ViewerStore};
-use crate::viewer_runtime::compiler::{CompiledViewer, compile, query_from_definition};
+use crate::viewer_runtime::compiler::{
+    CompiledViewer, compile, extract_searchable_payload_text, query_from_definition,
+};
 use crate::viewer_runtime::reducer::{apply_entry, prune_stale_buckets};
 use crate::viewer_runtime::runtime::ViewerRuntime;
 use crate::viewer_runtime::state::ViewerState;
@@ -623,6 +625,51 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         font-size: 0.85rem;
       }
 
+      #dashboard-filter-bar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        width: 100%;
+      }
+
+      #dashboard-service-filter {
+        min-width: 140px;
+        max-width: 240px;
+        padding: 4px 8px;
+        border-radius: 6px;
+        border: 1px solid var(--line);
+        background: var(--panel-strong);
+        font-size: 0.85rem;
+      }
+
+      #dashboard-query-filter {
+        flex: 1;
+        min-width: 160px;
+        padding: 4px 8px;
+        border-radius: 6px;
+        border: 1px solid var(--line);
+        background: var(--panel-strong);
+        font-size: 0.85rem;
+      }
+
+      #dashboard-filter-tags {
+        display: flex;
+        gap: 4px;
+        flex-wrap: wrap;
+      }
+
+      .dashboard-filter-tag {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 2px 8px;
+        border-radius: 12px;
+        background: var(--accent);
+        color: var(--bg-1);
+        font-size: 0.78rem;
+      }
+
       #dashboard-range-controls {
         display: flex;
         align-items: center;
@@ -1150,7 +1197,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           <button id="preview-viewer-button" data-testid="preview-viewer-button"
                   class="secondary" type="button">Preview</button>
         </div>
-        <div id="filter-helper-text" class="filter-helper-text" hidden>Advanced filters are active — they take priority over the query field.</div>
+        <div id="filter-helper-text" class="filter-helper-text" hidden>Advanced filters are active -- they take priority over the query field.</div>
         <div id="status-box" data-testid="status-box" class="status-box" data-state="working">
           Loading viewers...
         </div>
@@ -1161,7 +1208,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           <span id="preview-label" class="label">Preview</span>
           <span id="viewer-preview-count" class="preview-summary"></span>
           <span id="preview-status" class="preview-status" role="status" aria-live="polite"></span>
-          <button id="viewer-preview-close" class="secondary btn-compact" type="button">×</button>
+          <button id="viewer-preview-close" class="secondary btn-compact" type="button">x</button>
         </div>
         <div class="preview-content">
           <div id="preview-chart-container" hidden>
@@ -1315,6 +1362,14 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
               <input type="number" id="dashboard-custom-lookback-minutes" min="1" step="1" inputmode="numeric">
               <span>min</span>
             </div>
+          </div>
+          <div id="dashboard-filter-bar">
+            <select id="dashboard-service-filter" multiple size="1" aria-label="Filter by service">
+              <option value="" selected>All services</option>
+            </select>
+            <div id="dashboard-filter-tags"></div>
+            <input id="dashboard-query-filter" type="search" placeholder="Search payload..." maxlength="200" aria-label="Filter by payload content">
+            <button id="dashboard-filter-clear" class="secondary btn-compact" type="button" hidden>Clear</button>
           </div>
           <div class="toolbar-row dashboard-refresh-controls">
             <label for="dashboard-refresh-interval">
@@ -1819,6 +1874,8 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           clearInterval(dashboardRefreshTimer);
           dashboardRefreshTimer = null;
         }
+        clearTimeout(dashboardQueryDebounceTimer);
+        dashboardQueryDebounceTimer = null;
       }
 
       function updateDashboardRefreshControls() {
@@ -1984,7 +2041,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           const delCell = document.createElement('td');
           const delBtn = document.createElement('button');
           delBtn.className = 'secondary btn-compact';
-          delBtn.textContent = '×';
+          delBtn.textContent = 'x';
           delBtn.title = 'Delete viewer';
           delBtn.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -2807,11 +2864,18 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       let dashboardLookbackMs = null;
       let dashboardMaxLookbackMs = null;
       let dashboardCustomLookbackMinutes = '';
+      let dashboardServiceFilter = [];
+      let dashboardQueryFilter = '';
+      let dashboardQueryDebounceTimer = null;
 
       const dashboardRangeSelect = document.getElementById('dashboard-range-selector');
       const dashboardRangeLabel = document.getElementById('dashboard-range-label');
       const dashboardRangeCustomLookback = document.getElementById('dashboard-range-custom-lookback');
       const dashboardCustomLookbackInput = document.getElementById('dashboard-custom-lookback-minutes');
+      const dashboardServiceFilterSelect = document.getElementById('dashboard-service-filter');
+      const dashboardQueryFilterInput = document.getElementById('dashboard-query-filter');
+      const dashboardFilterClearButton = document.getElementById('dashboard-filter-clear');
+      const dashboardFilterTags = document.getElementById('dashboard-filter-tags');
 
       sidebarToggle.addEventListener('click', () => {
         sidebar.classList.toggle('open');
@@ -2825,18 +2889,25 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
       });
 
-      function buildDashboardHash(id, lookbackMs) {
-        if (lookbackMs) {
-          return `#dashboard/${id}/lookback/${lookbackMs}`;
-        }
-        return `#dashboard/${id}`;
+      function buildDashboardHash(id, lookbackMs, serviceNames, query) {
+        const params = new URLSearchParams();
+        if (lookbackMs) params.set('lookback', String(lookbackMs));
+        if (serviceNames && serviceNames.length) params.set('service', serviceNames.join(','));
+        if (query) params.set('q', query);
+        const qs = params.toString();
+        return qs ? `#dashboard/${id}?${qs}` : `#dashboard/${id}`;
       }
 
       function parseDashboardHash() {
         const hash = window.location.hash;
-        const match = hash.match(/^#dashboard\/([^/]+)(?:\/lookback\/(\d+))?$/);
+        const match = hash.match(/^#dashboard\/([^/?]+)(\?.*)?$/);
         if (!match) return null;
-        return { id: match[1], lookbackMs: match[2] ? parseInt(match[2], 10) : null };
+        const id = match[1];
+        const params = new URLSearchParams(match[2] ? match[2].slice(1) : '');
+        const lookbackMs = params.has('lookback') ? (parseInt(params.get('lookback'), 10) || null) : null;
+        const serviceNames = params.has('service') ? params.get('service').split(',').filter(Boolean) : [];
+        const query = params.get('q') || '';
+        return { id, lookbackMs, serviceNames, query };
       }
 
       function dashboardRangeModeFromLookbackMs(lookbackMs) {
@@ -2949,15 +3020,21 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         if (page === 'dashboard' && dashboardId) {
           setDashboardLastUpdated(null);
           const hashData = parseDashboardHash();
-          dashboardLookbackMs =
-            hashData && hashData.id === dashboardId ? hashData.lookbackMs : null;
+          const hashMatch = hashData != null && hashData.id === dashboardId;
+          dashboardLookbackMs = hashMatch ? hashData.lookbackMs : null;
           dashboardMaxLookbackMs = null;
           dashboardRangeMode = dashboardRangeModeFromLookbackMs(dashboardLookbackMs);
           dashboardCustomLookbackMinutes =
             dashboardRangeMode === 'custom' && dashboardLookbackMs
               ? String(Math.ceil(dashboardLookbackMs / 60000))
               : '';
+          dashboardServiceFilter = hashMatch ? hashData.serviceNames : [];
+          dashboardQueryFilter = hashMatch ? hashData.query : '';
+          dashboardQueryFilterInput.value = dashboardQueryFilter;
+          syncServiceFilterSelectToDOM();
           syncDashboardRangeControls();
+          updateFilterTags();
+          fetchAndPopulateServices();
           loadDashboard(dashboardId);
           restartDashboardRefresh();
         }
@@ -3089,11 +3166,11 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
         try {
           const url = new URL(`/api/dashboards/${id}`, window.location.origin);
-          if (dashboardLookbackMs) {
-            const params = new URLSearchParams();
-            params.set('lookback_ms', String(dashboardLookbackMs));
-            url.search = params.toString();
-          }
+          const params = new URLSearchParams();
+          if (dashboardLookbackMs) params.set('lookback_ms', String(dashboardLookbackMs));
+          if (dashboardServiceFilter.length) params.set('service_name', dashboardServiceFilter.join(','));
+          if (dashboardQueryFilter) params.set('query', dashboardQueryFilter);
+          url.search = params.toString();
           const resp = await fetch(url.toString(), { headers: { accept: 'application/json' } });
           if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
           const data = await resp.json();
@@ -3330,9 +3407,76 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       dashboardCustomLookbackInput.addEventListener('change', onCustomLookbackChange);
 
       function updateDashboardHash() {
-        const hash = buildDashboardHash(currentDashboardId, dashboardLookbackMs);
+        const hash = buildDashboardHash(currentDashboardId, dashboardLookbackMs, dashboardServiceFilter, dashboardQueryFilter);
         window.history.replaceState(null, '', hash);
       }
+
+      async function fetchAndPopulateServices() {
+        try {
+          const resp = await fetch('/api/services', { headers: { accept: 'application/json' } });
+          if (!resp.ok) return;
+          const { services } = await resp.json();
+          const existing = new Set(
+            [...dashboardServiceFilterSelect.options].map(o => o.value).filter(Boolean)
+          );
+          for (const svc of services) {
+            if (!existing.has(svc)) {
+              const opt = document.createElement('option');
+              opt.value = svc;
+              opt.textContent = svc;
+              opt.selected = dashboardServiceFilter.includes(svc);
+              dashboardServiceFilterSelect.appendChild(opt);
+            }
+          }
+        } catch (_) { /* silent: service list population is best-effort */ }
+      }
+
+      function syncServiceFilterSelectToDOM() {
+        for (const opt of dashboardServiceFilterSelect.options) {
+          opt.selected = dashboardServiceFilter.includes(opt.value);
+        }
+      }
+
+      function updateFilterTags() {
+        dashboardFilterTags.replaceChildren();
+        for (const svc of dashboardServiceFilter) {
+          const tag = document.createElement('span');
+          tag.className = 'dashboard-filter-tag';
+          tag.textContent = svc;
+          dashboardFilterTags.appendChild(tag);
+        }
+        const hasFilter = dashboardServiceFilter.length > 0 || dashboardQueryFilter;
+        dashboardFilterClearButton.hidden = !hasFilter;
+      }
+
+      function applyDashboardFilter() {
+        updateFilterTags();
+        updateDashboardHash();
+        if (currentDashboardId) loadDashboard(currentDashboardId);
+      }
+
+      dashboardServiceFilterSelect.addEventListener('change', () => {
+        dashboardServiceFilter = Array.from(dashboardServiceFilterSelect.selectedOptions)
+          .map(o => o.value)
+          .filter(Boolean);
+        applyDashboardFilter();
+      });
+
+      dashboardQueryFilterInput.addEventListener('input', () => {
+        clearTimeout(dashboardQueryDebounceTimer);
+        dashboardQueryDebounceTimer = setTimeout(() => {
+          dashboardQueryFilter = dashboardQueryFilterInput.value.trim();
+          applyDashboardFilter();
+        }, 500);
+      });
+
+      dashboardFilterClearButton.addEventListener('click', () => {
+        dashboardServiceFilter = [];
+        dashboardQueryFilter = '';
+        dashboardQueryFilterInput.value = '';
+        syncServiceFilterSelectToDOM();
+        applyDashboardFilter();
+      });
 
       async function openDashboardSettings(dashboardId) {
         // Fetch current dashboard and all viewers
@@ -3715,6 +3859,11 @@ struct ViewerPreviewResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct ServicesResponse {
+    services: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
 struct CreateViewerResponse {
     id: Uuid,
 }
@@ -3808,6 +3957,7 @@ pub fn build_app_with_services(
             "/api/viewers/{id}",
             get(get_viewer).patch(patch_viewer).delete(delete_viewer),
         )
+        .route("/api/services", get(list_services))
         .route(
             "/api/dashboards",
             get(list_dashboards).post(create_dashboard),
@@ -3859,6 +4009,14 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
+async fn list_services(
+    State(state): State<AppState>,
+) -> Result<Json<ServicesResponse>, StatusCode> {
+    let runtime = state.require_viewer_runtime()?.lock().await;
+    let services = runtime.collect_service_names();
+    Ok(Json(ServicesResponse { services }))
+}
+
 async fn list_viewers(
     State(state): State<AppState>,
 ) -> Result<Json<ViewerListResponse>, StatusCode> {
@@ -3898,9 +4056,9 @@ fn apply_query_to_definition(definition_json: &mut serde_json::Value, query: Opt
 }
 
 /// Applies filter conditions and mode to definition_json.
-/// `filters: None` → no change (keep existing).
-/// `filters: Some([])` → clear "filters" and "filter_mode".
-/// `filters: Some([...])` → set "filters"; apply filter_mode if provided.
+/// `filters: None` -> no change (keep existing).
+/// `filters: Some([])` -> clear "filters" and "filter_mode".
+/// `filters: Some([...])` -> set "filters"; apply filter_mode if provided.
 fn apply_filters_to_definition(
     definition_json: &mut serde_json::Value,
     filters: Option<&[ViewerFilterInput]>,
@@ -4389,14 +4547,66 @@ async fn create_dashboard(
 }
 
 #[derive(Debug, Deserialize)]
-struct DashboardLookbackQuery {
+struct DashboardFilterQuery {
     lookback_ms: Option<i64>,
+    service_name: Option<String>,
+    query: Option<String>,
+}
+
+impl DashboardFilterQuery {
+    fn parse_service_names(&self) -> Vec<String> {
+        self.service_name
+            .as_deref()
+            .map(|s| {
+                s.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn parse_query(&self) -> Option<String> {
+        self.query
+            .as_ref()
+            .map(|q| q.trim().to_lowercase())
+            .filter(|q| !q.is_empty())
+    }
+}
+
+fn matches_dashboard_global_filter(
+    entry: &NormalizedEntry,
+    service_names: &[String],
+    query: Option<&str>,
+) -> bool {
+    if !service_names.is_empty() {
+        let svc = entry.service_name.as_deref().unwrap_or("");
+        if !service_names.iter().any(|n| n.as_str() == svc) {
+            return false;
+        }
+    }
+    if let Some(q) = query {
+        let svc_match = entry
+            .service_name
+            .as_deref()
+            .map(|s| s.to_lowercase().contains(q))
+            .unwrap_or(false);
+        if !svc_match
+            && !extract_searchable_payload_text(entry.signal, &entry.payload)
+                .map(|t| t.to_lowercase().contains(q))
+                .unwrap_or(false)
+        {
+            return false;
+        }
+    }
+    true
 }
 
 async fn get_dashboard(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    Query(query): Query<DashboardLookbackQuery>,
+    Query(query): Query<DashboardFilterQuery>,
 ) -> Result<Json<DashboardDetailResponse>, StatusCode> {
     let lookback_override = if let Some(ms) = query.lookback_ms {
         if ms <= 0 {
@@ -4406,6 +4616,9 @@ async fn get_dashboard(
     } else {
         None
     };
+
+    let global_service_names = query.parse_service_names();
+    let global_query = query.parse_query();
 
     let store = state.require_viewer_store()?;
 
@@ -4451,7 +4664,25 @@ async fn get_dashboard(
             let viewer = rt
                 .get_dashboard_viewer(&entry.viewer_id, lookback_override, now)
                 .map(|(viewer, entries, status, effective_lookback)| {
-                    viewer_summary(viewer, entries, status, effective_lookback, true)
+                    let filtered: Vec<NormalizedEntry>;
+                    let effective_entries: &[NormalizedEntry] =
+                        if global_service_names.is_empty() && global_query.is_none() {
+                            entries
+                        } else {
+                            filtered = entries
+                                .iter()
+                                .filter(|e| {
+                                    matches_dashboard_global_filter(
+                                        e,
+                                        &global_service_names,
+                                        global_query.as_deref(),
+                                    )
+                                })
+                                .cloned()
+                                .collect();
+                            &filtered
+                        };
+                    viewer_summary(viewer, effective_entries, status, effective_lookback, true)
                 })
                 .transpose()
                 .map_err(|error| {
