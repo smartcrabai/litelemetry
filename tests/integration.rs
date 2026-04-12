@@ -3757,7 +3757,7 @@ async fn test_delete_nonexistent_dashboard_returns_404_memory() {
 }
 
 #[tokio::test]
-async fn test_dashboard_skips_missing_viewers_memory() {
+async fn test_dashboard_includes_missing_viewers_without_viewer_data_memory() {
     let env = setup_memory_viewer_app().await;
     let app = env.app;
 
@@ -3787,7 +3787,7 @@ async fn test_dashboard_skips_missing_viewers_memory() {
         .unwrap()
         .to_string();
 
-    // GET detail -- panels are empty (nonexistent viewer_id is skipped)
+    // GET detail -- panel is included but has no viewer data (nonexistent viewer_id has no runtime entry)
     let get_resp = app
         .oneshot(
             Request::builder()
@@ -3802,9 +3802,14 @@ async fn test_dashboard_skips_missing_viewers_memory() {
         .await
         .unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    // Nonexistent viewer_id is skipped so panels are empty
+    // Panel is present but viewer field is absent (no runtime data for nonexistent viewer)
     let panels = payload["panels"].as_array().unwrap();
-    assert!(panels.is_empty());
+    assert_eq!(panels.len(), 1);
+    assert_eq!(
+        panels[0]["viewer_id"].as_str().unwrap(),
+        nonexistent_viewer_id
+    );
+    assert!(panels[0]["viewer"].is_null());
 }
 
 #[tokio::test]
@@ -4028,6 +4033,273 @@ async fn test_patch_dashboard_reorder_viewers_updates_positions_memory() {
         sorted[1]["viewer_id"].as_str().unwrap(),
         id_alpha,
         "after reorder, alpha (position 1) should come second"
+    );
+}
+
+// ===========================================================================
+// --- Dashboard span (col_span / row_span) tests (Memory) ------------------
+// ===========================================================================
+
+/// Given: POST /api/dashboards with panels array including col_span/row_span
+/// When: GET /api/dashboards/{id}
+/// Then: response includes col_span and row_span for each panel
+#[tokio::test]
+async fn test_create_dashboard_with_panels_includes_spans_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let viewer_id =
+        create_viewer_id(&app, json!({ "name": "SpanViewer", "signal": "traces" })).await;
+
+    let create_resp = send_json_request(
+        &app,
+        "POST",
+        "/api/dashboards",
+        json!({
+            "name": "Span Dashboard",
+            "columns": 4,
+            "panels": [{ "viewer_id": viewer_id, "col_span": 2, "row_span": 3 }]
+        }),
+    )
+    .await;
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let dash_id = response_json(create_resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let payload =
+        response_json(send_get_request(&app, format!("/api/dashboards/{dash_id}")).await).await;
+    let panels = payload["panels"].as_array().unwrap();
+    assert_eq!(panels.len(), 1);
+    assert_eq!(panels[0]["viewer_id"].as_str().unwrap(), viewer_id);
+    assert_eq!(panels[0]["col_span"].as_u64().unwrap(), 2);
+    assert_eq!(panels[0]["row_span"].as_u64().unwrap(), 3);
+}
+
+/// Given: POST /api/dashboards with viewer_ids (no spans)
+/// When: GET /api/dashboards/{id}
+/// Then: response includes col_span=1 and row_span=1 (defaults)
+#[tokio::test]
+async fn test_create_dashboard_viewer_ids_fallback_defaults_span_to_one_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let viewer_id =
+        create_viewer_id(&app, json!({ "name": "NoSpanViewer", "signal": "traces" })).await;
+
+    let create_resp = send_json_request(
+        &app,
+        "POST",
+        "/api/dashboards",
+        json!({ "name": "Dashboard Without Spans", "viewer_ids": [viewer_id] }),
+    )
+    .await;
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let dash_id = response_json(create_resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let payload =
+        response_json(send_get_request(&app, format!("/api/dashboards/{dash_id}")).await).await;
+    let panels = payload["panels"].as_array().unwrap();
+    assert_eq!(panels.len(), 1);
+    assert_eq!(
+        panels[0]["col_span"].as_u64().unwrap(),
+        1,
+        "viewer_ids without spans should default col_span to 1"
+    );
+    assert_eq!(
+        panels[0]["row_span"].as_u64().unwrap(),
+        1,
+        "viewer_ids without spans should default row_span to 1"
+    );
+}
+
+/// Given: a dashboard created with col_span=1, row_span=1
+/// When: PATCH with panels array including col_span=3, row_span=2
+/// Then: GET shows updated spans
+#[tokio::test]
+async fn test_patch_dashboard_with_panels_updates_spans_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let viewer_id = create_viewer_id(
+        &app,
+        json!({ "name": "PatchSpanViewer", "signal": "traces" }),
+    )
+    .await;
+
+    let create_resp = send_json_request(
+        &app,
+        "POST",
+        "/api/dashboards",
+        json!({
+            "name": "Span Patch Test",
+            "columns": 4,
+            "panels": [{ "viewer_id": viewer_id, "col_span": 1, "row_span": 1 }]
+        }),
+    )
+    .await;
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let dash_id = response_json(create_resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let patch_resp = send_json_request(
+        &app,
+        "PATCH",
+        format!("/api/dashboards/{dash_id}"),
+        json!({ "panels": [{ "viewer_id": viewer_id, "col_span": 3, "row_span": 2 }] }),
+    )
+    .await;
+    assert_eq!(patch_resp.status(), StatusCode::OK);
+
+    let payload =
+        response_json(send_get_request(&app, format!("/api/dashboards/{dash_id}")).await).await;
+    let panels = payload["panels"].as_array().unwrap();
+    assert_eq!(panels.len(), 1);
+    assert_eq!(
+        panels[0]["col_span"].as_u64().unwrap(),
+        3,
+        "col_span should be updated to 3"
+    );
+    assert_eq!(
+        panels[0]["row_span"].as_u64().unwrap(),
+        2,
+        "row_span should be updated to 2"
+    );
+}
+
+/// Given: a dashboard with panels [alpha(col_span=2), beta(col_span=1)]
+/// When: PATCH with only viewer_ids=[beta, alpha] (reorder, no spans in request)
+/// Then: GET shows spans preserved (alpha still col_span=2, beta still col_span=1)
+#[tokio::test]
+async fn test_patch_dashboard_viewer_ids_preserves_existing_spans_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let id_alpha = create_viewer_id(&app, json!({ "name": "SpanAlpha", "signal": "traces" })).await;
+    let id_beta = create_viewer_id(&app, json!({ "name": "SpanBeta", "signal": "traces" })).await;
+
+    let create_resp = send_json_request(
+        &app,
+        "POST",
+        "/api/dashboards",
+        json!({
+            "name": "Span Preserve Test",
+            "columns": 4,
+            "panels": [
+                { "viewer_id": id_alpha, "col_span": 2, "row_span": 1 },
+                { "viewer_id": id_beta, "col_span": 1, "row_span": 1 }
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let dash_id = response_json(create_resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let patch_resp = send_json_request(
+        &app,
+        "PATCH",
+        format!("/api/dashboards/{dash_id}"),
+        json!({ "viewer_ids": [&id_beta, &id_alpha] }),
+    )
+    .await;
+    assert_eq!(patch_resp.status(), StatusCode::OK);
+
+    let payload =
+        response_json(send_get_request(&app, format!("/api/dashboards/{dash_id}")).await).await;
+    let panels = payload["panels"].as_array().unwrap();
+    assert_eq!(panels.len(), 2);
+
+    // Sort by position; beta is now first (position 0), alpha is second (position 1)
+    let mut sorted = panels.clone();
+    sorted.sort_by_key(|p| p["position"].as_u64().unwrap());
+    let beta_panel = sorted.iter().find(|p| p["viewer_id"] == id_beta).unwrap();
+    let alpha_panel = sorted.iter().find(|p| p["viewer_id"] == id_alpha).unwrap();
+    assert_eq!(
+        beta_panel["col_span"].as_u64().unwrap(),
+        1,
+        "beta's col_span should be preserved as 1"
+    );
+    assert_eq!(
+        alpha_panel["col_span"].as_u64().unwrap(),
+        2,
+        "alpha's col_span should be preserved as 2"
+    );
+}
+
+/// Given: a dashboard created with panels (via legacy layout_json without spans)
+/// When: GET /api/dashboards/{id}
+/// Then: panels include col_span=1 and row_span=1 (backward-compat defaults)
+#[tokio::test]
+async fn test_get_dashboard_legacy_layout_without_spans_defaults_to_one_memory() {
+    let stream_store = MemoryStreamStore::new(100_000);
+    let viewer_store = MemoryViewerStore::new();
+
+    // Insert a dashboard with old-style layout (no col_span/row_span in panels)
+    let viewer_id = Uuid::new_v4();
+    let dashboard = DashboardDefinition {
+        id: Uuid::new_v4(),
+        slug: "legacy-span-dashboard".to_string(),
+        name: "Legacy Span Dashboard".to_string(),
+        layout_json: json!({
+            "columns": 2,
+            "panels": [{ "viewer_id": viewer_id.to_string(), "position": 0 }]
+        }),
+        revision: 1,
+        enabled: true,
+    };
+    let dashboard_id = dashboard.id;
+    viewer_store.insert_dashboard(&dashboard).await.unwrap();
+
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Memory(viewer_store.clone()),
+        StreamStore::Memory(stream_store.clone()),
+    )
+    .await
+    .unwrap();
+    let runtime = Arc::new(Mutex::new(runtime));
+
+    let app = build_app_with_services(
+        StreamStore::Memory(stream_store),
+        Some(ViewerStore::Memory(viewer_store)),
+        Some(runtime),
+    );
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/dashboards/{dashboard_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let panels = payload["panels"].as_array().unwrap();
+    assert_eq!(panels.len(), 1);
+    assert_eq!(
+        panels[0]["col_span"].as_u64().unwrap(),
+        1,
+        "missing col_span in legacy layout should default to 1"
+    );
+    assert_eq!(
+        panels[0]["row_span"].as_u64().unwrap(),
+        1,
+        "missing row_span in legacy layout should default to 1"
     );
 }
 
