@@ -23,7 +23,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -1160,6 +1160,8 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         <div class="sidebar-section-label">Dashboards</div>
         <div id="dashboard-list"></div>
         <button id="new-dashboard-button" class="secondary sidebar-new-btn" type="button">+ New Dashboard</button>
+        <button id="import-dashboard-button" class="secondary sidebar-new-btn" type="button">Import</button>
+        <input type="file" id="import-dashboard-file" accept=".json" style="display:none" aria-hidden="true">
       </nav>
     </aside>
     <main class="with-sidebar">
@@ -3478,6 +3480,27 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         applyDashboardFilter();
       });
 
+      async function exportDashboard(dashboardId, dashboardName) {
+        try {
+          const resp = await fetch(`/api/dashboards/${dashboardId}/export`, {
+            headers: { accept: 'application/json' },
+          });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const data = await resp.json();
+          const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `${dashboardName.replace(/[^a-z0-9]/gi, '-').toLowerCase()}.json`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        } catch (err) {
+          setStatus('error', `Export failed: ${err.message}`);
+        }
+      }
+
       async function openDashboardSettings(dashboardId) {
         // Fetch current dashboard and all viewers
         const [dashResp, viewersResp] = await Promise.all([
@@ -3575,6 +3598,13 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           }
         });
 
+        const exportBtn = document.createElement('button');
+        exportBtn.className = 'secondary';
+        exportBtn.type = 'button';
+        exportBtn.textContent = 'Export';
+        exportBtn.addEventListener('click', () => exportDashboard(dashboardId, dash.name));
+
+        actions.appendChild(exportBtn);
         actions.appendChild(cancelBtn);
         actions.appendChild(saveBtn);
         box.appendChild(actions);
@@ -3586,6 +3616,31 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       // --- New Dashboard modal ---------------------------------------------
 
       newDashboardButton.addEventListener('click', () => openNewDashboardModal());
+
+      const importDashboardButton = document.getElementById('import-dashboard-button');
+      const importDashboardFile = document.getElementById('import-dashboard-file');
+
+      importDashboardButton.addEventListener('click', () => importDashboardFile.click());
+
+      importDashboardFile.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        importDashboardFile.value = '';
+        try {
+          const data = JSON.parse(await file.text());
+          const resp = await fetch('/api/dashboards/import', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', accept: 'application/json' },
+            body: JSON.stringify(data),
+          });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const { dashboard_id } = await resp.json();
+          await refreshDashboardList();
+          window.location.hash = buildDashboardHash(dashboard_id);
+        } catch (err) {
+          setStatus('error', `Import failed: ${err.message}`);
+        }
+      });
 
       async function openNewDashboardModal() {
         const viewersResp = await fetch('/api/viewers', { headers: { accept: 'application/json' } });
@@ -3783,6 +3838,14 @@ fn is_valid_dashboard_columns(columns: u32) -> bool {
     (MIN_DASHBOARD_COLUMNS..=MAX_DASHBOARD_COLUMNS).contains(&columns)
 }
 
+fn viewer_slug(id: Uuid) -> String {
+    format!("viewer-{}", id.simple())
+}
+
+fn dashboard_slug(id: Uuid) -> String {
+    format!("dashboard-{}", id.simple())
+}
+
 fn dashboard_columns_from_layout(layout_json: &serde_json::Value) -> Result<u32, &'static str> {
     let Some(columns_value) = layout_json.get("columns") else {
         return Ok(DEFAULT_DASHBOARD_COLUMNS);
@@ -3962,12 +4025,14 @@ pub fn build_app_with_services(
             "/api/dashboards",
             get(list_dashboards).post(create_dashboard),
         )
+        .route("/api/dashboards/import", post(import_dashboard))
         .route(
             "/api/dashboards/{id}",
             get(get_dashboard)
                 .patch(patch_dashboard)
                 .delete(delete_dashboard),
         )
+        .route("/api/dashboards/{id}/export", get(export_dashboard))
         .route("/v1/traces", post(ingest_traces))
         .route("/v1/metrics", post(ingest_metrics))
         .route("/v1/logs", post(ingest_logs))
@@ -4119,7 +4184,7 @@ async fn create_viewer(
     );
     let definition = ViewerDefinition {
         id,
-        slug: format!("viewer-{}", id.simple()),
+        slug: viewer_slug(id),
         name: name.to_string(),
         refresh_interval_ms: DEFAULT_VIEWER_REFRESH_MS,
         lookback_ms: DEFAULT_VIEWER_LOOKBACK_MS,
@@ -4443,6 +4508,46 @@ struct PatchDashboardRequest {
     columns: Option<u32>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct DashboardExportEnvelope {
+    version: u32,
+    dashboard: DashboardExportData,
+    viewers: Vec<ViewerExportData>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DashboardExportData {
+    name: String,
+    columns: u32,
+    panels: Vec<PanelInput>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ViewerExportData {
+    id: Uuid,
+    name: String,
+    signal: String,
+    chart_type: String,
+    lookback_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    query: Option<String>,
+    #[serde(default)]
+    filters: Vec<serde_json::Value>,
+    #[serde(default = "default_filter_mode")]
+    filter_mode: String,
+}
+
+const DEFAULT_FILTER_MODE: &str = "and";
+
+fn default_filter_mode() -> String {
+    DEFAULT_FILTER_MODE.to_string()
+}
+
+#[derive(Debug, Serialize)]
+struct DashboardImportResponse {
+    dashboard_id: Uuid,
+}
+
 fn dashboard_panels_from_layout(layout_json: &serde_json::Value) -> Vec<PanelEntry> {
     let Some(panels) = layout_json.get("panels").and_then(|v| v.as_array()) else {
         return Vec::new();
@@ -4531,7 +4636,7 @@ async fn create_dashboard(
     let layout_json = build_layout_json(&panel_inputs, payload.columns);
     let dashboard = DashboardDefinition {
         id,
-        slug: format!("dashboard-{}", id.simple()),
+        slug: dashboard_slug(id),
         name: name.to_string(),
         layout_json,
         revision: 1,
@@ -4848,6 +4953,218 @@ async fn delete_dashboard(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// --- Dashboard Export / Import ----------------------------------------------
+
+async fn export_dashboard(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<DashboardExportEnvelope>, StatusCode> {
+    let store = state.require_viewer_store()?;
+
+    let (dashboard_result, all_defs_result) =
+        tokio::join!(store.load_dashboard(id), store.load_viewer_definitions());
+
+    let dashboard = dashboard_result
+        .map_err(|e| {
+            tracing::error!("load_dashboard: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let columns = dashboard_columns_from_layout(&dashboard.layout_json).map_err(|e| {
+        tracing::error!("dashboard {id}: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let panels = dashboard_panels_from_layout(&dashboard.layout_json);
+
+    let all_defs = all_defs_result.map_err(|e| {
+        tracing::error!("load_viewer_definitions: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let defs_map: HashMap<Uuid, ViewerDefinition> =
+        all_defs.into_iter().map(|d| (d.id, d)).collect();
+
+    let panel_entries: Vec<PanelInput> = panels
+        .iter()
+        .map(|p| PanelInput {
+            viewer_id: p.viewer_id,
+            col_span: p.col_span,
+            row_span: p.row_span,
+        })
+        .collect();
+
+    let mut seen: HashSet<Uuid> = HashSet::new();
+    let mut viewers: Vec<ViewerExportData> = Vec::new();
+    for entry in &panel_entries {
+        if !seen.insert(entry.viewer_id) {
+            continue;
+        }
+        let Some(def) = defs_map.get(&entry.viewer_id) else {
+            continue;
+        };
+        let signal = signal_mask_labels(def.signal_mask)
+            .first()
+            .ok_or_else(|| {
+                tracing::error!("export_dashboard: viewer {} has empty signal mask", def.id);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+            .to_string();
+        let chart_type = chart_type_from_definition(&def.definition_json)
+            .map_err(|e| {
+                tracing::error!("export_dashboard: viewer {}: {e}", def.id);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+            .to_string();
+        viewers.push(ViewerExportData {
+            id: def.id,
+            name: def.name.clone(),
+            signal,
+            chart_type,
+            lookback_ms: def.lookback_ms,
+            query: def
+                .definition_json
+                .get("query")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            filters: def
+                .definition_json
+                .get("filters")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default(),
+            filter_mode: def
+                .definition_json
+                .get("filter_mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or(DEFAULT_FILTER_MODE)
+                .to_string(),
+        });
+    }
+
+    Ok(Json(DashboardExportEnvelope {
+        version: 1,
+        dashboard: DashboardExportData {
+            name: dashboard.name,
+            columns,
+            panels: panel_entries,
+        },
+        viewers,
+    }))
+}
+
+async fn import_dashboard(
+    State(state): State<AppState>,
+    Json(payload): Json<DashboardExportEnvelope>,
+) -> Result<(StatusCode, Json<DashboardImportResponse>), StatusCode> {
+    if payload.version != 1 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let store = state.require_viewer_store()?;
+
+    let name = payload.dashboard.name.trim().to_string();
+    if name.is_empty() || name.chars().count() > 80 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if !is_valid_dashboard_columns(payload.dashboard.columns) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let mut id_map: HashMap<Uuid, Uuid> = HashMap::new();
+
+    for viewer_data in &payload.viewers {
+        let viewer_name = viewer_data.name.trim();
+        if viewer_name.is_empty() || viewer_name.chars().count() > 80 {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+
+        let signal = parse_signal_name(&viewer_data.signal).ok_or(StatusCode::BAD_REQUEST)?;
+
+        if !is_chart_type_supported_for_signal_mask(&viewer_data.chart_type, signal.into()) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+
+        let new_id = Uuid::new_v4();
+
+        let mut definition_json = json!({
+            "kind": viewer_data.chart_type,
+            "signal": signal_name(signal),
+        });
+        apply_query_to_definition(&mut definition_json, viewer_data.query.as_deref());
+        if !viewer_data.filters.is_empty() {
+            definition_json["filters"] = json!(viewer_data.filters);
+            definition_json["filter_mode"] = json!(viewer_data.filter_mode);
+        }
+
+        let def = ViewerDefinition {
+            id: new_id,
+            slug: viewer_slug(new_id),
+            name: viewer_name.to_string(),
+            refresh_interval_ms: DEFAULT_VIEWER_REFRESH_MS,
+            lookback_ms: viewer_data.lookback_ms,
+            signal_mask: signal.into(),
+            definition_json,
+            layout_json: json!({ "default_view": "table" }),
+            revision: 1,
+            enabled: true,
+        };
+
+        compile(def.clone()).map_err(|e| {
+            tracing::error!("import_dashboard: compile failed: {e}");
+            StatusCode::BAD_REQUEST
+        })?;
+
+        store.insert_viewer_definition(&def).await.map_err(|e| {
+            tracing::error!("insert_viewer_definition: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+        if let Some(runtime) = state.viewer_runtime.as_ref() {
+            runtime.lock().await.add_viewer(def).await.map_err(|e| {
+                tracing::error!("runtime.add_viewer: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        }
+
+        id_map.insert(viewer_data.id, new_id);
+    }
+
+    let panel_inputs: Vec<PanelInput> = payload
+        .dashboard
+        .panels
+        .iter()
+        .filter_map(|p| {
+            let new_viewer_id = id_map.get(&p.viewer_id)?;
+            Some(PanelInput {
+                viewer_id: *new_viewer_id,
+                col_span: p.col_span,
+                row_span: p.row_span,
+            })
+        })
+        .collect();
+
+    let layout_json = build_layout_json(&panel_inputs, payload.dashboard.columns);
+    let dashboard_id = Uuid::new_v4();
+    let dashboard = DashboardDefinition {
+        id: dashboard_id,
+        slug: dashboard_slug(dashboard_id),
+        name,
+        layout_json,
+        revision: 1,
+        enabled: true,
+    };
+
+    store.insert_dashboard(&dashboard).await.map_err(|e| {
+        tracing::error!("insert_dashboard: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(DashboardImportResponse { dashboard_id }),
+    ))
 }
 
 // --- Ingest -----------------------------------------------------------------
