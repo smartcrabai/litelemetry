@@ -6301,3 +6301,162 @@ async fn test_get_dashboard_with_query_filter_matches_payload_text_memory() {
         "query=grpc.order should match only the entry with span name grpc.order.create"
     );
 }
+
+// --- Dashboard Export / Import Tests ---
+
+#[tokio::test]
+async fn test_dashboard_export_import_roundtrip_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // Given: a viewer and a dashboard are created
+    let original_viewer_id = create_viewer_id(
+        &app,
+        json!({ "name": "Exported Viewer", "signal": "traces", "chart_type": "table" }),
+    )
+    .await;
+
+    let create_dash_resp = send_json_request(
+        &app,
+        "POST",
+        "/api/dashboards",
+        json!({ "name": "Export Test", "viewer_ids": [original_viewer_id], "columns": 2 }),
+    )
+    .await;
+    assert_eq!(create_dash_resp.status(), StatusCode::CREATED);
+    let dash_id = response_json(create_dash_resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // When: export the dashboard
+    let export_resp = send_get_request(&app, format!("/api/dashboards/{dash_id}/export")).await;
+    assert_eq!(export_resp.status(), StatusCode::OK);
+    let export_payload = response_json(export_resp).await;
+
+    // Then: export envelope has expected structure
+    assert_eq!(export_payload["version"], 1);
+    assert_eq!(export_payload["dashboard"]["name"], "Export Test");
+    assert_eq!(export_payload["dashboard"]["columns"], 2);
+    let exported_viewers = export_payload["viewers"].as_array().unwrap();
+    assert_eq!(exported_viewers.len(), 1);
+    assert_eq!(exported_viewers[0]["name"], "Exported Viewer");
+    assert_eq!(
+        export_payload["dashboard"]["panels"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // When: import the exported envelope as a new dashboard
+    let import_resp =
+        send_json_request(&app, "POST", "/api/dashboards/import", export_payload).await;
+    assert_eq!(import_resp.status(), StatusCode::CREATED);
+    let import_body = response_json(import_resp).await;
+    let new_dash_id = import_body["dashboard_id"].as_str().unwrap().to_string();
+
+    // Then: GET the imported dashboard and verify structure
+    let dash_detail =
+        response_json(send_get_request(&app, format!("/api/dashboards/{new_dash_id}")).await).await;
+    assert_eq!(dash_detail["name"], "Export Test");
+    assert_eq!(dash_detail["columns"], 2);
+    let panels = dash_detail["panels"].as_array().unwrap();
+    assert_eq!(panels.len(), 1);
+    let new_viewer_id = panels[0]["viewer_id"].as_str().unwrap().to_string();
+
+    // Then: new viewer gets a fresh UUID (different from the original)
+    assert_ne!(new_viewer_id, original_viewer_id);
+
+    // Then: GET the imported viewer and verify definition
+    let viewer_detail =
+        response_json(send_get_request(&app, format!("/api/viewers/{new_viewer_id}")).await).await;
+    assert_eq!(
+        viewer_detail["name"], "Exported Viewer",
+        "imported viewer name should match original"
+    );
+    assert_eq!(
+        viewer_detail["chart_type"], "table",
+        "imported viewer chart_type should match original"
+    );
+    let signals = viewer_detail["signals"].as_array().unwrap();
+    assert!(
+        signals.iter().any(|s| s.as_str() == Some("traces")),
+        "imported viewer should report traces signal"
+    );
+}
+
+#[tokio::test]
+async fn test_dashboard_import_unknown_version_returns_400_memory() {
+    // Given: a running app
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // When: POST /api/dashboards/import with an unknown version number
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/dashboards/import")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({
+                        "version": 99,
+                        "dashboard": { "name": "Test", "columns": 2, "panels": [] },
+                        "viewers": []
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Then: 400 Bad Request
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_dashboard_import_invalid_json_returns_400_memory() {
+    // Given: a running app
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // When: POST /api/dashboards/import with a non-JSON body
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/dashboards/import")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from("not json"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Then: 400 Bad Request (axum returns 400 for JSON syntax errors)
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_dashboard_export_not_found_returns_404_memory() {
+    // Given: a running app with no dashboards
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // When: GET /api/dashboards/{random_uuid}/export for a non-existent dashboard
+    let random_id = Uuid::new_v4();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/dashboards/{random_id}/export"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Then: 404 Not Found
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
