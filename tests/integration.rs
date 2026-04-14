@@ -6301,3 +6301,522 @@ async fn test_get_dashboard_with_query_filter_matches_payload_text_memory() {
         "query=grpc.order should match only the entry with span name grpc.order.create"
     );
 }
+
+// ===========================================================================
+// --- Template API (memory -- no Docker required) ---------------------------
+// ===========================================================================
+
+fn assert_panel_span(panel: &serde_json::Value, col: u64, row: u64, idx: usize) {
+    assert_eq!(
+        panel["col_span"].as_u64().unwrap(),
+        col,
+        "panel {idx} col_span"
+    );
+    assert_eq!(
+        panel["row_span"].as_u64().unwrap(),
+        row,
+        "panel {idx} row_span"
+    );
+}
+
+/// Given: memory viewer app
+/// When: GET /api/templates
+/// Then: 200 OK with an array of exactly 3 built-in templates
+#[tokio::test]
+async fn test_list_templates_returns_three_templates_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let resp = send_get_request(&app, "/api/templates").await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    let templates = body["templates"].as_array().unwrap();
+    assert_eq!(
+        templates.len(),
+        3,
+        "should return exactly 3 built-in templates"
+    );
+}
+
+/// Given: memory viewer app
+/// When: GET /api/templates
+/// Then: the response contains templates with IDs "service-overview", "trace-analysis",
+///       and "log-monitoring"
+#[tokio::test]
+async fn test_list_templates_returns_expected_ids_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let resp = send_get_request(&app, "/api/templates").await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    let templates = body["templates"].as_array().unwrap();
+    let ids: Vec<&str> = templates
+        .iter()
+        .map(|t| t["id"].as_str().unwrap())
+        .collect();
+    assert!(
+        ids.contains(&"service-overview"),
+        "should include service-overview, got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"trace-analysis"),
+        "should include trace-analysis, got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"log-monitoring"),
+        "should include log-monitoring, got {ids:?}"
+    );
+}
+
+/// Given: memory viewer app
+/// When: GET /api/templates
+/// Then: each template object has the required fields: id, name, description,
+///       signal_types, viewer_count, columns
+#[tokio::test]
+async fn test_list_templates_each_template_has_required_fields_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let resp = send_get_request(&app, "/api/templates").await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    let templates = body["templates"].as_array().unwrap();
+    for t in templates {
+        assert!(t["id"].is_string(), "template.id must be a string");
+        assert!(t["name"].is_string(), "template.name must be a string");
+        assert!(
+            t["description"].is_string(),
+            "template.description must be a string"
+        );
+        assert!(
+            t["signal_types"].is_array(),
+            "template.signal_types must be an array"
+        );
+        assert!(
+            t["viewer_count"].is_number(),
+            "template.viewer_count must be a number"
+        );
+        assert!(
+            t["columns"].is_number(),
+            "template.columns must be a number"
+        );
+    }
+}
+
+/// Given: memory viewer app
+/// When: GET /api/templates, inspect the service-overview template
+/// Then: viewer_count == 4, columns == 2, signal_types contains "metrics" and "traces"
+#[tokio::test]
+async fn test_list_templates_service_overview_has_correct_metadata_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let resp = send_get_request(&app, "/api/templates").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    let templates = body["templates"].as_array().unwrap();
+    let svc = templates
+        .iter()
+        .find(|t| t["id"] == "service-overview")
+        .expect("service-overview template must exist");
+
+    assert_eq!(
+        svc["viewer_count"].as_u64().unwrap(),
+        4,
+        "service-overview should have 4 viewers"
+    );
+    assert_eq!(
+        svc["columns"].as_u64().unwrap(),
+        2,
+        "service-overview should use 2 columns"
+    );
+    let signal_types: Vec<&str> = svc["signal_types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap())
+        .collect();
+    assert!(
+        signal_types.contains(&"metrics"),
+        "service-overview signal_types should contain 'metrics'"
+    );
+    assert!(
+        signal_types.contains(&"traces"),
+        "service-overview signal_types should contain 'traces'"
+    );
+}
+
+// --- POST /api/dashboards/from-template -------------------------------------
+
+/// Given: memory viewer app
+/// When: POST /api/dashboards/from-template with a valid template_id
+/// Then: 201 CREATED with a body containing dashboard_id and viewer_ids
+#[tokio::test]
+async fn test_create_dashboard_from_template_returns_created_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let resp = send_json_request(
+        &app,
+        "POST",
+        "/api/dashboards/from-template",
+        json!({ "template_id": "service-overview" }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = response_json(resp).await;
+    assert!(
+        body["dashboard_id"].is_string(),
+        "response must contain dashboard_id"
+    );
+    assert!(
+        body["viewer_ids"].is_array(),
+        "response must contain viewer_ids array"
+    );
+}
+
+/// Given: memory viewer app
+/// When: POST /api/dashboards/from-template with "service-overview"
+/// Then: 4 viewer IDs are returned (service-overview defines 4 viewers)
+#[tokio::test]
+async fn test_create_dashboard_from_template_service_overview_creates_four_viewers_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let resp = send_json_request(
+        &app,
+        "POST",
+        "/api/dashboards/from-template",
+        json!({ "template_id": "service-overview" }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = response_json(resp).await;
+    let viewer_ids = body["viewer_ids"].as_array().unwrap();
+    assert_eq!(
+        viewer_ids.len(),
+        4,
+        "service-overview should create 4 viewers"
+    );
+}
+
+/// Given: memory viewer app
+/// When: POST /api/dashboards/from-template, then GET /api/dashboards
+/// Then: the created dashboard appears in the list
+#[tokio::test]
+async fn test_create_dashboard_from_template_dashboard_appears_in_list_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let create_resp = send_json_request(
+        &app,
+        "POST",
+        "/api/dashboards/from-template",
+        json!({ "template_id": "service-overview" }),
+    )
+    .await;
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let dashboard_id = response_json(create_resp).await["dashboard_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let list_resp = send_get_request(&app, "/api/dashboards").await;
+    assert_eq!(list_resp.status(), StatusCode::OK);
+    let list_body = response_json(list_resp).await;
+    let dashboards = list_body["dashboards"].as_array().unwrap();
+
+    assert!(
+        dashboards.iter().any(|d| d["id"] == dashboard_id),
+        "created dashboard should appear in GET /api/dashboards"
+    );
+}
+
+/// Given: memory viewer app
+/// When: POST /api/dashboards/from-template "service-overview",
+///       then GET /api/dashboards/{id}
+/// Then: panels have positions 0-3 and the col_span/row_span from the template:
+///       panel 0 -> col_span=1, row_span=1
+///       panel 1 -> col_span=1, row_span=1
+///       panel 2 -> col_span=2, row_span=1
+///       panel 3 -> col_span=2, row_span=1
+///       dashboard has columns == 2
+#[tokio::test]
+async fn test_create_dashboard_from_template_service_overview_panel_spans_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let create_resp = send_json_request(
+        &app,
+        "POST",
+        "/api/dashboards/from-template",
+        json!({ "template_id": "service-overview" }),
+    )
+    .await;
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let dashboard_id = response_json(create_resp).await["dashboard_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let get_resp = send_get_request(&app, format!("/api/dashboards/{dashboard_id}")).await;
+    assert_eq!(get_resp.status(), StatusCode::OK);
+    let payload = response_json(get_resp).await;
+
+    assert_eq!(
+        payload["columns"].as_u64().unwrap(),
+        2,
+        "service-overview dashboard should have 2 columns"
+    );
+
+    // Sort panels by position and verify spans
+    let panels = payload["panels"].as_array().unwrap();
+    assert_eq!(panels.len(), 4, "service-overview should produce 4 panels");
+    let mut sorted = panels.clone();
+    sorted.sort_by_key(|p| p["position"].as_u64().unwrap());
+
+    assert_panel_span(&sorted[0], 1, 1, 0); // Request Count
+    assert_panel_span(&sorted[1], 1, 1, 1); // Error Rate
+    assert_panel_span(&sorted[2], 2, 1, 2); // Request Latency
+    assert_panel_span(&sorted[3], 2, 1, 3); // Recent Traces
+}
+
+/// Given: memory viewer app
+/// When: POST /api/dashboards/from-template with template_id and custom name
+/// Then: GET /api/dashboards/{id} shows the custom name
+#[tokio::test]
+async fn test_create_dashboard_from_template_with_custom_name_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let create_resp = send_json_request(
+        &app,
+        "POST",
+        "/api/dashboards/from-template",
+        json!({ "template_id": "service-overview", "name": "My Custom Dashboard" }),
+    )
+    .await;
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let dashboard_id = response_json(create_resp).await["dashboard_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let get_resp = send_get_request(&app, format!("/api/dashboards/{dashboard_id}")).await;
+    let payload = response_json(get_resp).await;
+
+    assert_eq!(
+        payload["name"], "My Custom Dashboard",
+        "dashboard name should use the user-supplied name"
+    );
+}
+
+/// Given: memory viewer app
+/// When: POST /api/dashboards/from-template with only template_id (no name)
+/// Then: the created dashboard name equals the template's own name ("Service Overview")
+#[tokio::test]
+async fn test_create_dashboard_from_template_uses_template_name_by_default_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let create_resp = send_json_request(
+        &app,
+        "POST",
+        "/api/dashboards/from-template",
+        json!({ "template_id": "service-overview" }),
+    )
+    .await;
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let dashboard_id = response_json(create_resp).await["dashboard_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let get_resp = send_get_request(&app, format!("/api/dashboards/{dashboard_id}")).await;
+    let payload = response_json(get_resp).await;
+
+    assert_eq!(
+        payload["name"].as_str().unwrap(),
+        "Service Overview",
+        "dashboard name should default to the template's name"
+    );
+}
+
+/// Given: memory viewer app
+/// When: POST /api/dashboards/from-template with an unknown template_id
+/// Then: 404 NOT FOUND
+#[tokio::test]
+async fn test_create_dashboard_from_template_unknown_id_returns_404_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let resp = send_json_request(
+        &app,
+        "POST",
+        "/api/dashboards/from-template",
+        json!({ "template_id": "no-such-template" }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// Given: ingest-only app (no viewer_store / runtime)
+/// When: POST /api/dashboards/from-template
+/// Then: 503 SERVICE_UNAVAILABLE
+#[tokio::test]
+async fn test_create_dashboard_from_template_without_viewer_store_returns_503() {
+    let app = build_app(StreamStore::Memory(MemoryStreamStore::new(100_000)));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/dashboards/from-template")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({ "template_id": "service-overview" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+/// Given: memory viewer app
+/// When: POST /api/dashboards/from-template with "trace-analysis"
+/// Then: 3 viewer IDs are returned (trace-analysis defines 3 viewers)
+#[tokio::test]
+async fn test_create_dashboard_from_template_trace_analysis_creates_three_viewers_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let resp = send_json_request(
+        &app,
+        "POST",
+        "/api/dashboards/from-template",
+        json!({ "template_id": "trace-analysis" }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = response_json(resp).await;
+    let viewer_ids = body["viewer_ids"].as_array().unwrap();
+    assert_eq!(
+        viewer_ids.len(),
+        3,
+        "trace-analysis should create 3 viewers"
+    );
+}
+
+/// Given: memory viewer app
+/// When: POST /api/dashboards/from-template with "log-monitoring"
+/// Then: 3 viewer IDs are returned (log-monitoring defines 3 viewers)
+#[tokio::test]
+async fn test_create_dashboard_from_template_log_monitoring_creates_three_viewers_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let resp = send_json_request(
+        &app,
+        "POST",
+        "/api/dashboards/from-template",
+        json!({ "template_id": "log-monitoring" }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = response_json(resp).await;
+    let viewer_ids = body["viewer_ids"].as_array().unwrap();
+    assert_eq!(
+        viewer_ids.len(),
+        3,
+        "log-monitoring should create 3 viewers"
+    );
+}
+
+/// Given: memory viewer app
+/// When: POST /api/dashboards/from-template "service-overview",
+///       then GET /api/viewers/{id} for each returned viewer_id
+/// Then: all viewers are retrievable with 200 OK
+#[tokio::test]
+async fn test_create_dashboard_from_template_viewers_are_retrievable_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let create_resp = send_json_request(
+        &app,
+        "POST",
+        "/api/dashboards/from-template",
+        json!({ "template_id": "service-overview" }),
+    )
+    .await;
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let body = response_json(create_resp).await;
+    let viewer_ids: Vec<String> = body["viewer_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+
+    for viewer_id in &viewer_ids {
+        let get_resp = send_get_request(&app, format!("/api/viewers/{viewer_id}")).await;
+        assert_eq!(
+            get_resp.status(),
+            StatusCode::OK,
+            "viewer {viewer_id} should be retrievable after template creation"
+        );
+    }
+}
+
+/// Given: memory viewer app
+/// When: POST /api/dashboards/from-template "trace-analysis",
+///       then GET /api/dashboards/{id}
+/// Then: All Traces panel has col_span=2, row_span=2 and columns == 2
+#[tokio::test]
+async fn test_create_dashboard_from_template_trace_analysis_panel_spans_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let create_resp = send_json_request(
+        &app,
+        "POST",
+        "/api/dashboards/from-template",
+        json!({ "template_id": "trace-analysis" }),
+    )
+    .await;
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let dashboard_id = response_json(create_resp).await["dashboard_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let get_resp = send_get_request(&app, format!("/api/dashboards/{dashboard_id}")).await;
+    assert_eq!(get_resp.status(), StatusCode::OK);
+    let payload = response_json(get_resp).await;
+
+    assert_eq!(
+        payload["columns"].as_u64().unwrap(),
+        2,
+        "trace-analysis dashboard should have 2 columns"
+    );
+
+    // Sort panels by position and verify spans
+    let panels = payload["panels"].as_array().unwrap();
+    assert_eq!(panels.len(), 3, "trace-analysis should produce 3 panels");
+    let mut sorted = panels.clone();
+    sorted.sort_by_key(|p| p["position"].as_u64().unwrap());
+
+    assert_panel_span(&sorted[0], 2, 2, 0); // All Traces
+    assert_panel_span(&sorted[1], 1, 1, 1); // Error Traces
+    assert_panel_span(&sorted[2], 1, 1, 2); // Trace Volume
+}

@@ -37,6 +37,199 @@ const DEFAULT_VIEWER_REFRESH_MS: u32 = 1_000;
 const MAX_PAYLOAD_PREVIEW_CHARS: usize = 160;
 const VIEWER_ENTRY_PREVIEW_LIMIT: usize = 50;
 
+#[derive(Debug, Serialize)]
+struct TemplateInfo {
+    id: &'static str,
+    name: &'static str,
+    description: &'static str,
+    signal_types: Vec<&'static str>,
+    viewer_count: usize,
+    columns: u32,
+}
+
+struct TemplateViewerSpec {
+    name: &'static str,
+    signal: Signal,
+    chart_type: &'static str,
+    lookback_ms: i64,
+    query: Option<&'static str>,
+}
+
+struct TemplatePanelSpec {
+    viewer_index: usize,
+    col_span: u32,
+    row_span: u32,
+}
+
+struct TemplateDef {
+    id: &'static str,
+    name: &'static str,
+    description: &'static str,
+    columns: u32,
+    viewers: &'static [TemplateViewerSpec],
+    panels: &'static [TemplatePanelSpec],
+}
+
+static ALL_TEMPLATES: &[TemplateDef] = &[
+    TemplateDef {
+        id: "service-overview",
+        name: "Service Overview",
+        description: "High-level metrics, error rate, latency, and recent traces for a service.",
+        columns: 2,
+        viewers: &[
+            TemplateViewerSpec {
+                name: "Request Count",
+                signal: Signal::Metrics,
+                chart_type: "billboard",
+                lookback_ms: 300_000,
+                query: None,
+            },
+            TemplateViewerSpec {
+                name: "Error Rate",
+                signal: Signal::Metrics,
+                chart_type: "billboard",
+                lookback_ms: 300_000,
+                query: Some("error"),
+            },
+            TemplateViewerSpec {
+                name: "Request Latency",
+                signal: Signal::Metrics,
+                chart_type: "line",
+                lookback_ms: 900_000,
+                query: None,
+            },
+            TemplateViewerSpec {
+                name: "Recent Traces",
+                signal: Signal::Traces,
+                chart_type: "table",
+                lookback_ms: 300_000,
+                query: None,
+            },
+        ],
+        panels: &[
+            TemplatePanelSpec {
+                viewer_index: 0,
+                col_span: 1,
+                row_span: 1,
+            },
+            TemplatePanelSpec {
+                viewer_index: 1,
+                col_span: 1,
+                row_span: 1,
+            },
+            TemplatePanelSpec {
+                viewer_index: 2,
+                col_span: 2,
+                row_span: 1,
+            },
+            TemplatePanelSpec {
+                viewer_index: 3,
+                col_span: 2,
+                row_span: 1,
+            },
+        ],
+    },
+    TemplateDef {
+        id: "trace-analysis",
+        name: "Trace Analysis",
+        description: "Detailed trace exploration: all traces, errors, and volume over time.",
+        columns: 2,
+        viewers: &[
+            TemplateViewerSpec {
+                name: "All Traces",
+                signal: Signal::Traces,
+                chart_type: "table",
+                lookback_ms: 900_000,
+                query: None,
+            },
+            TemplateViewerSpec {
+                name: "Error Traces",
+                signal: Signal::Traces,
+                chart_type: "table",
+                lookback_ms: 900_000,
+                query: Some("error"),
+            },
+            TemplateViewerSpec {
+                name: "Trace Volume",
+                signal: Signal::Metrics,
+                chart_type: "area",
+                lookback_ms: 3_600_000,
+                query: None,
+            },
+        ],
+        panels: &[
+            TemplatePanelSpec {
+                viewer_index: 0,
+                col_span: 2,
+                row_span: 2,
+            },
+            TemplatePanelSpec {
+                viewer_index: 1,
+                col_span: 1,
+                row_span: 1,
+            },
+            TemplatePanelSpec {
+                viewer_index: 2,
+                col_span: 1,
+                row_span: 1,
+            },
+        ],
+    },
+    TemplateDef {
+        id: "log-monitoring",
+        name: "Log Monitoring",
+        description: "Log exploration with error filtering and volume by severity.",
+        columns: 2,
+        viewers: &[
+            TemplateViewerSpec {
+                name: "All Logs",
+                signal: Signal::Logs,
+                chart_type: "table",
+                lookback_ms: 900_000,
+                query: None,
+            },
+            TemplateViewerSpec {
+                name: "Error Logs",
+                signal: Signal::Logs,
+                chart_type: "table",
+                lookback_ms: 900_000,
+                query: Some("error"),
+            },
+            TemplateViewerSpec {
+                name: "Log Volume by Severity",
+                signal: Signal::Metrics,
+                chart_type: "stacked_bar",
+                lookback_ms: 3_600_000,
+                query: None,
+            },
+        ],
+        panels: &[
+            TemplatePanelSpec {
+                viewer_index: 0,
+                col_span: 2,
+                row_span: 1,
+            },
+            TemplatePanelSpec {
+                viewer_index: 1,
+                col_span: 1,
+                row_span: 1,
+            },
+            TemplatePanelSpec {
+                viewer_index: 2,
+                col_span: 1,
+                row_span: 1,
+            },
+        ],
+    },
+];
+
+fn unique_signal_types(viewers: &[TemplateViewerSpec]) -> Vec<&'static str> {
+    let mask = viewers
+        .iter()
+        .fold(SignalMask::NONE, |acc, v| acc | v.signal);
+    signal_mask_labels(mask)
+}
+
 const VIEWER_PAGE: &str = r####"<!doctype html>
 <html lang="en">
   <head>
@@ -3962,6 +4155,11 @@ pub fn build_app_with_services(
             "/api/dashboards",
             get(list_dashboards).post(create_dashboard),
         )
+        .route("/api/templates", get(list_templates))
+        .route(
+            "/api/dashboards/from-template",
+            post(create_dashboard_from_template),
+        )
         .route(
             "/api/dashboards/{id}",
             get(get_dashboard)
@@ -4085,6 +4283,48 @@ fn apply_filters_to_definition(
     }
 }
 
+fn default_viewer_layout() -> serde_json::Value {
+    json!({ "default_view": "table" })
+}
+
+async fn provision_viewer(
+    viewer_store: &crate::storage::ViewerStore,
+    runtime: &SharedViewerRuntime,
+    definition: ViewerDefinition,
+) -> Result<(), StatusCode> {
+    viewer_store
+        .insert_viewer_definition(&definition)
+        .await
+        .map_err(|error| {
+            tracing::error!("insert_viewer_definition failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    runtime
+        .lock()
+        .await
+        .add_viewer(definition)
+        .await
+        .map_err(|error| {
+            tracing::error!("viewer runtime add_viewer failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(())
+}
+
+async fn unprovision_viewer(
+    viewer_store: &crate::storage::ViewerStore,
+    runtime: &SharedViewerRuntime,
+    id: Uuid,
+) {
+    if let Err(e) = viewer_store.delete_viewer(id).await {
+        tracing::error!("unprovision_viewer: delete_viewer failed: {e}");
+    } else {
+        runtime.lock().await.remove_viewer(id);
+    }
+}
+
 async fn create_viewer(
     State(state): State<AppState>,
     Json(payload): Json<CreateViewerRequest>,
@@ -4125,9 +4365,7 @@ async fn create_viewer(
         lookback_ms: DEFAULT_VIEWER_LOOKBACK_MS,
         signal_mask: signal.into(),
         definition_json,
-        layout_json: json!({
-            "default_view": "table"
-        }),
+        layout_json: default_viewer_layout(),
         revision: 1,
         enabled: true,
     };
@@ -4137,23 +4375,7 @@ async fn create_viewer(
         StatusCode::BAD_REQUEST
     })?;
 
-    viewer_store
-        .insert_viewer_definition(&definition)
-        .await
-        .map_err(|error| {
-            tracing::error!("insert_viewer_definition failed: {error}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    runtime
-        .lock()
-        .await
-        .add_viewer(definition)
-        .await
-        .map_err(|error| {
-            tracing::error!("viewer runtime add_viewer failed: {error}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    provision_viewer(viewer_store, runtime, definition).await?;
 
     Ok((StatusCode::CREATED, Json(CreateViewerResponse { id })))
 }
@@ -4415,6 +4637,11 @@ struct DashboardListResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct TemplateListResponse {
+    templates: Vec<TemplateInfo>,
+}
+
+#[derive(Debug, Serialize)]
 struct DashboardPanel {
     viewer_id: Uuid,
     position: usize,
@@ -4544,6 +4771,143 @@ async fn create_dashboard(
     })?;
 
     Ok((StatusCode::CREATED, Json(CreateDashboardResponse { id })))
+}
+
+async fn list_templates() -> Json<TemplateListResponse> {
+    let templates: Vec<TemplateInfo> = ALL_TEMPLATES
+        .iter()
+        .map(|t| TemplateInfo {
+            id: t.id,
+            name: t.name,
+            description: t.description,
+            signal_types: unique_signal_types(t.viewers),
+            viewer_count: t.viewers.len(),
+            columns: t.columns,
+        })
+        .collect();
+    Json(TemplateListResponse { templates })
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateDashboardFromTemplateRequest {
+    template_id: String,
+    name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateDashboardFromTemplateResponse {
+    dashboard_id: Uuid,
+    viewer_ids: Vec<Uuid>,
+}
+
+async fn create_dashboard_from_template(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateDashboardFromTemplateRequest>,
+) -> Result<(StatusCode, Json<CreateDashboardFromTemplateResponse>), StatusCode> {
+    let viewer_store = state
+        .viewer_store
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let runtime = state.require_viewer_runtime()?;
+
+    let template = ALL_TEMPLATES
+        .iter()
+        .find(|t| t.id == payload.template_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let dashboard_name = payload
+        .name
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or(template.name)
+        .to_string();
+    if dashboard_name.is_empty() || dashboard_name.chars().count() > 80 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let mut viewer_ids: Vec<Uuid> = Vec::new();
+    for spec in template.viewers {
+        let id = Uuid::new_v4();
+        let mut definition_json = json!({
+            "kind": spec.chart_type,
+            "signal": signal_name(spec.signal)
+        });
+        apply_query_to_definition(&mut definition_json, spec.query);
+        let definition = ViewerDefinition {
+            id,
+            slug: format!("viewer-{}", id.simple()),
+            name: spec.name.to_string(),
+            refresh_interval_ms: DEFAULT_VIEWER_REFRESH_MS,
+            lookback_ms: spec.lookback_ms,
+            signal_mask: spec.signal.into(),
+            definition_json,
+            layout_json: default_viewer_layout(),
+            revision: 1,
+            enabled: true,
+        };
+
+        if let Err(e) = compile(definition.clone()).map_err(|e| {
+            tracing::error!("create_dashboard_from_template: compile failed: {e}");
+            StatusCode::BAD_REQUEST
+        }) {
+            for &prev_id in &viewer_ids {
+                unprovision_viewer(viewer_store, runtime, prev_id).await;
+            }
+            return Err(e);
+        }
+
+        if let Err(e) = provision_viewer(viewer_store, runtime, definition).await {
+            for &prev_id in &viewer_ids {
+                unprovision_viewer(viewer_store, runtime, prev_id).await;
+            }
+            return Err(e);
+        }
+
+        viewer_ids.push(id);
+    }
+
+    let panel_inputs: Vec<PanelInput> = template
+        .panels
+        .iter()
+        .map(|p| PanelInput {
+            viewer_id: viewer_ids[p.viewer_index],
+            col_span: p.col_span,
+            row_span: p.row_span,
+        })
+        .collect();
+
+    let layout_json = build_layout_json(&panel_inputs, template.columns);
+    let dashboard_id = Uuid::new_v4();
+    let dashboard = DashboardDefinition {
+        id: dashboard_id,
+        slug: format!("dashboard-{}", dashboard_id.simple()),
+        name: dashboard_name,
+        layout_json,
+        revision: 1,
+        enabled: true,
+    };
+
+    if let Err(e) = viewer_store
+        .insert_dashboard(&dashboard)
+        .await
+        .map_err(|error| {
+            tracing::error!("insert_dashboard failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+    {
+        for &id in &viewer_ids {
+            unprovision_viewer(viewer_store, runtime, id).await;
+        }
+        return Err(e);
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateDashboardFromTemplateResponse {
+            dashboard_id,
+            viewer_ids,
+        }),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
