@@ -1375,14 +1375,16 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             <option value="donut">Donut</option>
             <option value="billboard">Billboard</option>
           </select>
-          <input id="viewer-name-input" data-testid="viewer-name-input" name="viewer-name" placeholder="checkout traces" maxlength="80" style="max-width: 200px;" />
+          <input id="viewer-name-input" data-testid="viewer-name-input" name="viewer-name" placeholder="checkout traces" maxlength="80" style="max-width: 200px;" list="viewer-name-datalist" aria-label="Viewer name" />
+          <datalist id="viewer-name-datalist"></datalist>
           <button id="create-viewer-button" data-testid="create-viewer-button" class="primary" type="button">+ Create viewer</button>
           <button id="refresh-viewers-button" class="secondary" type="button">Refresh</button>
         </div>
         <div class="toolbar-row" id="filter-builder-row">
           <input id="viewer-query-input" data-testid="viewer-query-input" name="viewer-query"
                  type="search" placeholder="Filter by service name or keyword" maxlength="200"
-                 aria-label="Text search query" style="flex:1;min-width:180px;" />
+                 aria-label="Text search query" style="flex:1;min-width:180px;" list="viewer-query-datalist" />
+          <datalist id="viewer-query-datalist"></datalist>
           <div class="filter-mode-toggle" id="filter-mode-toggle">
             <button id="filter-mode-and" class="active" type="button" title="All filters must match" aria-pressed="true">AND</button>
             <button id="filter-mode-or" type="button" title="Any filter must match" aria-pressed="false">OR</button>
@@ -1468,14 +1470,17 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         </div>
         <div id="viewer-detail-query-row" class="toolbar-row" hidden>
           <input id="viewer-detail-query-input" placeholder="Query filter" maxlength="200"
-                 style="flex:1; min-width: 120px;" />
+                 aria-label="Query filter"
+                 style="flex:1; min-width: 120px;" list="viewer-detail-query-datalist" />
+          <datalist id="viewer-detail-query-datalist"></datalist>
           <button id="viewer-detail-query-update" class="secondary btn-compact" type="button">Update</button>
         </div>
         <div id="viewer-filter-section" class="filter-section" hidden>
           <div class="filter-badges" id="viewer-filter-badges"></div>
           <div id="viewer-filter-editor" hidden>
             <div class="toolbar-row" style="margin-top:6px;">
-              <input id="detail-query-input" type="text" placeholder="Simple text search (optional)" aria-label="Text search query" style="flex:1;min-width:180px;" />
+              <input id="detail-query-input" type="text" placeholder="Simple text search (optional)" aria-label="Text search query" style="flex:1;min-width:180px;" list="detail-query-datalist" />
+              <datalist id="detail-query-datalist"></datalist>
               <div class="filter-mode-toggle" id="detail-filter-mode-toggle">
                 <button id="detail-filter-mode-and" class="active" type="button" title="All filters must match" aria-pressed="true">AND</button>
                 <button id="detail-filter-mode-or" type="button" title="Any filter must match" aria-pressed="false">OR</button>
@@ -1758,6 +1763,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         row.appendChild(fieldSel);
         row.appendChild(opSel);
         row.appendChild(valueInput);
+        attachServiceAutocomplete(valueInput, fieldSel);
         row.appendChild(removeBtn);
         return row;
       }
@@ -3018,6 +3024,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       previewViewer(true);
       refreshViewers({ silent: true });
       window.setInterval(() => refreshViewers({ silent: true }), 5000);
+      loadServiceNamesForAutocomplete();
 
       // --- Sidebar & Navigation --------------------------------------------
       const sidebarToggle = document.getElementById('sidebar-toggle');
@@ -3038,6 +3045,8 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
       let currentPage = 'viewers';
       let currentDashboardId = null;
+      let cachedServiceNames = [];
+      let filterValDatalistSeq = 0;
       let dashboardPanelCharts = [];
       const DASHBOARD_REFRESH_OFF_VALUE = 'off';
       let dashboardRefreshIntervalMs = 30000;
@@ -3606,24 +3615,75 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         window.history.replaceState(null, '', hash);
       }
 
-      async function fetchAndPopulateServices() {
+      async function fetchServices() {
         try {
           const resp = await fetch('/api/services', { headers: { accept: 'application/json' } });
-          if (!resp.ok) return;
+          if (!resp.ok) return null;
           const { services } = await resp.json();
-          const existing = new Set(
-            [...dashboardServiceFilterSelect.options].map(o => o.value).filter(Boolean)
-          );
-          for (const svc of services) {
-            if (!existing.has(svc)) {
-              const opt = document.createElement('option');
-              opt.value = svc;
-              opt.textContent = svc;
-              opt.selected = dashboardServiceFilter.includes(svc);
-              dashboardServiceFilterSelect.appendChild(opt);
-            }
+          return services;
+        } catch (_) { return null; }
+      }
+
+      async function fetchAndPopulateServices() {
+        const services = await fetchServices();
+        if (!services) return;
+        const existing = new Set(
+          [...dashboardServiceFilterSelect.options].map(o => o.value).filter(Boolean)
+        );
+        for (const svc of services) {
+          if (!existing.has(svc)) {
+            const opt = document.createElement('option');
+            opt.value = svc;
+            opt.textContent = svc;
+            opt.selected = dashboardServiceFilter.includes(svc);
+            dashboardServiceFilterSelect.appendChild(opt);
           }
-        } catch (_) { /* silent: service list population is best-effort */ }
+        }
+      }
+
+      async function loadServiceNamesForAutocomplete() {
+        const services = await fetchServices();
+        if (!services) return;
+        cachedServiceNames = services;
+        populateViewerNameDatalist();
+        for (const id of ['viewer-query-datalist', 'detail-query-datalist', 'viewer-detail-query-datalist']) {
+          fillDatalist(document.getElementById(id), cachedServiceNames);
+        }
+      }
+
+      function fillDatalist(dl, values) {
+        const frag = document.createDocumentFragment();
+        for (const v of values) {
+          const opt = document.createElement('option');
+          opt.value = v;
+          frag.appendChild(opt);
+        }
+        dl.replaceChildren(frag);
+      }
+
+      function populateViewerNameDatalist() {
+        const dl = document.getElementById('viewer-name-datalist');
+        const signals = ['traces', 'logs', 'metrics'];
+        const values = cachedServiceNames.flatMap(svc => signals.map(sig => `${svc} ${sig}`));
+        fillDatalist(dl, values);
+      }
+
+      function attachServiceAutocomplete(valueInput, fieldSel) {
+        const datalistId = `filter-val-datalist-${filterValDatalistSeq++}`;
+        const dl = document.createElement('datalist');
+        dl.id = datalistId;
+        valueInput.setAttribute('list', datalistId);
+        valueInput.parentNode.appendChild(dl);
+
+        function updateDatalist() {
+          if (fieldSel.value === 'service_name') {
+            fillDatalist(dl, cachedServiceNames);
+          } else {
+            dl.replaceChildren();
+          }
+        }
+        updateDatalist();
+        fieldSel.addEventListener('change', updateDatalist);
       }
 
       function syncServiceFilterSelectToDOM() {
@@ -6980,5 +7040,81 @@ mod tests {
                 "must contain fullscreen CSS rule: {css}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_root_contains_autocomplete_datalist_elements() {
+        let (_, html) = index_html().await;
+
+        assert!(
+            html.contains(r#"id="viewer-name-datalist""#),
+            "viewer-name-datalist must be present for name autocomplete"
+        );
+        assert!(
+            html.contains(r#"id="viewer-query-datalist""#),
+            "viewer-query-datalist must be present for query autocomplete"
+        );
+        assert!(
+            html.contains(r#"id="viewer-detail-query-datalist""#),
+            "viewer-detail-query-datalist must be present for viewer detail autocomplete"
+        );
+        assert!(
+            html.contains(r#"id="detail-query-datalist""#),
+            "detail-query-datalist must be present for filter editor autocomplete"
+        );
+        assert!(
+            html.contains(r#"list="viewer-name-datalist""#),
+            "viewer-name-input must reference viewer-name-datalist via list attribute"
+        );
+        assert!(
+            html.contains(r#"list="viewer-query-datalist""#),
+            "viewer-query-input must reference viewer-query-datalist via list attribute"
+        );
+        assert!(
+            html.contains(r#"list="viewer-detail-query-datalist""#),
+            "viewer-detail-query-input must reference viewer-detail-query-datalist via list attribute"
+        );
+        assert!(
+            html.contains(r#"list="detail-query-datalist""#),
+            "detail-query-input must reference detail-query-datalist via list attribute"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_root_contains_autocomplete_js_wiring() {
+        let (_, html) = index_html().await;
+
+        assert!(
+            html.contains("async function loadServiceNamesForAutocomplete()"),
+            "loadServiceNamesForAutocomplete function must exist"
+        );
+        assert!(
+            html.contains("function populateViewerNameDatalist()"),
+            "populateViewerNameDatalist function must exist"
+        );
+        assert!(
+            html.contains("function attachServiceAutocomplete(valueInput, fieldSel)"),
+            "attachServiceAutocomplete function must exist"
+        );
+        assert!(
+            html.contains("let cachedServiceNames = []"),
+            "cachedServiceNames global variable must be initialized as empty array"
+        );
+        assert!(
+            html.contains("loadServiceNamesForAutocomplete()"),
+            "loadServiceNamesForAutocomplete must be called during page initialization"
+        );
+        assert!(
+            html.contains("attachServiceAutocomplete(valueInput, fieldSel)"),
+            "makeFilterRow must call attachServiceAutocomplete for the value input"
+        );
+        assert!(
+            html.contains("const signals = ['traces', 'logs', 'metrics']"),
+            "viewer name autocomplete must enumerate traces/logs/metrics signal types"
+        );
+        assert!(
+            html.contains("`${svc} ${sig}`"),
+            "viewer name datalist options must be formatted as '<service> <signal>'"
+        );
     }
 }
