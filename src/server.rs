@@ -4,7 +4,9 @@ use crate::domain::dashboard::{
 use crate::domain::telemetry::{NormalizedEntry, Signal, SignalMask};
 use crate::domain::viewer::{ViewerDefinition, ViewerStatus};
 use crate::ingest::decode::DecodeError;
-use crate::ingest::otlp_http::parse_ingest_request;
+use crate::ingest::otlp_http::{
+    attribute_string_value, extract_service_name_from_value, parse_ingest_request,
+};
 use crate::storage::{StreamStore, ViewerStore};
 use crate::viewer_runtime::compiler::{
     CompiledViewer, compile, extract_searchable_payload_text, query_from_definition,
@@ -1361,11 +1363,15 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       <div id="page-viewers">
       <section class="toolbar panel panel-strong">
         <div class="toolbar-row">
-          <select id="viewer-signal-select" data-testid="viewer-signal-select" name="viewer-signal">
-            <option value="traces">traces</option>
-            <option value="metrics">metrics</option>
-            <option value="logs">logs</option>
-          </select>
+          <input id="viewer-signal-select" data-testid="viewer-signal-select" name="viewer-signal"
+                 type="text" value="traces" list="viewer-signal-datalist"
+                 placeholder="traces" autocomplete="off"
+                 aria-label="Signal type" style="min-width:120px;max-width:160px;" />
+          <datalist id="viewer-signal-datalist">
+            <option value="traces"></option>
+            <option value="metrics"></option>
+            <option value="logs"></option>
+          </datalist>
           <select id="viewer-chart-type-select" data-testid="viewer-chart-type-select" name="viewer-chart-type">
             <option value="table">Table</option>
             <option value="stacked_bar">Stacked Bar</option>
@@ -1620,7 +1626,6 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const traceDetailTitle = document.getElementById('trace-detail-title');
       const traceAxis = document.getElementById('trace-axis');
       const traceTimeline = document.getElementById('trace-timeline');
-      const viewerQueryInput = document.getElementById('viewer-query-input');
       const previewViewerButton = document.getElementById('preview-viewer-button');
       const viewerPreviewPanel = document.getElementById('viewer-preview-panel');
       const viewerPreviewCount = document.getElementById('viewer-preview-count');
@@ -2146,8 +2151,20 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         return JSON.stringify(status);
       }
 
+      const VALID_SIGNALS = ['traces', 'metrics', 'logs'];
+
+      function normalizeSignal(raw) {
+        const trimmed = raw.trim().toLowerCase();
+        if (VALID_SIGNALS.includes(trimmed)) return trimmed;
+        return null;
+      }
+
+      function getSignal() {
+        return normalizeSignal(viewerSignalSelect.value);
+      }
+
       function syncCreateForm() {
-        const signal = viewerSignalSelect.value;
+        const signal = getSignal() || 'traces';
         viewerNameInput.placeholder = readViewerPlaceholder(signal);
         const isMetrics = signal === 'metrics';
         viewerChartTypeSelect.disabled = !isMetrics;
@@ -2868,7 +2885,14 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       }
 
       async function fetchPreview() {
-        const signalType = viewerSignalSelect.value;
+        const signalType = getSignal();
+        if (!signalType) {
+          showPreviewMessage('Enter a valid signal type: traces, metrics, or logs.');
+          previewStatusEl.textContent = '';
+          viewerPreviewCount.textContent = '';
+          viewerPreviewPanel.hidden = false;
+          return;
+        }
         const query = viewerQueryInput.value.trim() || null;
         const filters = readFiltersFromBuilder(filterRowsContainer);
         const seq = ++previewRequestSeq;
@@ -2925,9 +2949,15 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
       async function createViewer() {
         const name = viewerNameInput.value.trim();
-        const signal = viewerSignalSelect.value;
+        const rawSignal = viewerSignalSelect.value;
+        const signal = normalizeSignal(rawSignal);
         const chart_type = viewerChartTypeSelect.value;
         const query = viewerQueryInput.value.trim() || null;
+        if (!signal) {
+          setStatus('error', `Invalid signal type "${rawSignal.trim()}". Use: traces, metrics, or logs.`);
+          viewerSignalSelect.focus();
+          return;
+        }
         if (!name) {
           setStatus('error', 'Viewer name is required.');
           viewerNameInput.focus();
@@ -2993,9 +3023,9 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         refreshViewers();
         previewViewer(true);
       });
-      viewerSignalSelect.addEventListener('change', () => {
+      viewerSignalSelect.addEventListener('input', () => {
         syncCreateForm();
-        previewViewer(true);
+        previewViewer();
       });
       viewerQueryInput.addEventListener('input', () => previewViewer());
       viewerQueryInput.addEventListener('keydown', event => {
@@ -3621,7 +3651,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           if (!resp.ok) return null;
           const { services } = await resp.json();
           return services;
-        } catch (_) { return null; }
+        } catch (_) { return null; /* best-effort: service list fetch failure is non-critical */ }
       }
 
       async function fetchAndPopulateServices() {
@@ -5799,51 +5829,6 @@ fn truncate_preview(text: &str) -> String {
     }
 }
 
-fn extract_service_name_from_resource_blocks(
-    signal: Signal,
-    value: &serde_json::Value,
-) -> Option<String> {
-    let resource_blocks = match signal {
-        Signal::Traces => value.get("resourceSpans")?.as_array()?,
-        Signal::Metrics => value.get("resourceMetrics")?.as_array()?,
-        Signal::Logs => value.get("resourceLogs")?.as_array()?,
-    };
-
-    for resource_block in resource_blocks {
-        let Some(attributes) = resource_block
-            .get("resource")
-            .and_then(|resource| resource.get("attributes"))
-            .and_then(serde_json::Value::as_array)
-        else {
-            continue;
-        };
-
-        if let Some(service_name) = attribute_string_value(attributes, "service.name") {
-            return Some(service_name);
-        }
-    }
-
-    None
-}
-
-fn attribute_string_value(attributes: &[serde_json::Value], key: &str) -> Option<String> {
-    for attribute in attributes {
-        if attribute.get("key").and_then(serde_json::Value::as_str) != Some(key) {
-            continue;
-        }
-
-        if let Some(value) = attribute
-            .get("value")
-            .and_then(|value| value.get("stringValue"))
-            .and_then(serde_json::Value::as_str)
-        {
-            return Some(value.to_string());
-        }
-    }
-
-    None
-}
-
 struct MetricFields {
     service_name: Option<String>,
     metric_name: Option<String>,
@@ -5853,7 +5838,7 @@ struct MetricFields {
 fn extract_metric_fields(payload: &Bytes) -> Option<MetricFields> {
     let value: serde_json::Value = serde_json::from_slice(payload).ok()?;
     let resource_metrics = value.get("resourceMetrics")?.as_array()?;
-    let service_name = extract_service_name_from_resource_blocks(Signal::Metrics, &value);
+    let service_name = extract_service_name_from_value(Signal::Metrics, &value);
     let mut metric_name = None;
     let mut metric_value = None;
 
@@ -5977,7 +5962,7 @@ fn json_scalar_to_string(value: &serde_json::Value) -> Option<String> {
 fn structured_log_preview(payload: &Bytes) -> Option<String> {
     let value: serde_json::Value = serde_json::from_slice(payload).ok()?;
     let resource_logs = value.get("resourceLogs")?.as_array()?;
-    let service_name = extract_service_name_from_resource_blocks(Signal::Logs, &value);
+    let service_name = extract_service_name_from_value(Signal::Logs, &value);
     let mut severity_text = None;
     let mut body_text = None;
 
@@ -6057,70 +6042,24 @@ fn json_body_text(value: &serde_json::Value) -> Option<String> {
 
 fn structured_trace_preview(payload: &Bytes) -> Option<String> {
     let value: serde_json::Value = serde_json::from_slice(payload).ok()?;
-    let resource_spans = value.get("resourceSpans")?.as_array()?;
-    let mut service_name = None;
-    let mut span_name = None;
-
-    for resource_span in resource_spans {
-        if service_name.is_none() {
-            let attributes = resource_span
-                .get("resource")
-                .and_then(|resource| resource.get("attributes"))
-                .and_then(serde_json::Value::as_array);
-
-            if let Some(attributes) = attributes {
-                for attribute in attributes {
-                    if attribute.get("key").and_then(serde_json::Value::as_str)
-                        != Some("service.name")
-                    {
-                        continue;
-                    }
-
-                    service_name = attribute
-                        .get("value")
-                        .and_then(|value| value.get("stringValue"))
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string);
-                    if service_name.is_some() {
-                        break;
-                    }
-                }
-            }
-        }
-
-        if span_name.is_none() {
-            let scope_spans = resource_span
-                .get("scopeSpans")
-                .and_then(serde_json::Value::as_array);
-
-            if let Some(scope_spans) = scope_spans {
-                for scope_span in scope_spans {
-                    let spans = scope_span
-                        .get("spans")
-                        .and_then(serde_json::Value::as_array);
-                    if let Some(spans) = spans {
-                        for span in spans {
-                            span_name = span
-                                .get("name")
-                                .and_then(serde_json::Value::as_str)
-                                .map(str::to_string);
-                            if span_name.is_some() {
-                                break;
-                            }
-                        }
-                    }
-
-                    if span_name.is_some() {
-                        break;
-                    }
-                }
-            }
-        }
-
-        if service_name.is_some() && span_name.is_some() {
-            break;
-        }
-    }
+    let service_name = extract_service_name_from_value(Signal::Traces, &value);
+    let span_name = value
+        .get("resourceSpans")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|resource_spans| {
+            resource_spans.iter().find_map(|rs| {
+                rs.get("scopeSpans")
+                    .and_then(serde_json::Value::as_array)?
+                    .iter()
+                    .find_map(|ss| {
+                        ss.get("spans")
+                            .and_then(serde_json::Value::as_array)?
+                            .iter()
+                            .find_map(|span| span.get("name").and_then(serde_json::Value::as_str))
+                            .map(str::to_string)
+                    })
+            })
+        });
 
     match (service_name, span_name) {
         (Some(service_name), Some(span_name)) => Some(format!(
@@ -6256,7 +6195,7 @@ fn extract_traces_from_entries(
         })
         .collect();
 
-    traces.sort_by(|a, b| b.started_at_ns.cmp(&a.started_at_ns));
+    traces.sort_by_key(|b| std::cmp::Reverse(b.started_at_ns));
     traces
 }
 
@@ -7115,6 +7054,103 @@ mod tests {
         assert!(
             html.contains("`${svc} ${sig}`"),
             "viewer name datalist options must be formatted as '<service> <signal>'"
+        );
+    }
+
+    // --- Signal combobox autocomplete tests ---
+
+    #[tokio::test]
+    async fn test_signal_input_html_structure() {
+        let (_, html) = index_html().await;
+
+        assert!(
+            html.contains("id=\"viewer-signal-select\"")
+                && html.contains("type=\"text\"")
+                && html.contains("list=\"viewer-signal-datalist\""),
+            "signal select should be a text input with datalist reference"
+        );
+        assert!(
+            !html.contains("<select id=\"viewer-signal-select\""),
+            "signal select should no longer be a <select> element"
+        );
+        assert!(
+            html.contains("value=\"traces\""),
+            "signal input should default to 'traces'"
+        );
+        assert!(
+            html.contains("autocomplete=\"off\""),
+            "signal input should have autocomplete=\"off\""
+        );
+        assert!(
+            html.contains("data-testid=\"viewer-signal-select\""),
+            "signal input must preserve data-testid attribute"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_signal_datalist_options() {
+        let (_, html) = index_html().await;
+
+        assert!(
+            html.contains("<datalist id=\"viewer-signal-datalist\">"),
+            "signal datalist element must exist with correct id"
+        );
+        assert!(
+            html.contains("<option value=\"traces\"></option>")
+                && html.contains("<option value=\"metrics\"></option>")
+                && html.contains("<option value=\"logs\"></option>"),
+            "signal datalist must contain all three signal types"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_signal_js_validation_logic() {
+        let (_, html) = index_html().await;
+
+        assert!(
+            html.contains("const VALID_SIGNALS = ['traces', 'metrics', 'logs']"),
+            "JS must define VALID_SIGNALS constant"
+        );
+        assert!(
+            html.contains("function normalizeSignal(raw)"),
+            "JS must define normalizeSignal function"
+        );
+        assert!(
+            html.contains("function getSignal()"),
+            "JS must define getSignal helper"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_signal_js_usage_in_functions() {
+        let (_, html) = index_html().await;
+
+        assert!(
+            html.contains("const signal = getSignal()"),
+            "syncCreateForm should use getSignal()"
+        );
+        assert!(
+            html.contains("const signalType = getSignal()"),
+            "fetchPreview should use getSignal()"
+        );
+        assert!(
+            html.contains("const signal = normalizeSignal(rawSignal)")
+                && html.contains("Invalid signal type"),
+            "createViewer should normalize and validate signal"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_signal_input_event_listener() {
+        let (_, html) = index_html().await;
+
+        assert!(
+            html.contains("viewerSignalSelect.addEventListener('input'"),
+            "signal input should listen to 'input' event"
+        );
+        assert!(
+            html.contains("syncCreateForm()") && html.contains("previewViewer()"),
+            "signal input event handler must call syncCreateForm and previewViewer"
         );
     }
 }

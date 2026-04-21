@@ -32,7 +32,10 @@ fn extract_service_name(signal: Signal, content_type: ContentType, body: &Bytes)
     extract_service_name_from_value(signal, &value)
 }
 
-fn extract_service_name_from_value(signal: Signal, value: &serde_json::Value) -> Option<String> {
+pub fn extract_service_name_from_value(
+    signal: Signal,
+    value: &serde_json::Value,
+) -> Option<String> {
     let resource_blocks = resource_blocks_for_signal(signal, value)?;
 
     for resource_block in resource_blocks {
@@ -63,7 +66,7 @@ fn resource_blocks_for_signal(
     }
 }
 
-fn attribute_string_value(attributes: &[serde_json::Value], key: &str) -> Option<String> {
+pub fn attribute_string_value(attributes: &[serde_json::Value], key: &str) -> Option<String> {
     for attribute in attributes {
         if attribute.get("key").and_then(serde_json::Value::as_str) != Some(key) {
             continue;
