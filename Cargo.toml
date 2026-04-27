@@ -2,7 +2,7 @@
 edition = "2024"
 name = "litelemetry"
 repository = "https://github.com/smartcrabai/litelemetry"
-version = "0.1.8"
+version = "0.1.9"
 
 [dependencies]
 axum = { features = ["macros"], version = "0.8" }
