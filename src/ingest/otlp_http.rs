@@ -1,4 +1,4 @@
-use crate::domain::telemetry::{NormalizedEntry, Signal};
+use crate::domain::telemetry::{NormalizedEntry, SERVICE_NAME_ATTRIBUTE, Signal};
 use crate::ingest::decode::{ContentType, DecodeError, parse_content_type};
 use bytes::Bytes;
 use chrono::Utc;
@@ -47,7 +47,7 @@ pub fn extract_service_name_from_value(
             continue;
         };
 
-        if let Some(service_name) = attribute_string_value(attributes, "service.name") {
+        if let Some(service_name) = attribute_string_value(attributes, SERVICE_NAME_ATTRIBUTE) {
             return Some(service_name);
         }
     }

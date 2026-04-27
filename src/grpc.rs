@@ -4,7 +4,7 @@ use buffa::view::OwnedView;
 use chrono::Utc;
 use connectrpc::{ConnectError, Context, Router as ConnectRouter};
 
-use crate::domain::telemetry::{NormalizedEntry, Signal};
+use crate::domain::telemetry::{NormalizedEntry, SERVICE_NAME_ATTRIBUTE, Signal};
 use crate::otlp_proto::opentelemetry::proto::collector::logs::v1::{
     ExportLogsServiceRequestView, ExportLogsServiceResponse, LogsService, LogsServiceExt,
 };
@@ -18,8 +18,6 @@ use crate::otlp_proto::opentelemetry::proto::collector::trace::v1::{
 use crate::otlp_proto::opentelemetry::proto::common::v1::any_value;
 use crate::otlp_proto::opentelemetry::proto::resource::v1::ResourceView;
 use crate::server::AppState;
-
-const SERVICE_NAME_ATTRIBUTE: &str = "service.name";
 
 pub fn build_connect_router(state: AppState) -> ConnectRouter {
     let service = Arc::new(OtlpService { state });
@@ -41,7 +39,7 @@ impl OtlpService {
             .map(|_| ())
             .map_err(|error| {
                 tracing::error!("stream append_entry failed: {error}");
-                ConnectError::internal(format!("stream append_entry failed: {error}"))
+                ConnectError::internal("ingest failed")
             })
     }
 }
