@@ -189,6 +189,42 @@ fn build_logger_provider(app_port: u16) -> SdkLoggerProvider {
         .build()
 }
 
+fn build_tracer_provider_grpc(app_port: u16) -> SdkTracerProvider {
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(format!("http://127.0.0.1:{app_port}"))
+        .build()
+        .expect("failed to build gRPC SpanExporter");
+
+    SdkTracerProvider::builder()
+        .with_simple_exporter(exporter)
+        .build()
+}
+
+fn build_meter_provider_grpc(app_port: u16) -> SdkMeterProvider {
+    let exporter = opentelemetry_otlp::MetricExporter::builder()
+        .with_tonic()
+        .with_endpoint(format!("http://127.0.0.1:{app_port}"))
+        .build()
+        .expect("failed to build gRPC MetricExporter");
+
+    SdkMeterProvider::builder()
+        .with_reader(PeriodicReader::builder(exporter).build())
+        .build()
+}
+
+fn build_logger_provider_grpc(app_port: u16) -> SdkLoggerProvider {
+    let exporter = opentelemetry_otlp::LogExporter::builder()
+        .with_tonic()
+        .with_endpoint(format!("http://127.0.0.1:{app_port}"))
+        .build()
+        .expect("failed to build gRPC LogExporter");
+
+    SdkLoggerProvider::builder()
+        .with_simple_exporter(exporter)
+        .build()
+}
+
 fn signal_name(signal: Signal) -> &'static str {
     match signal {
         Signal::Traces => "traces",
@@ -649,4 +685,143 @@ async fn test_e2e_all_signals_routed_correctly_memory() {
 
     let logs = app.wait_for_entries(Signal::Logs, 10, 1).await;
     assert!(!logs.is_empty(), "logs stream should have data");
+}
+
+// --- E2E: gRPC --------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_e2e_grpc_trace_stored_in_memory() {
+    let app = MemoryTestApp::start().await;
+    let app_port = app.app_port;
+
+    run_blocking_otel(move || {
+        let provider = build_tracer_provider_grpc(app_port);
+        {
+            let tracer = provider.tracer(E2E_INSTRUMENTATION_NAME);
+            let _span = tracer.start("grpc-test-operation");
+        }
+        provider.shutdown().unwrap();
+    })
+    .await;
+
+    app.assert_signal_has_payload(Signal::Traces).await;
+}
+
+#[tokio::test]
+async fn test_e2e_grpc_metrics_stored_in_memory() {
+    let app = MemoryTestApp::start().await;
+    let app_port = app.app_port;
+
+    run_blocking_otel(move || {
+        let provider = build_meter_provider_grpc(app_port);
+        {
+            let meter = provider.meter(E2E_INSTRUMENTATION_NAME);
+            let counter = meter.u64_counter("grpc.requests").build();
+            counter.add(7, &[]);
+        }
+        provider.shutdown().unwrap();
+    })
+    .await;
+
+    app.assert_signal_has_payload(Signal::Metrics).await;
+}
+
+#[tokio::test]
+async fn test_e2e_grpc_logs_stored_in_memory() {
+    let app = MemoryTestApp::start().await;
+    let app_port = app.app_port;
+
+    run_blocking_otel(move || {
+        let provider = build_logger_provider_grpc(app_port);
+        emit_log(&provider, Severity::Info, "INFO", "grpc memory test");
+        provider.shutdown().unwrap();
+    })
+    .await;
+
+    app.assert_signal_has_payload(Signal::Logs).await;
+}
+
+#[tokio::test]
+async fn test_e2e_grpc_and_http_share_port_memory() {
+    let app = MemoryTestApp::start().await;
+    let app_port = app.app_port;
+
+    run_blocking_otel(move || {
+        let http_provider = build_tracer_provider(app_port);
+        {
+            let tracer = http_provider.tracer(E2E_INSTRUMENTATION_NAME);
+            let _span = tracer.start("http-span");
+        }
+        http_provider.shutdown().unwrap();
+
+        let grpc_provider = build_tracer_provider_grpc(app_port);
+        {
+            let tracer = grpc_provider.tracer(E2E_INSTRUMENTATION_NAME);
+            let _span = tracer.start("grpc-span");
+        }
+        grpc_provider.shutdown().unwrap();
+    })
+    .await;
+
+    let traces = app.wait_for_entries(Signal::Traces, 10, 2).await;
+    assert_eq!(
+        traces.len(),
+        2,
+        "1 HTTP + 1 gRPC span should both land in the same store"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_e2e_grpc_trace_stored_in_redis() {
+    let app = TestApp::start().await;
+    let app_port = app.app_port;
+
+    run_blocking_otel(move || {
+        let provider = build_tracer_provider_grpc(app_port);
+        {
+            let tracer = provider.tracer(E2E_INSTRUMENTATION_NAME);
+            let _span = tracer.start("grpc-redis-operation");
+        }
+        provider.shutdown().unwrap();
+    })
+    .await;
+
+    app.assert_signal_has_payload(Signal::Traces).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_e2e_grpc_metrics_stored_in_redis() {
+    let app = TestApp::start().await;
+    let app_port = app.app_port;
+
+    run_blocking_otel(move || {
+        let provider = build_meter_provider_grpc(app_port);
+        {
+            let meter = provider.meter(E2E_INSTRUMENTATION_NAME);
+            let counter = meter.u64_counter("grpc.redis.requests").build();
+            counter.add(3, &[]);
+        }
+        provider.shutdown().unwrap();
+    })
+    .await;
+
+    app.assert_signal_has_payload(Signal::Metrics).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_e2e_grpc_logs_stored_in_redis() {
+    let app = TestApp::start().await;
+    let app_port = app.app_port;
+
+    run_blocking_otel(move || {
+        let provider = build_logger_provider_grpc(app_port);
+        emit_log(&provider, Severity::Warn, "WARN", "grpc redis test");
+        provider.shutdown().unwrap();
+    })
+    .await;
+
+    app.assert_signal_has_payload(Signal::Logs).await;
 }

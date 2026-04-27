@@ -6,8 +6,11 @@ version = "0.1.9"
 
 [dependencies]
 axum = { features = ["macros"], version = "0.8" }
+buffa = "0.3"
 bytes = "1"
 chrono = { features = ["serde"], version = "0.4" }
+connectrpc = { features = ["axum", "server"], version = "0.3" }
+http-body = "1"
 redis = { features = ["tokio-comp", "streams"], version = "1.0" }
 regex = "1"
 serde = { features = ["derive"], version = "1" }
@@ -22,9 +25,15 @@ uuid = { features = ["v4", "serde"], version = "1" }
 features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"]
 version = "0.8"
 
+[build-dependencies]
+connectrpc-build = "0.3"
+
 [dev-dependencies]
 opentelemetry = "=0.31.0"
-opentelemetry-otlp = { features = ["http-proto"], version = "=0.31.1" }
+opentelemetry-otlp = { features = [
+  "http-proto",
+  "grpc-tonic",
+], version = "=0.31.1" }
 testcontainers = "=0.27.3"
 tower = "=0.5.3"
 

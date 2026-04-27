@@ -4293,6 +4293,7 @@ pub fn build_app_with_services(
         viewer_store,
         viewer_runtime,
     };
+    let connect = crate::grpc::build_connect_router(state.clone());
 
     Router::new()
         .route("/", get(index))
@@ -4326,6 +4327,7 @@ pub fn build_app_with_services(
         .route("/v1/logs", post(ingest_logs))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state)
+        .fallback_service(connect.into_axum_service())
 }
 
 async fn index() -> Html<&'static str> {
