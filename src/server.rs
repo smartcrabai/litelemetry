@@ -1363,15 +1363,12 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       <div id="page-viewers">
       <section class="toolbar panel panel-strong">
         <div class="toolbar-row">
-          <input id="viewer-signal-select" data-testid="viewer-signal-select" name="viewer-signal"
-                 type="text" value="traces" list="viewer-signal-datalist"
-                 placeholder="traces" autocomplete="off"
-                 aria-label="Signal type" style="min-width:120px;max-width:160px;" />
-          <datalist id="viewer-signal-datalist">
-            <option value="traces"></option>
-            <option value="metrics"></option>
-            <option value="logs"></option>
-          </datalist>
+          <select id="viewer-signal-select" data-testid="viewer-signal-select" name="viewer-signal"
+                  aria-label="Signal type" style="min-width:120px;max-width:160px;">
+            <option value="traces">Traces</option>
+            <option value="metrics">Metrics</option>
+            <option value="logs">Logs</option>
+          </select>
           <select id="viewer-chart-type-select" data-testid="viewer-chart-type-select" name="viewer-chart-type">
             <option value="table">Table</option>
             <option value="stacked_bar">Stacked Bar</option>
@@ -2151,20 +2148,12 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         return JSON.stringify(status);
       }
 
-      const VALID_SIGNALS = ['traces', 'metrics', 'logs'];
-
-      function normalizeSignal(raw) {
-        const trimmed = raw.trim().toLowerCase();
-        if (VALID_SIGNALS.includes(trimmed)) return trimmed;
-        return null;
-      }
-
       function getSignal() {
-        return normalizeSignal(viewerSignalSelect.value);
+        return viewerSignalSelect.value;
       }
 
       function syncCreateForm() {
-        const signal = getSignal() || 'traces';
+        const signal = getSignal();
         viewerNameInput.placeholder = readViewerPlaceholder(signal);
         const isMetrics = signal === 'metrics';
         viewerChartTypeSelect.disabled = !isMetrics;
@@ -2886,13 +2875,6 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
       async function fetchPreview() {
         const signalType = getSignal();
-        if (!signalType) {
-          showPreviewMessage('Enter a valid signal type: traces, metrics, or logs.');
-          previewStatusEl.textContent = '';
-          viewerPreviewCount.textContent = '';
-          viewerPreviewPanel.hidden = false;
-          return;
-        }
         const query = viewerQueryInput.value.trim() || null;
         const filters = readFiltersFromBuilder(filterRowsContainer);
         const seq = ++previewRequestSeq;
@@ -2949,15 +2931,9 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
       async function createViewer() {
         const name = viewerNameInput.value.trim();
-        const rawSignal = viewerSignalSelect.value;
-        const signal = normalizeSignal(rawSignal);
+        const signal = getSignal();
         const chart_type = viewerChartTypeSelect.value;
         const query = viewerQueryInput.value.trim() || null;
-        if (!signal) {
-          setStatus('error', `Invalid signal type "${rawSignal.trim()}". Use: traces, metrics, or logs.`);
-          viewerSignalSelect.focus();
-          return;
-        }
         if (!name) {
           setStatus('error', 'Viewer name is required.');
           viewerNameInput.focus();
@@ -3023,7 +2999,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         refreshViewers();
         previewViewer(true);
       });
-      viewerSignalSelect.addEventListener('input', () => {
+      viewerSignalSelect.addEventListener('change', () => {
         syncCreateForm();
         previewViewer();
       });
@@ -7057,67 +7033,67 @@ mod tests {
         );
     }
 
-    // --- Signal combobox autocomplete tests ---
+    // --- Signal select tests ---
 
     #[tokio::test]
-    async fn test_signal_input_html_structure() {
+    async fn test_signal_select_html_structure() {
         let (_, html) = index_html().await;
 
         assert!(
-            html.contains("id=\"viewer-signal-select\"")
-                && html.contains("type=\"text\"")
-                && html.contains("list=\"viewer-signal-datalist\""),
-            "signal select should be a text input with datalist reference"
-        );
-        assert!(
-            !html.contains("<select id=\"viewer-signal-select\""),
-            "signal select should no longer be a <select> element"
-        );
-        assert!(
-            html.contains("value=\"traces\""),
-            "signal input should default to 'traces'"
-        );
-        assert!(
-            html.contains("autocomplete=\"off\""),
-            "signal input should have autocomplete=\"off\""
+            html.contains("<select id=\"viewer-signal-select\""),
+            "signal selector must be a <select> element"
         );
         assert!(
             html.contains("data-testid=\"viewer-signal-select\""),
-            "signal input must preserve data-testid attribute"
+            "signal select must preserve data-testid attribute"
+        );
+        assert!(
+            !html.contains("list=\"viewer-signal-datalist\""),
+            "signal select must not reference a datalist"
         );
     }
 
     #[tokio::test]
-    async fn test_signal_datalist_options() {
+    async fn test_signal_select_options() {
         let (_, html) = index_html().await;
 
         assert!(
-            html.contains("<datalist id=\"viewer-signal-datalist\">"),
-            "signal datalist element must exist with correct id"
+            !html.contains("<datalist id=\"viewer-signal-datalist\">"),
+            "datalist element must not be present"
         );
         assert!(
-            html.contains("<option value=\"traces\"></option>")
-                && html.contains("<option value=\"metrics\"></option>")
-                && html.contains("<option value=\"logs\"></option>"),
-            "signal datalist must contain all three signal types"
+            html.contains("<option value=\"traces\">Traces</option>"),
+            "select must contain a Traces option"
+        );
+        assert!(
+            html.contains("<option value=\"metrics\">Metrics</option>"),
+            "select must contain a Metrics option"
+        );
+        assert!(
+            html.contains("<option value=\"logs\">Logs</option>"),
+            "select must contain a Logs option"
         );
     }
 
     #[tokio::test]
-    async fn test_signal_js_validation_logic() {
+    async fn test_signal_js_simplified_get_signal() {
         let (_, html) = index_html().await;
 
         assert!(
-            html.contains("const VALID_SIGNALS = ['traces', 'metrics', 'logs']"),
-            "JS must define VALID_SIGNALS constant"
+            !html.contains("const VALID_SIGNALS"),
+            "VALID_SIGNALS constant must not be present"
         );
         assert!(
-            html.contains("function normalizeSignal(raw)"),
-            "JS must define normalizeSignal function"
+            !html.contains("function normalizeSignal("),
+            "normalizeSignal function must not be present"
         );
         assert!(
             html.contains("function getSignal()"),
-            "JS must define getSignal helper"
+            "getSignal helper must still be defined"
+        );
+        assert!(
+            html.contains("return viewerSignalSelect.value"),
+            "getSignal must return viewerSignalSelect.value directly"
         );
     }
 
@@ -7134,23 +7110,30 @@ mod tests {
             "fetchPreview should use getSignal()"
         );
         assert!(
-            html.contains("const signal = normalizeSignal(rawSignal)")
-                && html.contains("Invalid signal type"),
-            "createViewer should normalize and validate signal"
+            !html.contains("Invalid signal type"),
+            "invalid-signal error guard must not be present"
+        );
+        assert!(
+            !html.contains("const signal = viewerSignalSelect.value"),
+            "createViewer must not read viewerSignalSelect.value directly; use getSignal()"
         );
     }
 
     #[tokio::test]
-    async fn test_signal_input_event_listener() {
+    async fn test_signal_change_event_listener() {
         let (_, html) = index_html().await;
 
         assert!(
-            html.contains("viewerSignalSelect.addEventListener('input'"),
-            "signal input should listen to 'input' event"
+            html.contains("viewerSignalSelect.addEventListener('change'"),
+            "signal select must listen to 'change' event"
+        );
+        assert!(
+            !html.contains("viewerSignalSelect.addEventListener('input'"),
+            "signal select must not listen to 'input' event"
         );
         assert!(
             html.contains("syncCreateForm()") && html.contains("previewViewer()"),
-            "signal input event handler must call syncCreateForm and previewViewer"
+            "signal change handler must call syncCreateForm and previewViewer"
         );
     }
 }
