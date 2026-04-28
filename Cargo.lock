@@ -327,26 +327,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "buffa"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe57265ac5858082bf9a450654fa56e97fceda045d3e573eed4c2d3cf0b8dc0f"
-dependencies = [
- "bytes",
- "hashbrown 0.15.5",
- "once_cell",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
 name = "buffa-codegen"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f9ddcb25f0dde4d82e0a1128b0c459feba775e24dfa7cb0c3f4a9d61abfa245"
 dependencies = [
- "buffa 0.3.0",
+ "buffa",
  "buffa-descriptor",
  "prettyplease",
  "proc-macro2",
@@ -361,7 +347,7 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0a0794ed1f8a0c6ab168c70258e21cf74ca7b87a7dd888a0a69745b075f2d351"
 dependencies = [
- "buffa 0.3.0",
+ "buffa",
 ]
 
 [[package]]
@@ -479,7 +465,7 @@ dependencies = [
  "async-compression",
  "axum",
  "base64 0.22.1",
- "buffa 0.3.0",
+ "buffa",
  "bytes",
  "flate2",
  "futures",
@@ -509,7 +495,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "591bc832b8d3faef060e435f832a1cf10a71c865dfb49f9874247769b60ef816"
 dependencies = [
  "anyhow",
- "buffa 0.3.0",
+ "buffa",
  "buffa-codegen",
  "connectrpc-codegen",
  "tempfile",
@@ -522,7 +508,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "109a2352193792931d41e5cb3b048985371d5c6505f736f9b9a7ae606d5a0050"
 dependencies = [
  "anyhow",
- "buffa 0.3.0",
+ "buffa",
  "buffa-codegen",
  "heck",
  "prettyplease",
@@ -1524,12 +1510,14 @@ name = "litelemetry"
 version = "0.1.10"
 dependencies = [
  "axum",
- "buffa 0.4.0",
+ "buffa",
  "bytes",
  "chrono",
  "connectrpc",
  "connectrpc-build",
+ "flate2",
  "http-body",
+ "lz4_flex",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
@@ -1537,6 +1525,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "snap",
  "sqlx",
  "testcontainers",
  "testcontainers-modules",
@@ -1546,6 +1535,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zstd",
 ]
 
 [[package]]
@@ -1568,6 +1558,15 @@ name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
+
+[[package]]
+name = "lz4_flex"
+version = "0.11.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
+dependencies = [
+ "twox-hash",
+]
 
 [[package]]
 name = "matchers"
@@ -2623,6 +2622,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "snap"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b6b67fb9a61334225b5b790716f609cd58395f895b3fe8b328786812a40bc3b"
+
+[[package]]
 name = "socket2"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2939,7 +2944,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -3291,6 +3296,12 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
+name = "twox-hash"
+version = "2.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ea3136b675547379c4bd395ca6b938e5ad3c3d20fad76e7fe85f9e0d011419c"
 
 [[package]]
 name = "typenum"
