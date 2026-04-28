@@ -10,7 +10,10 @@ buffa = "0.4"
 bytes = "1"
 chrono = { features = ["serde"], version = "0.4" }
 connectrpc = { features = ["axum", "server"], version = "0.3" }
+flate2 = "1"
 http-body = "1"
+lz4_flex = { version = "0.11", default-features = false, features = ["frame", "std"] }
+snap = "1"
 redis = { features = ["tokio-comp", "streams"], version = "1.0" }
 regex = "1"
 serde = { features = ["derive"], version = "1" }
@@ -20,6 +23,7 @@ tokio = { features = ["full"], version = "1" }
 tracing = "0.1"
 tracing-subscriber = { features = ["env-filter"], version = "0.3" }
 uuid = { features = ["v4", "serde"], version = "1" }
+zstd = "0.13"
 
 [dependencies.sqlx]
 features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"]

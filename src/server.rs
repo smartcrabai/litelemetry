@@ -3,7 +3,7 @@ use crate::domain::dashboard::{
 };
 use crate::domain::telemetry::{NormalizedEntry, Signal, SignalMask};
 use crate::domain::viewer::{ViewerDefinition, ViewerStatus};
-use crate::ingest::decode::DecodeError;
+use crate::ingest::decode::{DecodeError, decompress_body, parse_content_encoding};
 use crate::ingest::otlp_http::{
     attribute_string_value, extract_service_name_from_value, parse_ingest_request,
 };
@@ -5630,6 +5630,29 @@ async fn handle_ingest(
     let content_type = headers
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok());
+    let content_encoding = headers
+        .get(axum::http::header::CONTENT_ENCODING)
+        .and_then(|v| v.to_str().ok());
+
+    let encoding = match parse_content_encoding(content_encoding) {
+        Ok(encoding) => encoding,
+        Err(DecodeError::UnsupportedContentEncoding(value)) => {
+            tracing::warn!("unsupported Content-Encoding: {value}");
+            return StatusCode::UNSUPPORTED_MEDIA_TYPE;
+        }
+        Err(other) => {
+            tracing::error!("parse_content_encoding: {other}");
+            return StatusCode::BAD_REQUEST;
+        }
+    };
+
+    let body = match decompress_body(encoding, body) {
+        Ok(decompressed) => decompressed,
+        Err(error) => {
+            tracing::warn!("decompress_body: {error}");
+            return StatusCode::BAD_REQUEST;
+        }
+    };
 
     match parse_ingest_request(signal, content_type, body) {
         Ok(entry) => {
@@ -5643,6 +5666,10 @@ async fn handle_ingest(
             }
         }
         Err(DecodeError::UnsupportedContentType(_)) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        Err(other) => {
+            tracing::error!("parse_ingest_request: {other}");
+            StatusCode::BAD_REQUEST
+        }
     }
 }
 
