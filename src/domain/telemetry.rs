@@ -76,6 +76,8 @@ impl std::ops::BitOr<Signal> for SignalMask {
     }
 }
 
+pub const SERVICE_NAME_ATTRIBUTE: &str = "service.name";
+
 /// Normalized entry written to the Redis stream
 #[derive(Debug, Clone)]
 pub struct NormalizedEntry {

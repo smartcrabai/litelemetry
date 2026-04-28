@@ -4,7 +4,7 @@ A lightweight, OpenTelemetry (OTLP/HTTP) compatible telemetry collection and vis
 
 ## Features
 
-- **OTLP/HTTP compatible** — Receives Traces, Metrics, and Logs via `/v1/traces`, `/v1/metrics`, `/v1/logs` endpoints
+- **OTLP/HTTP and OTLP/gRPC compatible** — Receives Traces, Metrics, and Logs via `/v1/traces`, `/v1/metrics`, `/v1/logs` endpoints (HTTP) and the standard OTLP gRPC service paths (also accepting Connect and gRPC-Web on the same port)
 - **In-memory storage with Redis Streams** — Telemetry data is stored in Redis; old data is automatically evicted via `allkeys-lru`
 - **PostgreSQL for master data** — Viewer definitions and cursor snapshots are persisted in PostgreSQL
 - **Viewer Runtime** — Updates multiple Viewers with a single Redis read per signal (fan-out)
@@ -34,10 +34,23 @@ OTLP/HTTP Client
 4. Each Viewer accepts only entries matching its signal mask and prunes entries outside the lookback window
 5. Cursor positions are saved to PostgreSQL as snapshots
 
+## OTLP ingest endpoints
+
+The server accepts OpenTelemetry data via two transports on the **same** HTTP port:
+
+- **OTLP/HTTP** — `POST /v1/traces`, `/v1/metrics`, `/v1/logs` with `application/x-protobuf` or `application/json` body.
+- **OTLP/gRPC** — gRPC, gRPC-Web, and ConnectRPC clients can call the standard OTLP service paths:
+  - `/opentelemetry.proto.collector.trace.v1.TraceService/Export`
+  - `/opentelemetry.proto.collector.metrics.v1.MetricsService/Export`
+  - `/opentelemetry.proto.collector.logs.v1.LogsService/Export`
+
+  Implemented with [`buffa`](https://github.com/anthropics/buffa) (protobuf) and [`connectrpc`](https://github.com/anthropics/connect-rust); registered into the existing axum router via `fallback_service`. Point any OTLP client at `http://<host>:<port>` (no path, no separate gRPC port).
+
 ## Prerequisites
 
 - Rust (edition 2024)
 - [bacon](https://github.com/Canop/bacon) for local app startup (`cargo install --locked bacon`)
+- `protoc` on PATH at build time (`brew install protobuf` on macOS, `apk add protoc protobuf-dev` on Alpine)
 - Redis and PostgreSQL (only required for full mode; standalone mode needs neither)
 - Docker (for integration tests and Docker Compose startup)
 
