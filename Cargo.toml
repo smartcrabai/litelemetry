@@ -6,7 +6,7 @@ version = "0.1.11"
 
 [dependencies]
 axum = { features = ["macros"], version = "0.8" }
-buffa = "0.3"
+buffa = "0.4"
 bytes = "1"
 chrono = { features = ["serde"], version = "0.4" }
 connectrpc = { features = ["axum", "server"], version = "0.3" }
