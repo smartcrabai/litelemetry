@@ -1,5 +1,6 @@
 use crate::domain::telemetry::{NormalizedEntry, Signal};
 use crate::domain::viewer::ViewerDefinition;
+use crate::ingest::otlp_pb::payload_as_value;
 use bytes::Bytes;
 use serde_json::Value;
 use thiserror::Error;
@@ -170,7 +171,7 @@ fn eval_filter(filter: &CompiledFilter, entry: &NormalizedEntry) -> bool {
 /// Extracts searchable text from the payload for each signal type.
 /// Returns None if the payload is not parseable or contains no relevant fields.
 pub(crate) fn extract_searchable_payload_text(signal: Signal, payload: &Bytes) -> Option<String> {
-    let value: Value = serde_json::from_slice(payload).ok()?;
+    let value: Value = payload_as_value(signal, payload)?;
     match signal {
         Signal::Traces => {
             let resource_spans = value.get("resourceSpans")?.as_array()?;
