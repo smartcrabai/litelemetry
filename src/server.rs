@@ -7,6 +7,7 @@ use crate::ingest::decode::{DecodeError, decompress_body, parse_content_encoding
 use crate::ingest::otlp_http::{
     attribute_string_value, extract_service_name_from_value, parse_ingest_request,
 };
+use crate::ingest::otlp_pb::payload_as_value;
 use crate::storage::{StreamStore, ViewerStore};
 use crate::viewer_runtime::compiler::{
     CompiledViewer, compile, extract_searchable_payload_text, query_from_definition,
@@ -5841,7 +5842,7 @@ struct MetricFields {
 }
 
 fn extract_metric_fields(payload: &Bytes) -> Option<MetricFields> {
-    let value: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    let value = payload_as_value(Signal::Metrics, payload)?;
     let resource_metrics = value.get("resourceMetrics")?.as_array()?;
     let service_name = extract_service_name_from_value(Signal::Metrics, &value);
     let mut metric_name = None;
@@ -5965,7 +5966,7 @@ fn json_scalar_to_string(value: &serde_json::Value) -> Option<String> {
 }
 
 fn structured_log_preview(payload: &Bytes) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    let value = payload_as_value(Signal::Logs, payload)?;
     let resource_logs = value.get("resourceLogs")?.as_array()?;
     let service_name = extract_service_name_from_value(Signal::Logs, &value);
     let mut severity_text = None;
@@ -6046,7 +6047,7 @@ fn json_body_text(value: &serde_json::Value) -> Option<String> {
 }
 
 fn structured_trace_preview(payload: &Bytes) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    let value = payload_as_value(Signal::Traces, payload)?;
     let service_name = extract_service_name_from_value(Signal::Traces, &value);
     let span_name = value
         .get("resourceSpans")
@@ -6085,7 +6086,7 @@ fn extract_traces_from_entries(
         if entry.signal != Signal::Traces {
             continue;
         }
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&entry.payload) else {
+        let Some(value) = payload_as_value(Signal::Traces, &entry.payload) else {
             continue;
         };
         let Some(resource_spans) = value.get("resourceSpans").and_then(|v| v.as_array()) else {

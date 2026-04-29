@@ -1,5 +1,6 @@
 use crate::domain::telemetry::{NormalizedEntry, SERVICE_NAME_ATTRIBUTE, Signal};
 use crate::ingest::decode::{ContentType, DecodeError, parse_content_type};
+use crate::ingest::otlp_pb::payload_to_json_value;
 use bytes::Bytes;
 use chrono::Utc;
 
@@ -24,11 +25,10 @@ pub fn parse_ingest_request(
 }
 
 fn extract_service_name(signal: Signal, content_type: ContentType, body: &Bytes) -> Option<String> {
-    if content_type != ContentType::Json {
-        return None;
-    }
-
-    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let value = match content_type {
+        ContentType::Json => serde_json::from_slice(body).ok()?,
+        ContentType::Protobuf => payload_to_json_value(signal, body)?,
+    };
     extract_service_name_from_value(signal, &value)
 }
 
@@ -267,15 +267,101 @@ mod tests {
     // --- parse_ingest_request: boundary values ------------------------------
 
     #[test]
-    fn test_parse_ingest_request_service_name_is_none_for_protobuf_traces() {
-        // Given: service_name extraction from protobuf binary is not implemented
+    fn test_parse_ingest_request_service_name_is_none_for_invalid_protobuf() {
+        // Given: protobuf content-type but body is not a valid OTLP request
         let entry =
             parse_ingest_request(Signal::Traces, Some("application/x-protobuf"), Bytes::new())
                 .unwrap();
 
-        // Then: service_name is None
+        // Then: service_name is None (decode silently fails, payload retained)
         assert_eq!(entry.service_name, None);
     }
+
+    // --- parse_ingest_request: service_name from protobuf -----------------
+
+    #[test]
+    fn test_parse_ingest_request_extracts_service_name_from_trace_protobuf() {
+        use crate::otlp_proto::opentelemetry::proto::collector::trace::v1::ExportTraceServiceRequest;
+        use crate::otlp_proto::opentelemetry::proto::trace::v1::ResourceSpans;
+        use buffa::Message;
+
+        let request = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: buffa::MessageField::some(resource_with_service_name("checkout-ui")),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let body = request.encode_to_bytes();
+
+        let entry =
+            parse_ingest_request(Signal::Traces, Some("application/x-protobuf"), body).unwrap();
+
+        assert_eq!(entry.service_name.as_deref(), Some("checkout-ui"));
+    }
+
+    #[test]
+    fn test_parse_ingest_request_extracts_service_name_from_metric_protobuf() {
+        use crate::otlp_proto::opentelemetry::proto::collector::metrics::v1::ExportMetricsServiceRequest;
+        use crate::otlp_proto::opentelemetry::proto::metrics::v1::ResourceMetrics;
+        use buffa::Message;
+
+        let request = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: buffa::MessageField::some(resource_with_service_name("orders-api")),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let body = request.encode_to_bytes();
+
+        let entry =
+            parse_ingest_request(Signal::Metrics, Some("application/x-protobuf"), body).unwrap();
+
+        assert_eq!(entry.service_name.as_deref(), Some("orders-api"));
+    }
+
+    #[test]
+    fn test_parse_ingest_request_extracts_service_name_from_log_protobuf() {
+        use crate::otlp_proto::opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest;
+        use crate::otlp_proto::opentelemetry::proto::logs::v1::ResourceLogs;
+        use buffa::Message;
+
+        let request = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                resource: buffa::MessageField::some(resource_with_service_name("worker-billing")),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let body = request.encode_to_bytes();
+
+        let entry =
+            parse_ingest_request(Signal::Logs, Some("application/x-protobuf"), body).unwrap();
+
+        assert_eq!(entry.service_name.as_deref(), Some("worker-billing"));
+    }
+
+    fn resource_with_service_name(
+        name: &str,
+    ) -> crate::otlp_proto::opentelemetry::proto::resource::v1::Resource {
+        use crate::otlp_proto::opentelemetry::proto::common::v1::{AnyValue, KeyValue, any_value};
+        use crate::otlp_proto::opentelemetry::proto::resource::v1::Resource;
+
+        Resource {
+            attributes: vec![KeyValue {
+                key: SERVICE_NAME_ATTRIBUTE.to_string(),
+                value: buffa::MessageField::some(AnyValue {
+                    value: Some(any_value::Value::StringValue(name.to_string())),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    // --- parse_ingest_request: service_name from JSON ---------------------
 
     #[test]
     fn test_parse_ingest_request_extracts_service_name_from_trace_json() {
