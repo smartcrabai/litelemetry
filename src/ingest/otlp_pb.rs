@@ -29,15 +29,11 @@ pub fn payload_to_json_value(signal: Signal, body: &Bytes) -> Option<serde_json:
     }
 }
 
-/// Normalize an OTLP request body to a JSON Value, accepting either OTLP/JSON
-/// or OTLP/protobuf wire format. Used by viewer-side helpers that don't know
-/// the original content-type. Returns `None` if neither decoder accepts the
-/// payload.
 pub fn payload_as_value(signal: Signal, payload: &Bytes) -> Option<serde_json::Value> {
-    if looks_like_json(payload) {
-        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload) {
-            return Some(value);
-        }
+    if looks_like_json(payload)
+        && let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload)
+    {
+        return Some(value);
     }
     payload_to_json_value(signal, payload)
 }
