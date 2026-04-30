@@ -31,8 +31,12 @@ use uuid::Uuid;
 // --- Helpers ----------------------------------------------------------------
 
 async fn make_redis_store(port: u16) -> RedisStore {
+    make_redis_store_with_max(port, None).await
+}
+
+async fn make_redis_store_with_max(port: u16, max_entries: Option<usize>) -> RedisStore {
     let url = format!("redis://127.0.0.1:{port}");
-    RedisStore::new(&url)
+    RedisStore::new(&url, max_entries)
         .await
         .expect("Redis connection failed")
 }
@@ -6956,6 +6960,73 @@ async fn test_dashboard_import_invalid_json_returns_400_memory() {
 
     // Then: 400 Bad Request (axum returns 400 for JSON syntax errors)
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_redis_store_caps_stream_with_maxlen() {
+    // Given: a RedisStore configured with max_entries = 100
+    let redis_container = Redis::default().start().await.unwrap();
+    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
+    let mut store = make_redis_store_with_max(redis_port, Some(100)).await;
+
+    // When: 1000 entries are appended for the same signal
+    let total = 1_000;
+    for i in 0..total {
+        let entry = NormalizedEntry {
+            signal: Signal::Logs,
+            observed_at: Utc::now(),
+            service_name: Some(format!("svc-{i}")),
+            payload: Bytes::from(format!("payload-{i}")),
+        };
+        store.append_entry(&entry).await.unwrap();
+    }
+
+    // Then: the stream length stays bounded.
+    // MAXLEN ~ N is approximate (capped on radix tree node boundaries) so we expect the
+    // length to be near 100 but allow generous slack — the key assertion is that growth is bounded.
+    let entries = store
+        .read_entries_since(Signal::Logs, None, 10_000)
+        .await
+        .unwrap();
+    assert!(
+        entries.len() < total,
+        "stream was not trimmed at all, got {} of {} entries",
+        entries.len(),
+        total
+    );
+    assert!(
+        entries.len() < 500,
+        "approximate trim must keep the stream within ~5x of the cap, got {}",
+        entries.len()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_redis_store_unlimited_when_max_entries_is_none() {
+    // Given: a RedisStore with no max_entries
+    let redis_container = Redis::default().start().await.unwrap();
+    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
+    let mut store = make_redis_store_with_max(redis_port, None).await;
+
+    // When: 30 entries are appended
+    for i in 0..30 {
+        let entry = NormalizedEntry {
+            signal: Signal::Logs,
+            observed_at: Utc::now(),
+            service_name: Some(format!("svc-{i}")),
+            payload: Bytes::from(format!("payload-{i}")),
+        };
+        store.append_entry(&entry).await.unwrap();
+    }
+
+    // Then: all 30 entries are retained
+    let entries = store
+        .read_entries_since(Signal::Logs, None, 10_000)
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 30);
 }
 
 #[tokio::test]

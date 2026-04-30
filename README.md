@@ -5,7 +5,7 @@ A lightweight, OpenTelemetry (OTLP/HTTP) compatible telemetry collection and vis
 ## Features
 
 - **OTLP/HTTP and OTLP/gRPC compatible** — Receives Traces, Metrics, and Logs via `/v1/traces`, `/v1/metrics`, `/v1/logs` endpoints (HTTP) and the standard OTLP gRPC service paths (also accepting Connect and gRPC-Web on the same port)
-- **In-memory storage with Redis Streams** — Telemetry data is stored in Redis; old data is automatically evicted via `allkeys-lru`
+- **In-memory storage with Redis Streams** — Telemetry data is stored in Redis; per-signal stream length is bounded via `XADD MAXLEN ~ N` (configurable through `REDIS_STREAM_MAX_ENTRIES`)
 - **PostgreSQL for master data** — Viewer definitions and cursor snapshots are persisted in PostgreSQL
 - **Viewer Runtime** — Updates multiple Viewers with a single Redis read per signal (fan-out)
 - **Resume on startup** — Restores cursor positions from PostgreSQL snapshots and fetches only the diff
@@ -65,6 +65,7 @@ The server accepts OpenTelemetry data via two transports on the **same** HTTP po
 | `HTTP_PORT` | — | HTTP server listen port (takes precedence over `PORT`) |
 | `VIEWER_RUNTIME_POLL_MS` | `1000` | Poll interval for the background viewer runtime |
 | `MEMORY_STREAM_MAX_ENTRIES` | `100000` | Maximum number of in-memory stream entries retained per signal when `STANDALONE=true`. |
+| `REDIS_STREAM_MAX_ENTRIES` | `100000` | Maximum number of Redis stream entries retained per signal (used only when `STANDALONE=false`). Each `XADD` is issued with `MAXLEN ~ N` for approximate trimming. Set to `0` to disable trimming. |
 
 When set, numeric environment variables must parse cleanly. Invalid values fail fast at startup instead of silently falling back to defaults.
 

@@ -37,13 +37,15 @@ pub fn stream_key_for_signal(signal: Signal) -> &'static str {
 #[derive(Clone)]
 pub struct RedisStore {
     conn: redis::aio::MultiplexedConnection,
+    /// `None` disables stream trimming.
+    max_entries: Option<usize>,
 }
 
 impl RedisStore {
-    pub async fn new(url: &str) -> Result<Self, redis::RedisError> {
+    pub async fn new(url: &str, max_entries: Option<usize>) -> Result<Self, redis::RedisError> {
         let client = redis::Client::open(url)?;
         let conn = client.get_multiplexed_async_connection().await?;
-        Ok(Self { conn })
+        Ok(Self { conn, max_entries })
     }
 
     /// XADDs a NormalizedEntry to the corresponding stream and returns the generated stream ID.
@@ -56,8 +58,12 @@ impl RedisStore {
         let service_name = entry.service_name.as_deref().unwrap_or("");
         let payload: &[u8] = &entry.payload;
 
-        let id: String = redis::cmd("XADD")
-            .arg(key)
+        let mut cmd = redis::cmd("XADD");
+        cmd.arg(key);
+        if let Some(n) = self.max_entries {
+            cmd.arg("MAXLEN").arg("~").arg(n);
+        }
+        let id: String = cmd
             .arg("*")
             .arg("observed_at")
             .arg(&observed_at)
