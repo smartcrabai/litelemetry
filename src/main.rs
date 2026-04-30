@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 const DEFAULT_HTTP_PORT: u16 = 8080;
 const DEFAULT_VIEWER_RUNTIME_POLL_MS: u64 = 1_000;
 const DEFAULT_MEMORY_STREAM_MAX_ENTRIES: usize = 100_000;
+const DEFAULT_REDIS_STREAM_MAX_ENTRIES: usize = 100_000;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 enum ConfigError {
@@ -86,11 +87,16 @@ async fn main() {
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
         let database_url = std::env::var("DATABASE_URL").ok();
 
+        let redis_stream_max_entries_raw = std::env::var("REDIS_STREAM_MAX_ENTRIES").ok();
+        let redis_stream_max_entries = exit_on_config_error(read_redis_stream_max_entries(
+            redis_stream_max_entries_raw.as_deref(),
+        ));
+
         tracing::info!(
             "connecting to Redis: {}",
             redact_redis_url_for_log(&redis_url)
         );
-        let redis = RedisStore::new(&redis_url)
+        let redis = RedisStore::new(&redis_url, redis_stream_max_entries)
             .await
             .expect("failed to connect to Redis");
         let stream_store = StreamStore::Redis(redis);
@@ -240,6 +246,17 @@ fn read_memory_stream_max_entries(raw: Option<&str>) -> Result<usize, ConfigErro
     )
 }
 
+/// Returns `None` when set to `0` (disables trimming).
+fn read_redis_stream_max_entries(raw: Option<&str>) -> Result<Option<usize>, ConfigError> {
+    let n: usize = parse_env_with_message(
+        "REDIS_STREAM_MAX_ENTRIES",
+        raw,
+        DEFAULT_REDIS_STREAM_MAX_ENTRIES,
+        "a non-negative integer",
+    )?;
+    Ok(if n == 0 { None } else { Some(n) })
+}
+
 fn parse_env_with_message<T>(
     var_name: &'static str,
     raw: Option<&str>,
@@ -268,8 +285,8 @@ fn invalid_env(var_name: &'static str, expected: &'static str, value: &str) -> C
 #[cfg(test)]
 mod tests {
     use super::{
-        invalid_env, read_http_port, read_standalone, read_viewer_runtime_poll_ms,
-        redact_redis_url_for_log,
+        invalid_env, read_http_port, read_redis_stream_max_entries, read_standalone,
+        read_viewer_runtime_poll_ms, redact_redis_url_for_log,
     };
 
     #[test]
@@ -319,6 +336,32 @@ mod tests {
         assert_eq!(
             read_standalone(Some("sometimes")).unwrap_err(),
             invalid_env("STANDALONE", "`true`, `false`, `1`, or `0`", "sometimes")
+        );
+    }
+
+    #[test]
+    fn redis_stream_max_entries_defaults_to_100k() {
+        assert_eq!(read_redis_stream_max_entries(None).unwrap(), Some(100_000));
+    }
+
+    #[test]
+    fn redis_stream_max_entries_zero_disables_trim() {
+        assert_eq!(read_redis_stream_max_entries(Some("0")).unwrap(), None);
+    }
+
+    #[test]
+    fn redis_stream_max_entries_accepts_explicit_value() {
+        assert_eq!(
+            read_redis_stream_max_entries(Some("5000")).unwrap(),
+            Some(5_000)
+        );
+    }
+
+    #[test]
+    fn redis_stream_max_entries_rejects_invalid_value() {
+        assert_eq!(
+            read_redis_stream_max_entries(Some("abc")).unwrap_err(),
+            invalid_env("REDIS_STREAM_MAX_ENTRIES", "a non-negative integer", "abc")
         );
     }
 }

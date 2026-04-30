@@ -104,7 +104,7 @@ async fn make_redis_store(port: u16) -> RedisStore {
     let mut last_error = None;
 
     for _ in 0..REDIS_CONNECT_ATTEMPTS {
-        match RedisStore::new(&url).await {
+        match RedisStore::new(&url, None).await {
             Ok(store) => return store,
             Err(err) => {
                 last_error = Some(err);
