@@ -136,12 +136,7 @@ fn parse_stream_entry(signal: Signal, item: &redis::streams::StreamId) -> Option
     let observed_at = chrono::DateTime::parse_from_rfc3339(&observed_at_str)
         .ok()?
         .with_timezone(&chrono::Utc);
-    let service_name_str: String = item.get("service_name").unwrap_or_default();
-    let service_name = if service_name_str.is_empty() {
-        None
-    } else {
-        Some(service_name_str)
-    };
+    let service_name: Option<String> = item.get("service_name").filter(|s: &String| !s.is_empty());
     let payload_bytes: Vec<u8> = item.get("payload")?;
 
     Some(NormalizedEntry {
