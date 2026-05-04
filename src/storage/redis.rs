@@ -33,6 +33,9 @@ pub fn stream_key_for_signal(signal: Signal) -> &'static str {
     }
 }
 
+const APPEND_RETRY_MAX: u32 = 3;
+const APPEND_RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Store responsible for adding and reading entries in a Redis stream
 #[derive(Clone)]
 pub struct RedisStore {
@@ -58,23 +61,40 @@ impl RedisStore {
         let service_name = entry.service_name.as_deref().unwrap_or("");
         let payload: &[u8] = &entry.payload;
 
-        let mut cmd = redis::cmd("XADD");
-        cmd.arg(key);
-        if let Some(n) = self.max_entries {
-            cmd.arg("MAXLEN").arg("~").arg(n);
-        }
-        let id: String = cmd
-            .arg("*")
-            .arg("observed_at")
-            .arg(&observed_at)
-            .arg("service_name")
-            .arg(service_name)
-            .arg("payload")
-            .arg(payload)
-            .query_async(&mut self.conn)
-            .await?;
+        let mut attempt = 0u32;
+        loop {
+            let mut cmd = redis::cmd("XADD");
+            cmd.arg(key);
+            if let Some(n) = self.max_entries {
+                cmd.arg("MAXLEN").arg("~").arg(n);
+            }
+            let result: Result<String, redis::RedisError> = cmd
+                .arg("*")
+                .arg("observed_at")
+                .arg(&observed_at)
+                .arg("service_name")
+                .arg(service_name)
+                .arg("payload")
+                .arg(payload)
+                .query_async(&mut self.conn)
+                .await;
 
-        Ok(id)
+            match result {
+                Ok(id) => return Ok(id),
+                Err(err) if attempt < APPEND_RETRY_MAX && is_retryable_redis_error(&err) => {
+                    attempt += 1;
+                    tracing::warn!(
+                        attempt,
+                        max = APPEND_RETRY_MAX,
+                        error = %err,
+                        "Redis append_entry failed, retrying"
+                    );
+                    let delay = APPEND_RETRY_BASE_DELAY * 2u32.pow(attempt - 1);
+                    tokio::time::sleep(delay).await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
     }
 
     /// XREADs and returns entries from the given cursor onwards.
@@ -103,6 +123,10 @@ impl RedisStore {
 
         parse_xread_reply(signal, raw)
     }
+}
+
+fn is_retryable_redis_error(err: &redis::RedisError) -> bool {
+    err.is_io_error()
 }
 
 /// Parses the raw response from XREAD.
@@ -216,5 +240,61 @@ mod tests {
     #[should_panic(expected = "invalid Redis stream ID")]
     fn test_cmp_stream_id_panics_for_invalid_ids() {
         let _ = cmp_stream_id("invalid", "1710000000000-1");
+    }
+
+    // --- is_retryable_redis_error --------------------------------------------
+
+    #[test]
+    fn test_timed_out_io_error_is_retryable() {
+        let err = redis::RedisError::from(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "connection timed out",
+        ));
+        assert!(is_retryable_redis_error(&err));
+    }
+
+    #[test]
+    fn test_would_block_io_error_is_retryable() {
+        let err = redis::RedisError::from(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "would block",
+        ));
+        assert!(is_retryable_redis_error(&err));
+    }
+
+    #[test]
+    fn test_connection_reset_io_error_is_retryable() {
+        // is_io_error covers all IO error kinds, not just TimedOut
+        let err = redis::RedisError::from(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "connection reset by peer",
+        ));
+        assert!(is_retryable_redis_error(&err));
+    }
+
+    #[test]
+    fn test_authentication_failed_is_not_retryable() {
+        // retrying won't fix credentials
+        let err = redis::RedisError::from((
+            redis::ErrorKind::AuthenticationFailed,
+            "NOAUTH Authentication required",
+        ));
+        assert!(!is_retryable_redis_error(&err));
+    }
+
+    #[test]
+    fn test_invalid_client_config_is_not_retryable() {
+        // retrying won't fix config
+        let err = redis::RedisError::from((
+            redis::ErrorKind::InvalidClientConfig,
+            "invalid client config",
+        ));
+        assert!(!is_retryable_redis_error(&err));
+    }
+
+    #[test]
+    fn test_client_error_is_not_retryable() {
+        let err = redis::RedisError::from((redis::ErrorKind::Client, "client error"));
+        assert!(!is_retryable_redis_error(&err));
     }
 }
