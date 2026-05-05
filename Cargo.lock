@@ -453,7 +453,7 @@ dependencies = [
 [[package]]
 name = "connectrpc"
 version = "0.3.3"
-source = "git+https://github.com/anthropics/connect-rust?rev=f14939c206fde4b57ef77eff032a99c4b1b0a0c6#f14939c206fde4b57ef77eff032a99c4b1b0a0c6"
+source = "git+https://github.com/anthropics/connect-rust?rev=a0c0ef010d7ec4ed721291c54dc2fcb892a97d1c#a0c0ef010d7ec4ed721291c54dc2fcb892a97d1c"
 dependencies = [
  "async-compression",
  "axum",
@@ -478,13 +478,14 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "wasm-bindgen-futures",
  "zstd",
 ]
 
 [[package]]
 name = "connectrpc-build"
 version = "0.3.3"
-source = "git+https://github.com/anthropics/connect-rust?rev=f14939c206fde4b57ef77eff032a99c4b1b0a0c6#f14939c206fde4b57ef77eff032a99c4b1b0a0c6"
+source = "git+https://github.com/anthropics/connect-rust?rev=a0c0ef010d7ec4ed721291c54dc2fcb892a97d1c#a0c0ef010d7ec4ed721291c54dc2fcb892a97d1c"
 dependencies = [
  "anyhow",
  "buffa",
@@ -496,7 +497,7 @@ dependencies = [
 [[package]]
 name = "connectrpc-codegen"
 version = "0.3.3"
-source = "git+https://github.com/anthropics/connect-rust?rev=f14939c206fde4b57ef77eff032a99c4b1b0a0c6#f14939c206fde4b57ef77eff032a99c4b1b0a0c6"
+source = "git+https://github.com/anthropics/connect-rust?rev=a0c0ef010d7ec4ed721291c54dc2fcb892a97d1c#a0c0ef010d7ec4ed721291c54dc2fcb892a97d1c"
 dependencies = [
  "anyhow",
  "buffa",
