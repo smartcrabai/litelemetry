@@ -307,9 +307,9 @@ dependencies = [
 
 [[package]]
 name = "buffa"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df3fea50199859017c80584fef221c61abb882c69ed5b6e30a0bf75864e3c505"
+checksum = "fe57265ac5858082bf9a450654fa56e97fceda045d3e573eed4c2d3cf0b8dc0f"
 dependencies = [
  "base64",
  "bytes",
@@ -322,9 +322,9 @@ dependencies = [
 
 [[package]]
 name = "buffa-codegen"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f9ddcb25f0dde4d82e0a1128b0c459feba775e24dfa7cb0c3f4a9d61abfa245"
+checksum = "13e4d72f8cdc202c1939f8f74db0baf9c1035c7354214f2d8051ad99a9dfef53"
 dependencies = [
  "buffa",
  "buffa-descriptor",
@@ -337,9 +337,9 @@ dependencies = [
 
 [[package]]
 name = "buffa-descriptor"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a0794ed1f8a0c6ab168c70258e21cf74ca7b87a7dd888a0a69745b075f2d351"
+checksum = "8473359a7a8cbad218bd2f0aa635d59a51b9a5dc2de3e50b125679dd411371a2"
 dependencies = [
  "buffa",
 ]
@@ -453,8 +453,7 @@ dependencies = [
 [[package]]
 name = "connectrpc"
 version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e9191b8c90cfc0d27f3df209ea83fa1cb1f9b7e81480bc9d89661be41350778"
+source = "git+https://github.com/anthropics/connect-rust?rev=f14939c206fde4b57ef77eff032a99c4b1b0a0c6#f14939c206fde4b57ef77eff032a99c4b1b0a0c6"
 dependencies = [
  "async-compression",
  "axum",
@@ -485,8 +484,7 @@ dependencies = [
 [[package]]
 name = "connectrpc-build"
 version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "591bc832b8d3faef060e435f832a1cf10a71c865dfb49f9874247769b60ef816"
+source = "git+https://github.com/anthropics/connect-rust?rev=f14939c206fde4b57ef77eff032a99c4b1b0a0c6#f14939c206fde4b57ef77eff032a99c4b1b0a0c6"
 dependencies = [
  "anyhow",
  "buffa",
@@ -498,8 +496,7 @@ dependencies = [
 [[package]]
 name = "connectrpc-codegen"
 version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "109a2352193792931d41e5cb3b048985371d5c6505f736f9b9a7ae606d5a0050"
+source = "git+https://github.com/anthropics/connect-rust?rev=f14939c206fde4b57ef77eff032a99c4b1b0a0c6#f14939c206fde4b57ef77eff032a99c4b1b0a0c6"
 dependencies = [
  "anyhow",
  "buffa",
@@ -723,7 +720,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -810,6 +807,7 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
+ "zlib-rs",
 ]
 
 [[package]]
@@ -2293,7 +2291,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2941,7 +2939,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3071,9 +3069,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.52.1"
+version = "1.52.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b67dee974fe86fd92cc45b7a95fdd2f99a36a6d7b0d431a231178d3d670bbcc6"
+checksum = "110a78583f19d5cdb2c5ccf321d1290344e71313c6c37d43520d386027d18386"
 dependencies = [
  "bytes",
  "libc",
@@ -3127,7 +3125,6 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
- "futures-util",
  "pin-project-lite",
  "tokio",
 ]
@@ -4047,6 +4044,12 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "zlib-rs"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3be3d40e40a133f9c916ee3f9f4fa2d9d63435b5fbe1bfc6d9dae0aa0ada1513"
 
 [[package]]
 name = "zmij"
