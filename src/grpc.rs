@@ -47,6 +47,7 @@ impl OtlpService {
 }
 
 impl TraceService for OtlpService {
+    #[allow(refining_impl_trait)]
     async fn export(
         &self,
         _ctx: RequestContext,
@@ -69,6 +70,7 @@ impl TraceService for OtlpService {
 }
 
 impl MetricsService for OtlpService {
+    #[allow(refining_impl_trait)]
     async fn export(
         &self,
         _ctx: RequestContext,
@@ -91,6 +93,7 @@ impl MetricsService for OtlpService {
 }
 
 impl LogsService for OtlpService {
+    #[allow(refining_impl_trait)]
     async fn export(
         &self,
         _ctx: RequestContext,
