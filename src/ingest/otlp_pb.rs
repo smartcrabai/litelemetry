@@ -2,9 +2,9 @@ use buffa::view::OwnedView;
 use bytes::Bytes;
 
 use crate::domain::telemetry::Signal;
-use crate::otlp_proto::opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequestView;
-use crate::otlp_proto::opentelemetry::proto::collector::metrics::v1::ExportMetricsServiceRequestView;
-use crate::otlp_proto::opentelemetry::proto::collector::trace::v1::ExportTraceServiceRequestView;
+use crate::otlp_proto::opentelemetry::proto::collector::logs::v1::__buffa::view::ExportLogsServiceRequestView;
+use crate::otlp_proto::opentelemetry::proto::collector::metrics::v1::__buffa::view::ExportMetricsServiceRequestView;
+use crate::otlp_proto::opentelemetry::proto::collector::trace::v1::__buffa::view::ExportTraceServiceRequestView;
 
 /// Decode an OTLP protobuf request body for `signal` and return its
 /// OTLP-canonical JSON representation. Returns `None` if the body is not

@@ -2,21 +2,23 @@ use std::sync::Arc;
 
 use buffa::view::OwnedView;
 use chrono::Utc;
-use connectrpc::{ConnectError, Context, Router as ConnectRouter};
+use connectrpc::{ConnectError, RequestContext, Response, Router as ConnectRouter};
 
 use crate::domain::telemetry::{NormalizedEntry, SERVICE_NAME_ATTRIBUTE, Signal};
 use crate::otlp_proto::opentelemetry::proto::collector::logs::v1::{
-    ExportLogsServiceRequestView, ExportLogsServiceResponse, LogsService, LogsServiceExt,
+    __buffa::view::ExportLogsServiceRequestView, ExportLogsServiceResponse, LogsService,
+    LogsServiceExt,
 };
 use crate::otlp_proto::opentelemetry::proto::collector::metrics::v1::{
-    ExportMetricsServiceRequestView, ExportMetricsServiceResponse, MetricsService,
+    __buffa::view::ExportMetricsServiceRequestView, ExportMetricsServiceResponse, MetricsService,
     MetricsServiceExt,
 };
 use crate::otlp_proto::opentelemetry::proto::collector::trace::v1::{
-    ExportTraceServiceRequestView, ExportTraceServiceResponse, TraceService, TraceServiceExt,
+    __buffa::view::ExportTraceServiceRequestView, ExportTraceServiceResponse, TraceService,
+    TraceServiceExt,
 };
-use crate::otlp_proto::opentelemetry::proto::common::v1::any_value;
-use crate::otlp_proto::opentelemetry::proto::resource::v1::ResourceView;
+use crate::otlp_proto::opentelemetry::proto::common::v1::__buffa::view::oneof::any_value;
+use crate::otlp_proto::opentelemetry::proto::resource::v1::__buffa::view::ResourceView;
 use crate::server::AppState;
 
 pub fn build_connect_router(state: AppState) -> ConnectRouter {
@@ -47,9 +49,9 @@ impl OtlpService {
 impl TraceService for OtlpService {
     async fn export(
         &self,
-        ctx: Context,
+        _ctx: RequestContext,
         request: OwnedView<ExportTraceServiceRequestView<'static>>,
-    ) -> Result<(ExportTraceServiceResponse, Context), ConnectError> {
+    ) -> Result<Response<ExportTraceServiceResponse>, ConnectError> {
         let service_name = request
             .resource_spans
             .iter()
@@ -62,16 +64,16 @@ impl TraceService for OtlpService {
             payload,
         })
         .await?;
-        Ok((ExportTraceServiceResponse::default(), ctx))
+        Ok(Response::new(ExportTraceServiceResponse::default()))
     }
 }
 
 impl MetricsService for OtlpService {
     async fn export(
         &self,
-        ctx: Context,
+        _ctx: RequestContext,
         request: OwnedView<ExportMetricsServiceRequestView<'static>>,
-    ) -> Result<(ExportMetricsServiceResponse, Context), ConnectError> {
+    ) -> Result<Response<ExportMetricsServiceResponse>, ConnectError> {
         let service_name = request
             .resource_metrics
             .iter()
@@ -84,16 +86,16 @@ impl MetricsService for OtlpService {
             payload,
         })
         .await?;
-        Ok((ExportMetricsServiceResponse::default(), ctx))
+        Ok(Response::new(ExportMetricsServiceResponse::default()))
     }
 }
 
 impl LogsService for OtlpService {
     async fn export(
         &self,
-        ctx: Context,
+        _ctx: RequestContext,
         request: OwnedView<ExportLogsServiceRequestView<'static>>,
-    ) -> Result<(ExportLogsServiceResponse, Context), ConnectError> {
+    ) -> Result<Response<ExportLogsServiceResponse>, ConnectError> {
         let service_name = request
             .resource_logs
             .iter()
@@ -106,7 +108,7 @@ impl LogsService for OtlpService {
             payload,
         })
         .await?;
-        Ok((ExportLogsServiceResponse::default(), ctx))
+        Ok(Response::new(ExportLogsServiceResponse::default()))
     }
 }
 
@@ -117,7 +119,7 @@ fn service_name_from_resource(resource: Option<&ResourceView<'_>>) -> Option<Str
             continue;
         }
         let any_value = attribute.value.as_option()?;
-        if let Some(any_value::ValueView::StringValue(s)) = &any_value.value {
+        if let Some(any_value::Value::StringValue(s)) = &any_value.value {
             return Some((*s).to_string());
         }
     }

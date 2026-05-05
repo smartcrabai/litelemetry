@@ -345,7 +345,8 @@ mod tests {
     fn resource_with_service_name(
         name: &str,
     ) -> crate::otlp_proto::opentelemetry::proto::resource::v1::Resource {
-        use crate::otlp_proto::opentelemetry::proto::common::v1::{AnyValue, KeyValue, any_value};
+        use crate::otlp_proto::opentelemetry::proto::common::v1::__buffa::oneof::any_value;
+        use crate::otlp_proto::opentelemetry::proto::common::v1::{AnyValue, KeyValue};
         use crate::otlp_proto::opentelemetry::proto::resource::v1::Resource;
 
         Resource {

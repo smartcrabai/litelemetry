@@ -9,7 +9,10 @@ axum = { features = ["macros"], version = "0.8" }
 buffa = "0.4"
 bytes = "1"
 chrono = { features = ["serde"], version = "0.4" }
-connectrpc = { features = ["axum", "server"], version = "0.3" }
+connectrpc = { git = "https://github.com/anthropics/connect-rust", rev = "f14939c206fde4b57ef77eff032a99c4b1b0a0c6", features = [
+  "axum",
+  "server",
+] }
 flate2 = "1"
 http-body = "1"
 lz4_flex = { version = "0.13", default-features = false, features = [
@@ -33,7 +36,7 @@ features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"]
 version = "0.8"
 
 [build-dependencies]
-connectrpc-build = "0.3"
+connectrpc-build = { git = "https://github.com/anthropics/connect-rust", rev = "f14939c206fde4b57ef77eff032a99c4b1b0a0c6" }
 
 [dev-dependencies]
 opentelemetry = "=0.31.0"
