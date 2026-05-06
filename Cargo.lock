@@ -307,9 +307,9 @@ dependencies = [
 
 [[package]]
 name = "buffa"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe57265ac5858082bf9a450654fa56e97fceda045d3e573eed4c2d3cf0b8dc0f"
+checksum = "bf099528faaa7841b5e6dec4a421c3983b0893f87600f84f35b033362278153b"
 dependencies = [
  "base64",
  "bytes",
@@ -322,9 +322,9 @@ dependencies = [
 
 [[package]]
 name = "buffa-codegen"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13e4d72f8cdc202c1939f8f74db0baf9c1035c7354214f2d8051ad99a9dfef53"
+checksum = "a50dd3ca45146a2878eb7854e8c54d1b299d4e0268d3ff1bebf78a15b78982d3"
 dependencies = [
  "buffa",
  "buffa-descriptor",
@@ -337,9 +337,9 @@ dependencies = [
 
 [[package]]
 name = "buffa-descriptor"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8473359a7a8cbad218bd2f0aa635d59a51b9a5dc2de3e50b125679dd411371a2"
+checksum = "7b60f63b38417e539089f6aaca6622a60dbdf8f656663c81e6870ae0788d2060"
 dependencies = [
  "buffa",
 ]
@@ -452,8 +452,8 @@ dependencies = [
 
 [[package]]
 name = "connectrpc"
-version = "0.3.3"
-source = "git+https://github.com/anthropics/connect-rust?rev=a0c0ef010d7ec4ed721291c54dc2fcb892a97d1c#a0c0ef010d7ec4ed721291c54dc2fcb892a97d1c"
+version = "0.4.0"
+source = "git+https://github.com/anthropics/connect-rust?rev=15d5bd893e4dba7c301fa2ba2910d7b578eb85d2#15d5bd893e4dba7c301fa2ba2910d7b578eb85d2"
 dependencies = [
  "async-compression",
  "axum",
@@ -484,8 +484,8 @@ dependencies = [
 
 [[package]]
 name = "connectrpc-build"
-version = "0.3.3"
-source = "git+https://github.com/anthropics/connect-rust?rev=a0c0ef010d7ec4ed721291c54dc2fcb892a97d1c#a0c0ef010d7ec4ed721291c54dc2fcb892a97d1c"
+version = "0.4.0"
+source = "git+https://github.com/anthropics/connect-rust?rev=15d5bd893e4dba7c301fa2ba2910d7b578eb85d2#15d5bd893e4dba7c301fa2ba2910d7b578eb85d2"
 dependencies = [
  "anyhow",
  "buffa",
@@ -496,8 +496,8 @@ dependencies = [
 
 [[package]]
 name = "connectrpc-codegen"
-version = "0.3.3"
-source = "git+https://github.com/anthropics/connect-rust?rev=a0c0ef010d7ec4ed721291c54dc2fcb892a97d1c#a0c0ef010d7ec4ed721291c54dc2fcb892a97d1c"
+version = "0.4.0"
+source = "git+https://github.com/anthropics/connect-rust?rev=15d5bd893e4dba7c301fa2ba2910d7b578eb85d2#15d5bd893e4dba7c301fa2ba2910d7b578eb85d2"
 dependencies = [
  "anyhow",
  "buffa",
@@ -721,7 +721,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2292,7 +2292,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2940,7 +2940,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
