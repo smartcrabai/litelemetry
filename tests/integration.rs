@@ -8959,3 +8959,119 @@ async fn test_anomaly_evaluate_no_data_and_zscore() {
     .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+/// Trace payload with two services in a parent/child relationship.
+fn make_two_service_trace_payload() -> Bytes {
+    Bytes::from(
+        json!({
+            "resourceSpans": [
+                {
+                    "resource": {
+                        "attributes": [
+                            {"key": "service.name", "value": {"stringValue": "frontend"}}
+                        ]
+                    },
+                    "scopeSpans": [
+                        {
+                            "scope": {"name": "integration-test"},
+                            "spans": [
+                                {
+                                    "traceId": "00000000000000000000000000000010",
+                                    "spanId": "0000000000000010",
+                                    "parentSpanId": "",
+                                    "name": "GET /checkout",
+                                    "startTimeUnixNano": "0",
+                                    "endTimeUnixNano": "5000000",
+                                    "status": {"code": 0}
+                                }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "resource": {
+                        "attributes": [
+                            {"key": "service.name", "value": {"stringValue": "backend"}}
+                        ]
+                    },
+                    "scopeSpans": [
+                        {
+                            "scope": {"name": "integration-test"},
+                            "spans": [
+                                {
+                                    "traceId": "00000000000000000000000000000010",
+                                    "spanId": "0000000000000020",
+                                    "parentSpanId": "0000000000000010",
+                                    "name": "process-order",
+                                    "startTimeUnixNano": "1000000",
+                                    "endTimeUnixNano": "4000000",
+                                    "status": {"code": 2}
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        })
+        .to_string(),
+    )
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_service_map_endpoint_returns_nodes_and_edges() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    let trace_request = Request::builder()
+        .method("POST")
+        .uri("/v1/traces")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(make_two_service_trace_payload()))
+        .unwrap();
+    let trace_response = app.clone().oneshot(trace_request).await.unwrap();
+    assert_eq!(trace_response.status(), StatusCode::OK);
+
+    let map_request = Request::builder()
+        .method("GET")
+        .uri("/api/service-map?lookback_ms=600000")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let map_response = app.oneshot(map_request).await.unwrap();
+    assert_eq!(map_response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(map_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    let nodes = payload["nodes"].as_array().unwrap();
+    let node_names: Vec<&str> = nodes.iter().map(|n| n["name"].as_str().unwrap()).collect();
+    assert!(
+        node_names.contains(&"frontend"),
+        "frontend node missing: {node_names:?}"
+    );
+    assert!(
+        node_names.contains(&"backend"),
+        "backend node missing: {node_names:?}"
+    );
+
+    let edges = payload["edges"].as_array().unwrap();
+    let edge = edges
+        .iter()
+        .find(|e| e["from"] == "frontend" && e["to"] == "backend")
+        .unwrap_or_else(|| panic!("expected frontend->backend edge in {edges:?}"));
+    assert_eq!(edge["calls"], 1);
+    let error_rate = edge["error_rate"].as_f64().unwrap();
+    assert!(
+        (error_rate - 1.0).abs() < 1e-6,
+        "expected error_rate=1.0 (one errored child span), got {error_rate}"
+    );
+
+    let backend_node = nodes
+        .iter()
+        .find(|n| n["name"] == "backend")
+        .expect("backend node");
+    assert_eq!(backend_node["span_count"], 1);
+    assert_eq!(backend_node["error_count"], 1);
+}

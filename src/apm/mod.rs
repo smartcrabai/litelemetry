@@ -8,7 +8,9 @@
 //!
 //! Additional features:
 //! - `exemplars`: link metric viewer buckets to sample trace_ids observed in the same time window.
+//! - `service_map`: extract service-to-service edges from OTLP spans for the Service Map tab.
 
 pub mod exemplars;
+pub mod service_map;
 pub mod trace_search;
 pub mod waterfall;
