@@ -5,6 +5,10 @@
 //! decoder that groups OTLP spans by `trace_id` and surfaces the
 //! attributes / status / kind required by the Traces tab in the viewer UI,
 //! plus a `waterfall` renderer for visualizing per-trace span timelines.
+//!
+//! Additional features:
+//! - `exemplars`: link metric viewer buckets to sample trace_ids observed in the same time window.
 
+pub mod exemplars;
 pub mod trace_search;
 pub mod waterfall;

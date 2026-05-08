@@ -1710,6 +1710,24 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             <div id="trace-timeline"></div>
           </div>
         </div>
+        <div id="viewer-exemplars" class="entries-table-wrap" hidden>
+          <div class="toolbar-row" style="margin-bottom: 4px;">
+            <strong>Exemplars (metric bucket -> sample trace_ids)</strong>
+            <button id="viewer-exemplars-refresh" class="secondary btn-compact" type="button">Refresh</button>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Bucket Start</th>
+                <th>Sample Trace IDs</th>
+              </tr>
+            </thead>
+            <tbody id="viewer-exemplars-body"></tbody>
+          </table>
+          <p id="viewer-exemplars-empty" hidden style="text-align:center; color: var(--muted);">
+            No matching trace samples in the current window.
+          </p>
+        </div>
       </section>
       </div><!-- #page-viewers -->
 
@@ -2063,6 +2081,10 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const viewerTraceList = document.getElementById('viewer-trace-list');
       const viewerTraceListBody = document.getElementById('viewer-trace-list-body');
       const viewerTraceDetail = document.getElementById('viewer-trace-detail');
+      const viewerExemplars = document.getElementById('viewer-exemplars');
+      const viewerExemplarsBody = document.getElementById('viewer-exemplars-body');
+      const viewerExemplarsEmpty = document.getElementById('viewer-exemplars-empty');
+      const viewerExemplarsRefresh = document.getElementById('viewer-exemplars-refresh');
       const traceBackButton = document.getElementById('trace-back-button');
       const traceDetailTitle = document.getElementById('trace-detail-title');
       const traceAxis = document.getElementById('trace-axis');
@@ -2478,6 +2500,10 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
       function viewerSupportsMetricCharts(viewer) {
         return Array.isArray(viewer.signals) && viewer.signals.length === 1 && viewer.signals[0] === 'metrics';
+      }
+
+      function viewerTargetsMetrics(viewer) {
+        return Array.isArray(viewer.signals) && viewer.signals.indexOf('metrics') !== -1;
       }
 
       function readDashboardColumns(value) {
@@ -3122,6 +3148,88 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         viewerEntriesTable.hidden = true;
         viewerTraceList.hidden = true;
         viewerTraceDetail.hidden = true;
+        if (viewerExemplars) viewerExemplars.hidden = true;
+      }
+
+      function renderExemplarBuckets(buckets) {
+        if (!viewerExemplars) return;
+        viewerExemplarsBody.replaceChildren();
+        if (!buckets || !buckets.length) {
+          viewerExemplars.hidden = false;
+          viewerExemplarsEmpty.hidden = false;
+          return;
+        }
+        viewerExemplarsEmpty.hidden = true;
+        viewerExemplars.hidden = false;
+        for (const bucket of buckets) {
+          const row = document.createElement('tr');
+          appendTableCell(row, new Date(bucket.bucket_start_ms).toLocaleTimeString());
+          const idsCell = document.createElement('td');
+          for (const tid of bucket.sample_trace_ids) {
+            const link = document.createElement('a');
+            link.href = '#';
+            link.className = 'exemplar-trace-link';
+            link.textContent = truncateId(tid);
+            link.title = tid;
+            link.style.marginRight = '8px';
+            link.addEventListener('click', e => {
+              e.preventDefault();
+              jumpToTrace(tid);
+            });
+            idsCell.appendChild(link);
+          }
+          row.appendChild(idsCell);
+          viewerExemplarsBody.appendChild(row);
+        }
+      }
+
+      async function jumpToTrace(traceId) {
+        // Look for a trace viewer that has this trace_id in its current entries.
+        try {
+          const resp = await fetch('/api/viewers', { headers: { accept: 'application/json' } });
+          if (!resp.ok) throw new Error('HTTP ' + resp.status);
+          const payload = await resp.json();
+          for (const v of payload.viewers || []) {
+            if (!v.signals.includes('traces')) continue;
+            const detailResp = await fetch('/api/viewers/' + v.id, { headers: { accept: 'application/json' } });
+            if (!detailResp.ok) continue;
+            const detail = await detailResp.json();
+            const match = (detail.traces || []).find(t => t.trace_id === traceId);
+            if (match) {
+              showViewerDetail(v.id).then(() => {
+                setTimeout(() => showTraceDetail(match), 50);
+              });
+              setStatus('ok', 'Opened trace ' + truncateId(traceId));
+              return;
+            }
+          }
+          setStatus('idle', 'Trace ' + truncateId(traceId) + ' not in any trace viewer; trace_id copied.');
+          if (navigator.clipboard) navigator.clipboard.writeText(traceId).catch(() => {});
+        } catch (error) {
+          setStatus('error', 'Failed to look up trace: ' + error.message);
+        }
+      }
+
+      async function loadExemplarsForViewer(viewerId) {
+        if (!viewerExemplars) return;
+        try {
+          const url = '/api/exemplars?metric_viewer_id=' + encodeURIComponent(viewerId) + '&bucket_ms=60000';
+          const resp = await fetch(url, { headers: { accept: 'application/json' } });
+          if (!resp.ok) {
+            viewerExemplars.hidden = true;
+            return;
+          }
+          const payload = await resp.json();
+          renderExemplarBuckets(payload.buckets || []);
+        } catch (_e) {
+          viewerExemplars.hidden = true;
+        }
+      }
+
+      if (viewerExemplarsRefresh) {
+        viewerExemplarsRefresh.addEventListener('click', () => {
+          if (selectedViewerId) loadExemplarsForViewer(selectedViewerId);
+        });
       }
 
       function renderTraceList(traces, body = viewerTraceListBody, container = viewerTraceList, clickable = true) {
@@ -3316,6 +3424,11 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             renderTraceList(viewer.traces);
           } else {
             renderEntriesTable(viewer.entries);
+          }
+
+          // Load exemplars for any viewer that targets metrics.
+          if (viewerTargetsMetrics(viewer)) {
+            loadExemplarsForViewer(viewerId);
           }
         } catch (error) {
           viewerDetailSection.classList.remove('visible');
@@ -6325,6 +6438,17 @@ struct ViewerSummary {
     /// `aggregation` block.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     aggregated_buckets: Vec<crate::viewer_runtime::aggregator::Bucket>,
+    /// Optional list of bucket -> sample trace_ids. Only populated for metric viewers when
+    /// detail responses are requested and trace samples exist.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    exemplars: Vec<ExemplarPair>,
+}
+
+/// Flattened exemplar pair attached to a metric viewer summary.
+#[derive(Debug, Serialize)]
+struct ExemplarPair {
+    bucket_start_ms: i64,
+    trace_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -6501,6 +6625,7 @@ pub fn build_app_with_services_full(
         .route("/api/slos", get(list_slos).post(create_slo))
         .route("/api/slos/{id}", get(get_slo).delete(delete_slo))
         .route("/api/slos/{id}/budget", get(get_slo_budget))
+        .route("/api/exemplars", get(list_exemplars))
         .route("/v1/traces", post(ingest_traces))
         .route("/v1/metrics", post(ingest_metrics))
         .route("/v1/logs", post(ingest_logs))
@@ -6524,7 +6649,7 @@ async fn get_viewer(
         .iter()
         .find(|(viewer, _)| viewer.definition().id == id)
         .ok_or(StatusCode::NOT_FOUND)?;
-    let summary = viewer_summary(
+    let mut summary = viewer_summary(
         viewer,
         &viewer_state.entries,
         &viewer_state.status,
@@ -6537,7 +6662,61 @@ async fn get_viewer(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+    // Opportunistically attach exemplars for metric viewers. Failures stay non-fatal --
+    // the field stays empty.
+    if viewer.definition().signal_mask.contains(Signal::Metrics) {
+        match exemplar_buckets_for_metric_viewer(
+            &runtime,
+            viewer_state,
+            viewer.lookback_ms(),
+            DEFAULT_EXEMPLAR_BUCKET_MS,
+            crate::apm::exemplars::DEFAULT_MAX_SAMPLES_PER_BUCKET,
+        ) {
+            Ok(buckets) => summary.exemplars = flatten_exemplar_buckets(buckets),
+            Err(e) => tracing::warn!("get_viewer {id}: exemplars failed: {e}"),
+        }
+    }
+
     Ok(Json(summary))
+}
+
+/// Compute exemplar buckets for a metric viewer using trace entries observed by any trace
+/// viewer currently in the runtime. Encapsulates the runtime traversal so handlers don't
+/// repeat the boilerplate.
+fn exemplar_buckets_for_metric_viewer(
+    runtime: &ViewerRuntime,
+    metric_state: &ViewerState,
+    lookback_ms: i64,
+    bucket_ms: i64,
+    max_samples: usize,
+) -> Result<Vec<crate::apm::exemplars::ExemplarBucket>, crate::apm::exemplars::ExemplarError> {
+    let service_filter = single_service_name(&metric_state.entries);
+    let trace_entries = collect_trace_entries(runtime);
+    crate::apm::exemplars::compute_exemplars(
+        &metric_state.entries,
+        &trace_entries,
+        service_filter.as_deref(),
+        Utc::now(),
+        lookback_ms,
+        bucket_ms,
+        max_samples,
+    )
+}
+
+fn flatten_exemplar_buckets(
+    buckets: Vec<crate::apm::exemplars::ExemplarBucket>,
+) -> Vec<ExemplarPair> {
+    buckets
+        .into_iter()
+        .flat_map(|b| {
+            b.sample_trace_ids
+                .into_iter()
+                .map(move |trace_id| ExemplarPair {
+                    bucket_start_ms: b.bucket_start_ms,
+                    trace_id,
+                })
+        })
+        .collect()
 }
 
 async fn healthz() -> &'static str {
@@ -6582,6 +6761,108 @@ async fn list_attribute_values(
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct ExemplarsQuery {
+    metric_viewer_id: Uuid,
+    #[serde(default)]
+    lookback_ms: Option<i64>,
+    #[serde(default)]
+    bucket_ms: Option<i64>,
+    #[serde(default)]
+    max_samples: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct ExemplarsResponse {
+    metric_viewer_id: Uuid,
+    bucket_ms: i64,
+    lookback_ms: i64,
+    buckets: Vec<crate::apm::exemplars::ExemplarBucket>,
+}
+
+const DEFAULT_EXEMPLAR_BUCKET_MS: i64 = 60_000;
+
+async fn list_exemplars(
+    State(state): State<AppState>,
+    Query(params): Query<ExemplarsQuery>,
+) -> Result<Json<ExemplarsResponse>, StatusCode> {
+    let runtime = state.require_viewer_runtime()?.lock().await;
+
+    // Locate the metric viewer.
+    let (metric_viewer, metric_state) = runtime
+        .viewers()
+        .iter()
+        .find(|(v, _)| v.definition().id == params.metric_viewer_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if !metric_viewer
+        .definition()
+        .signal_mask
+        .contains(Signal::Metrics)
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let bucket_ms = params.bucket_ms.unwrap_or(DEFAULT_EXEMPLAR_BUCKET_MS);
+    let lookback_ms = params.lookback_ms.unwrap_or(metric_viewer.lookback_ms());
+    let max_samples = params
+        .max_samples
+        .unwrap_or(crate::apm::exemplars::DEFAULT_MAX_SAMPLES_PER_BUCKET);
+
+    let buckets = exemplar_buckets_for_metric_viewer(
+        &runtime,
+        metric_state,
+        lookback_ms,
+        bucket_ms,
+        max_samples,
+    )
+    .map_err(|error| {
+        tracing::warn!("exemplars: invalid request: {error}");
+        StatusCode::BAD_REQUEST
+    })?;
+
+    Ok(Json(ExemplarsResponse {
+        metric_viewer_id: params.metric_viewer_id,
+        bucket_ms,
+        lookback_ms,
+        buckets,
+    }))
+}
+
+/// Returns Some(name) when every entry shares the same `service_name`, else None.
+/// Returns None if any entry lacks a `service_name` (so the caller falls back to no filter
+/// rather than silently excluding unlabelled entries).
+fn single_service_name(entries: &[NormalizedEntry]) -> Option<String> {
+    let mut found: Option<&str> = None;
+    for entry in entries {
+        let name = entry.service_name.as_deref()?;
+        match found {
+            None => found = Some(name),
+            Some(existing) if existing.eq_ignore_ascii_case(name) => {}
+            Some(_) => return None,
+        }
+    }
+    found.map(str::to_string)
+}
+
+/// Gathers trace entries observed by any viewer in the runtime, deduped by (observed_at, payload-ptr).
+/// Cheap heuristic: clones each viewer's trace entries and concatenates them. The exemplar logic
+/// dedupes trace_ids per bucket so duplicates across viewers do not inflate the result.
+fn collect_trace_entries(runtime: &ViewerRuntime) -> Vec<NormalizedEntry> {
+    let mut out = Vec::new();
+    for (viewer, state) in runtime.viewers() {
+        if !viewer.definition().signal_mask.contains(Signal::Traces) {
+            continue;
+        }
+        for entry in &state.entries {
+            if entry.signal == Signal::Traces {
+                out.push(entry.clone());
+            }
+        }
+    }
+    out
 }
 
 async fn list_viewers(
@@ -8565,6 +8846,8 @@ fn viewer_summary(
             vec![]
         },
         aggregated_buckets: aggregated_buckets.to_vec(),
+        // populated by callers that have access to trace entries from other viewers
+        exemplars: Vec::new(),
     })
 }
 
