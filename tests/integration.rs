@@ -8732,3 +8732,115 @@ async fn test_exemplars_links_trace_id_to_metric_bucket() {
         "expected linked trace_id in bucket, got {ids:?}"
     );
 }
+
+// --- Ad-hoc query API ------------------------------------------------------
+
+/// POST /api/query: parses, executes, and returns column/row JSON.
+///
+/// Scenario:
+///   1. Spin up a real Redis-backed app via testcontainers.
+///   2. Push a few trace entries through Redis.
+///   3. Hit `/api/query` with a `count(*) GROUP BY service_name` query.
+///   4. Verify the response shape and counts.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_run_query_endpoint_redis_backed() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    // Append entries directly into Redis. The `/api/query` handler reads from
+    // the same StreamStore.
+    let redis_port = env._redis_container.get_host_port_ipv4(6379).await.unwrap();
+    let mut writer = make_redis_store(redis_port).await;
+    for _ in 0..3 {
+        writer
+            .append_entry(&make_traces_entry_with_service(1_000, "api"))
+            .await
+            .unwrap();
+    }
+    for _ in 0..2 {
+        writer
+            .append_entry(&make_traces_entry_with_service(1_000, "worker"))
+            .await
+            .unwrap();
+    }
+
+    // Hit the endpoint.
+    let resp = send_json_request(
+        &app,
+        "POST",
+        "/api/query",
+        json!({
+            "sql": "SELECT count(*), service_name FROM traces GROUP BY service_name",
+            "lookback_ms": 60_000,
+        }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+
+    let columns = body["columns"].as_array().expect("columns array");
+    assert_eq!(columns.len(), 2);
+    assert_eq!(columns[0], "count(*)");
+    assert_eq!(columns[1], "service_name");
+
+    let rows = body["rows"].as_array().expect("rows array");
+    assert_eq!(rows.len(), 2, "expected one row per service");
+
+    let mut by_service: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for row in rows {
+        let arr = row.as_array().expect("row array");
+        let count = arr[0].as_f64().expect("count number");
+        let service = arr[1].as_str().expect("service string").to_string();
+        by_service.insert(service, count);
+    }
+    assert_eq!(by_service.get("api"), Some(&3.0));
+    assert_eq!(by_service.get("worker"), Some(&2.0));
+
+    // matched should be exactly 5 (no entries dropped by lookback).
+    assert_eq!(body["matched"].as_u64(), Some(5));
+}
+
+/// POST /api/query (memory backend): smoke test that the route is wired up
+/// and basic queries return the expected JSON shape without Docker.
+#[tokio::test]
+async fn test_run_query_endpoint_memory_smoke() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let resp = send_json_request(
+        &app,
+        "POST",
+        "/api/query",
+        json!({ "sql": "SELECT count(*) FROM traces", "lookback_ms": 60_000 }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["columns"][0], "count(*)");
+    let rows = body["rows"].as_array().expect("rows array");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0].as_f64(), Some(0.0));
+}
+
+/// POST /api/query: parser errors come back as 400 with a JSON body.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_run_query_endpoint_returns_400_on_parse_error() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    let resp = send_json_request(
+        &app,
+        "POST",
+        "/api/query",
+        json!({ "sql": "this is not sql", "lookback_ms": 60_000 }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(resp).await;
+    assert!(body["error"].as_str().unwrap().contains("parse error"));
+}

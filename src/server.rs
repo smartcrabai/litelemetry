@@ -14,6 +14,8 @@ use crate::ingest::otlp_pb::payload_as_value;
 use crate::notifications::{
     NotificationChannel, NotificationPayload, dispatch_to_channel, webhook::WebhookConfig,
 };
+use crate::query::executor::{Cell as QueryCell, execute as execute_query, source_to_signal};
+use crate::query::parse as parse_query;
 use crate::slo::calculator::{CompiledSlo, ErrorBudget};
 use crate::storage::rollup::{Resolution, RollupStore};
 use crate::storage::slo_store::SloStore;
@@ -1518,6 +1520,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         <a id="nav-alerts" class="sidebar-item" href="#alerts" data-page="alerts">Alerts</a>
         <a id="nav-incidents" class="sidebar-item" href="#incidents" data-page="incidents">Incidents</a>
         <a id="nav-slos" class="sidebar-item" href="#slos" data-page="slos">SLOs</a>
+        <a id="nav-query" class="sidebar-item" href="#query" data-page="query">Query</a>
         <div class="sidebar-section-label">Dashboards</div>
         <div id="dashboard-list"></div>
         <button id="new-dashboard-button" class="secondary sidebar-new-btn" type="button">+ New Dashboard</button>
@@ -1730,6 +1733,38 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         </div>
       </section>
       </div><!-- #page-viewers -->
+
+      <div id="page-query" hidden>
+        <section class="panel panel-strong stack" aria-labelledby="query-title">
+          <div class="toolbar-row" style="align-items:center;">
+            <h2 id="query-title" style="margin:0;font-size:1.4rem;">Ad-hoc Query</h2>
+            <span class="label" style="color:var(--accent-strong);">SQL DSL</span>
+          </div>
+          <p style="margin:0;color:var(--muted);font-size:0.9rem;">
+            Run SQL-like queries over recent telemetry. Sources: <code>traces</code>, <code>metrics</code>, <code>logs</code>.
+            Supported columns: <code>service_name</code>, <code>signal</code>, <code>observed_at_ms</code>, <code>duration_ms</code>, <code>payload</code>.
+            Aggregates: <code>count</code>, <code>sum</code>, <code>avg</code>, <code>min</code>, <code>max</code>.
+          </p>
+          <textarea id="query-input" data-testid="query-input" rows="6"
+                    style="width:100%;padding:14px 16px;font-family:'JetBrains Mono','Menlo',monospace;font-size:0.95rem;border-radius:14px;border:1px solid var(--line);background:var(--panel-strong);color:var(--ink);resize:vertical;"
+                    placeholder="SELECT count(*), service_name FROM traces GROUP BY service_name LIMIT 50"></textarea>
+          <div class="toolbar-row" style="align-items:center;gap:10px;">
+            <label for="query-lookback" style="font-size:0.85rem;color:var(--muted);">Lookback (ms):</label>
+            <input id="query-lookback" type="number" min="1000" step="1000" value="300000"
+                   style="width:140px;padding:8px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel-strong);color:var(--ink);" />
+            <button id="query-run-button" data-testid="query-run-button" class="primary" type="button">Run query</button>
+            <span id="query-status" data-testid="query-status" class="preview-status" role="status" aria-live="polite"></span>
+          </div>
+          <div id="query-error" data-testid="query-error" class="status-box" data-state="error" hidden></div>
+          <div id="query-result-summary" data-testid="query-result-summary" style="font-size:0.85rem;color:var(--muted);" hidden></div>
+          <div class="entries-table-wrap" id="query-result-wrap" hidden>
+            <table data-testid="query-result-table">
+              <thead><tr id="query-result-header"></tr></thead>
+              <tbody id="query-result-body"></tbody>
+            </table>
+          </div>
+        </section>
+      </div><!-- #page-query -->
 
       <div id="page-dashboard" hidden>
         <div class="dashboard-page-header">
@@ -3724,9 +3759,11 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const pageTraces = document.getElementById('page-traces');
       const navIncidents = document.getElementById('nav-incidents');
       const navNotifications = document.getElementById('nav-notifications');
+      const navQuery = document.getElementById('nav-query');
       const newDashboardButton = document.getElementById('new-dashboard-button');
       const dashboardListEl = document.getElementById('dashboard-list');
       const pageViewers = document.getElementById('page-viewers');
+      const pageQuery = document.getElementById('page-query');
       const pageDashboard = document.getElementById('page-dashboard');
       const pageIncidents = document.getElementById('page-incidents');
       const pageNotifications = document.getElementById('page-notifications');
@@ -3924,6 +3961,9 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         pageIncidents.hidden = page !== 'incidents';
         pageNotifications.hidden = page !== 'notifications';
         if (pageSlos) pageSlos.hidden = page !== 'slos';
+        if (pageQuery) {
+          pageQuery.hidden = page !== 'query';
+        }
 
         navViewers.classList.toggle('active', page === 'viewers');
         const navWaterfallEl = document.getElementById('nav-waterfall');
@@ -3940,6 +3980,9 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           navNotifications.classList.toggle('active', page === 'notifications');
         }
         if (navSlos) navSlos.classList.toggle('active', page === 'slos');
+        if (navQuery) {
+          navQuery.classList.toggle('active', page === 'query');
+        }
 
         document.querySelectorAll('.sidebar-dashboard-item').forEach(el => {
           el.classList.toggle('active', el.dataset.id === dashboardId);
@@ -4740,6 +4783,118 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         navNotifications.addEventListener('click', (e) => {
           e.preventDefault();
           navigateTo('notifications');
+        });
+      }
+
+      if (navQuery) {
+        navQuery.addEventListener('click', (e) => {
+          e.preventDefault();
+          navigateTo('query');
+        });
+      }
+
+      // --- Ad-hoc query page -----------------------------------------------
+      const queryInput = document.getElementById('query-input');
+      const queryLookbackInput = document.getElementById('query-lookback');
+      const queryRunButton = document.getElementById('query-run-button');
+      const queryStatusEl = document.getElementById('query-status');
+      const queryErrorEl = document.getElementById('query-error');
+      const querySummaryEl = document.getElementById('query-result-summary');
+      const queryResultWrap = document.getElementById('query-result-wrap');
+      const queryResultHeader = document.getElementById('query-result-header');
+      const queryResultBody = document.getElementById('query-result-body');
+
+      function renderQueryResult(payload) {
+        queryResultHeader.innerHTML = '';
+        queryResultBody.innerHTML = '';
+        const cols = Array.isArray(payload.columns) ? payload.columns : [];
+        for (const col of cols) {
+          const th = document.createElement('th');
+          th.textContent = col;
+          queryResultHeader.appendChild(th);
+        }
+        const rows = Array.isArray(payload.rows) ? payload.rows : [];
+        for (const row of rows) {
+          const tr = document.createElement('tr');
+          for (const cell of row) {
+            const td = document.createElement('td');
+            if (cell === null || cell === undefined) {
+              td.textContent = '';
+              td.style.color = 'var(--muted)';
+              td.style.fontStyle = 'italic';
+              td.textContent = 'null';
+            } else if (typeof cell === 'number') {
+              td.textContent = Number.isInteger(cell) ? String(cell) : cell.toFixed(3);
+              td.style.fontVariantNumeric = 'tabular-nums';
+            } else {
+              td.textContent = String(cell);
+            }
+            tr.appendChild(td);
+          }
+          queryResultBody.appendChild(tr);
+        }
+        queryResultWrap.hidden = cols.length === 0;
+        const truncatedNote = payload.truncated ? ' (truncated)' : '';
+        querySummaryEl.textContent =
+          `scanned ${payload.scanned} / matched ${payload.matched} / returned ${payload.returned}${truncatedNote}`;
+        querySummaryEl.hidden = false;
+      }
+
+      async function runQuery() {
+        const sql = queryInput.value.trim();
+        if (!sql) {
+          queryErrorEl.textContent = 'SQL must not be empty.';
+          queryErrorEl.hidden = false;
+          return;
+        }
+        const lookback = parseInt(queryLookbackInput.value, 10);
+        const lookbackMs = Number.isFinite(lookback) && lookback > 0 ? lookback : 300000;
+        queryRunButton.disabled = true;
+        queryStatusEl.textContent = 'Running...';
+        queryErrorEl.hidden = true;
+        queryErrorEl.textContent = '';
+        try {
+          const res = await fetch('/api/query', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sql, lookback_ms: lookbackMs }),
+          });
+          const text = await res.text();
+          let body = null;
+          try { body = text ? JSON.parse(text) : null; } catch (_) { body = null; }
+          if (!res.ok) {
+            const message = (body && body.error) ? body.error : `HTTP ${res.status}`;
+            queryErrorEl.textContent = message;
+            queryErrorEl.hidden = false;
+            queryResultWrap.hidden = true;
+            querySummaryEl.hidden = true;
+            queryStatusEl.textContent = '';
+            return;
+          }
+          if (body) {
+            renderQueryResult(body);
+            queryStatusEl.textContent = 'OK';
+          }
+        } catch (err) {
+          queryErrorEl.textContent = `request failed: ${err}`;
+          queryErrorEl.hidden = false;
+          queryResultWrap.hidden = true;
+          querySummaryEl.hidden = true;
+          queryStatusEl.textContent = '';
+        } finally {
+          queryRunButton.disabled = false;
+        }
+      }
+
+      if (queryRunButton) {
+        queryRunButton.addEventListener('click', runQuery);
+      }
+      if (queryInput) {
+        queryInput.addEventListener('keydown', (e) => {
+          if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+            e.preventDefault();
+            runQuery();
+          }
         });
       }
 
@@ -6570,6 +6725,7 @@ pub fn build_app_with_services_full(
     Router::new()
         .route("/", get(index))
         .route("/healthz", get(healthz))
+        .route("/api/query", post(run_query))
         .route("/api/viewers", get(list_viewers).post(create_viewer))
         .route("/api/viewers/preview", post(preview_viewer))
         .route(
@@ -7245,6 +7401,125 @@ async fn preview_viewer(
         entry_count: viewer_state.entries.len(),
         entries: entry_rows,
         traces,
+    }))
+}
+
+// --- Ad-hoc Query API -------------------------------------------------------
+
+/// Default lookback window for ad-hoc queries (5 minutes).
+const DEFAULT_QUERY_LOOKBACK_MS: i64 = 5 * 60 * 1_000;
+/// Maximum lookback window for ad-hoc queries (24 hours).
+const MAX_QUERY_LOOKBACK_MS: i64 = 24 * 60 * 60 * 1_000;
+/// Maximum number of entries scanned per signal for ad-hoc queries.
+const MAX_QUERY_SCAN_ENTRIES: usize = 100_000;
+
+#[derive(Debug, Deserialize)]
+struct QueryRequest {
+    sql: String,
+    #[serde(default)]
+    lookback_ms: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct QueryResponse {
+    columns: Vec<String>,
+    rows: Vec<Vec<serde_json::Value>>,
+    scanned: usize,
+    matched: usize,
+    returned: usize,
+    truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct QueryErrorBody {
+    error: String,
+}
+
+fn cell_to_json(cell: QueryCell) -> serde_json::Value {
+    match cell {
+        QueryCell::Null => serde_json::Value::Null,
+        QueryCell::Bool(b) => serde_json::Value::Bool(b),
+        QueryCell::Number(n) => serde_json::Number::from_f64(n)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        QueryCell::String(s) => serde_json::Value::String(s),
+    }
+}
+
+async fn run_query(
+    State(mut state): State<AppState>,
+    Json(payload): Json<QueryRequest>,
+) -> Result<Json<QueryResponse>, (StatusCode, Json<QueryErrorBody>)> {
+    let sql = payload.sql.trim();
+    if sql.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(QueryErrorBody {
+                error: "sql must not be empty".to_string(),
+            }),
+        ));
+    }
+
+    let stmt = parse_query(sql).map_err(|e| {
+        tracing::debug!("run_query parse error: {e}");
+        (
+            StatusCode::BAD_REQUEST,
+            Json(QueryErrorBody {
+                error: format!("parse error: {e}"),
+            }),
+        )
+    })?;
+
+    let lookback_ms = match payload.lookback_ms {
+        Some(v) if v > 0 => v.min(MAX_QUERY_LOOKBACK_MS),
+        Some(_) | None => DEFAULT_QUERY_LOOKBACK_MS,
+    };
+    let signal = source_to_signal(stmt.from);
+    let cutoff = Utc::now() - chrono::Duration::milliseconds(lookback_ms);
+
+    let entries = state
+        .stream_store
+        .read_entries_since(signal, None, MAX_QUERY_SCAN_ENTRIES)
+        .await
+        .map_err(|error| {
+            tracing::error!("run_query: read_entries_since failed: {error}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(QueryErrorBody {
+                    error: "failed to read entries".to_string(),
+                }),
+            )
+        })?;
+
+    // Apply the lookback window before evaluation. Entries are appended in
+    // ascending time order; using a linear filter is sufficient.
+    let filtered = entries
+        .into_iter()
+        .filter_map(|(_, entry)| (entry.observed_at > cutoff).then_some(entry));
+
+    let result = execute_query(&stmt, filtered).map_err(|e| {
+        tracing::debug!("run_query execute error: {e}");
+        (
+            StatusCode::BAD_REQUEST,
+            Json(QueryErrorBody {
+                error: format!("execute error: {e}"),
+            }),
+        )
+    })?;
+
+    let rows: Vec<Vec<serde_json::Value>> = result
+        .rows
+        .into_iter()
+        .map(|row| row.into_iter().map(cell_to_json).collect())
+        .collect();
+
+    Ok(Json(QueryResponse {
+        columns: result.columns,
+        rows,
+        scanned: result.scanned,
+        matched: result.matched,
+        returned: result.returned,
+        truncated: result.truncated,
     }))
 }
 
