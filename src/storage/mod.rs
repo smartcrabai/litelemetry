@@ -1,6 +1,7 @@
 pub mod memory;
 pub mod postgres;
 pub mod redis;
+pub mod rollup;
 
 use crate::domain::dashboard::DashboardDefinition;
 use crate::domain::telemetry::{NormalizedEntry, Signal};

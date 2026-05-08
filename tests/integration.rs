@@ -13,10 +13,11 @@ use chrono::{Duration, Utc};
 use litelemetry::domain::dashboard::DashboardDefinition;
 use litelemetry::domain::telemetry::{NormalizedEntry, Signal, SignalMask};
 use litelemetry::domain::viewer::ViewerDefinition;
-use litelemetry::server::{build_app, build_app_with_services};
+use litelemetry::server::{build_app, build_app_with_full_services, build_app_with_services};
 use litelemetry::storage::memory::{MemoryStreamStore, MemoryViewerStore};
 use litelemetry::storage::postgres::{PostgresStore, ViewerSnapshotRow};
 use litelemetry::storage::redis::RedisStore;
+use litelemetry::storage::rollup::{RedisRollupStore, RollupStore};
 use litelemetry::storage::{StreamStore, ViewerStore};
 use litelemetry::viewer_runtime::runtime::ViewerRuntime;
 use litelemetry::viewer_runtime::state::StreamCursor;
@@ -7239,4 +7240,125 @@ async fn test_trace_waterfall_returns_spans_for_ingested_trace() {
     let names: Vec<&str> = spans.iter().map(|s| s["name"].as_str().unwrap()).collect();
     assert_eq!(names, vec!["root-op", "child-a", "grandchild", "child-b"]);
     assert_eq!(spans[0]["service_name"], "payments");
+}
+
+// --- Rollups (Redis) -------------------------------------------------------
+
+/// E2E: ingest a trace and verify the rollup endpoint returns the count.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_ingest_traces_populates_rollups() {
+    let redis_container = Redis::default().start().await.unwrap();
+    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
+    let redis_url = format!("redis://127.0.0.1:{redis_port}");
+
+    let stream_store = StreamStore::Redis(make_redis_store(redis_port).await);
+    let rollup_store = RollupStore::Redis(RedisRollupStore::new(&redis_url).await.unwrap());
+
+    let app = build_app_with_full_services(stream_store, None, None, Some(rollup_store));
+
+    let before = chrono::Utc::now();
+    let trace_request = Request::builder()
+        .method("POST")
+        .uri("/v1/traces")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(make_trace_payload(
+            "checkout-ui",
+            "render-checkout",
+        )))
+        .unwrap();
+    let response = app.clone().oneshot(trace_request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let after = chrono::Utc::now();
+    // Pad both sides by a minute so the bucket containing `observed_at` is
+    // always inside the requested range, even when the clock crosses a minute
+    // boundary mid-test.
+    let from_ms = (before - Duration::seconds(60)).timestamp_millis();
+    let to_ms = (after + Duration::seconds(60)).timestamp_millis();
+
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/api/rollups?signal=traces&resolution=1m&from={from_ms}&to={to_ms}"
+        ))
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(payload["signal"], "traces");
+    assert_eq!(payload["resolution"], "1m");
+    let buckets = payload["buckets"].as_array().expect("buckets is an array");
+    assert!(!buckets.is_empty(), "expected at least one bucket");
+
+    let total: u64 = buckets
+        .iter()
+        .map(|b| b["count"].as_u64().unwrap_or(0))
+        .sum();
+    assert_eq!(total, 1, "expected exactly one ingested trace");
+
+    let bucket = &buckets[0];
+    assert_eq!(bucket["by_service"]["checkout-ui"], 1);
+}
+
+/// /api/rollups returns 400 for unknown signal or resolution values.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_rollups_endpoint_validates_inputs() {
+    let redis_container = Redis::default().start().await.unwrap();
+    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
+    let redis_url = format!("redis://127.0.0.1:{redis_port}");
+
+    let stream_store = StreamStore::Redis(make_redis_store(redis_port).await);
+    let rollup_store = RollupStore::Redis(RedisRollupStore::new(&redis_url).await.unwrap());
+    let app = build_app_with_full_services(stream_store, None, None, Some(rollup_store));
+
+    for uri in [
+        "/api/rollups?signal=invalid&resolution=1m&from=0&to=0",
+        "/api/rollups?signal=traces&resolution=2m&from=0&to=0",
+        "/api/rollups?signal=traces&resolution=1m&from=10&to=5",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{uri} should be rejected"
+        );
+    }
+}
+
+/// `/api/rollups` returns 503 when the rollup store is not configured.
+#[tokio::test]
+async fn test_rollups_endpoint_returns_503_without_store() {
+    let stream_store = StreamStore::Memory(MemoryStreamStore::new(100));
+    let app = build_app_with_services(stream_store, None, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/rollups?signal=traces&resolution=1m&from=0&to=0")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
