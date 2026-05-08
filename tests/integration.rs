@@ -7362,3 +7362,164 @@ async fn test_rollups_endpoint_returns_503_without_store() {
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
+
+// --- APM trace search / lookup ---------------------------------------------
+
+fn make_trace_payload_with_ids(
+    service_name: &str,
+    span_name: &str,
+    trace_id: &str,
+    span_id: &str,
+    start_ns: u64,
+    end_ns: u64,
+) -> Bytes {
+    Bytes::from(
+        json!({
+            "resourceSpans": [{
+                "resource": {
+                    "attributes": [
+                        {"key": "service.name", "value": {"stringValue": service_name}}
+                    ]
+                },
+                "scopeSpans": [{
+                    "scope": {"name": "integration-test"},
+                    "spans": [{
+                        "traceId": trace_id,
+                        "spanId": span_id,
+                        "name": span_name,
+                        "kind": 2,
+                        "startTimeUnixNano": start_ns.to_string(),
+                        "endTimeUnixNano": end_ns.to_string(),
+                        "attributes": [
+                            {"key": "http.method", "value": {"stringValue": "GET"}}
+                        ]
+                    }]
+                }]
+            }]
+        })
+        .to_string(),
+    )
+}
+
+/// End-to-end trace search and trace_id lookup endpoints.
+///
+/// 1. POST two traces with distinct trace_ids and durations to /v1/traces.
+/// 2. Verify /api/traces/search lists both, supports service / min_duration filters.
+/// 3. Verify /api/traces?trace_id=... returns the full span detail (including
+///    span attributes and resource attributes).
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_trace_search_and_trace_id_lookup_via_api() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    let trace_a = "11111111111111111111111111111111";
+    let trace_b = "22222222222222222222222222222222";
+
+    async fn post_trace(app: &axum::Router, payload: Bytes) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/traces")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // Trace A: frontend, ~50 ms
+    post_trace(
+        &app,
+        make_trace_payload_with_ids(
+            "frontend",
+            "GET /alpha",
+            trace_a,
+            "aaaaaaaaaaaaaaa1",
+            0,
+            50_000_000,
+        ),
+    )
+    .await;
+    // Trace B: checkout, ~300 ms
+    post_trace(
+        &app,
+        make_trace_payload_with_ids(
+            "checkout",
+            "POST /beta",
+            trace_b,
+            "bbbbbbbbbbbbbbb1",
+            1_000_000_000,
+            1_300_000_000,
+        ),
+    )
+    .await;
+
+    // 1. Search with no filters -> both traces
+    let search_all = send_get_request(&app, "/api/traces/search").await;
+    assert_eq!(search_all.status(), StatusCode::OK);
+    let search_all_body = response_json(search_all).await;
+    let traces = search_all_body["traces"].as_array().unwrap();
+    assert_eq!(traces.len(), 2);
+    let ids: Vec<&str> = traces
+        .iter()
+        .map(|t| t["trace_id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&trace_a));
+    assert!(ids.contains(&trace_b));
+
+    // 2. Filter by service=checkout -> only trace_b
+    let search_svc = send_get_request(&app, "/api/traces/search?service=checkout").await;
+    assert_eq!(search_svc.status(), StatusCode::OK);
+    let svc_body = response_json(search_svc).await;
+    let svc_traces = svc_body["traces"].as_array().unwrap();
+    assert_eq!(svc_traces.len(), 1);
+    assert_eq!(svc_traces[0]["trace_id"], trace_b);
+    assert_eq!(svc_traces[0]["root_span_name"], "POST /beta");
+    assert_eq!(svc_traces[0]["span_count"], 1);
+    assert_eq!(svc_traces[0]["duration_ms"], 300);
+
+    // 3. Filter by min_duration_ms=200 -> only trace_b (300 ms)
+    let search_dur = send_get_request(&app, "/api/traces/search?min_duration_ms=200").await;
+    assert_eq!(search_dur.status(), StatusCode::OK);
+    let dur_body = response_json(search_dur).await;
+    let dur_traces = dur_body["traces"].as_array().unwrap();
+    assert_eq!(dur_traces.len(), 1);
+    assert_eq!(dur_traces[0]["trace_id"], trace_b);
+
+    // 4. Lookup trace_id=trace_a -> full detail with span attrs
+    let lookup = send_get_request(&app, &format!("/api/traces?trace_id={trace_a}")).await;
+    assert_eq!(lookup.status(), StatusCode::OK);
+    let detail = response_json(lookup).await;
+    assert_eq!(detail["trace_id"], trace_a);
+    assert_eq!(detail["span_count"], 1);
+    let span = &detail["spans"][0];
+    assert_eq!(span["span_id"], "aaaaaaaaaaaaaaa1");
+    assert_eq!(span["service_name"], "frontend");
+    assert_eq!(span["kind"], 2);
+    let span_attrs = span["span_attributes"].as_array().unwrap();
+    assert_eq!(span_attrs.len(), 1);
+    assert_eq!(span_attrs[0]["key"], "http.method");
+    let res_attrs = span["resource_attributes"].as_array().unwrap();
+    assert!(
+        res_attrs
+            .iter()
+            .any(|a| a["key"] == "service.name" && a["value"]["stringValue"] == "frontend")
+    );
+
+    // 5. Lookup unknown trace_id -> 404
+    let missing = send_get_request(
+        &app,
+        "/api/traces?trace_id=ffffffffffffffffffffffffffffffff",
+    )
+    .await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    // 6. Lookup without trace_id -> 400
+    let bad = send_get_request(&app, "/api/traces").await;
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+}
