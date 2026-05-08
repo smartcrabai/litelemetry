@@ -1,5 +1,6 @@
 pub mod alert_store;
 pub mod attr_index;
+pub mod error_group_store;
 pub mod incident_store;
 pub mod memory;
 pub mod postgres;

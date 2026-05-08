@@ -71,6 +71,10 @@ async fn setup_viewer_app() -> ViewerTestEnv {
     let pg = make_postgres_store(pg_port).await;
     pg.create_schema().await.unwrap();
 
+    let error_group_store = litelemetry::storage::error_group_store::ErrorGroupStore::Postgres(
+        litelemetry::storage::error_group_store::PostgresErrorGroupStore::new(pg.pool()),
+    );
+
     let redis = make_redis_store(redis_port).await;
     let runtime = ViewerRuntime::build(
         ViewerStore::Postgres(pg.clone()),
@@ -80,11 +84,16 @@ async fn setup_viewer_app() -> ViewerTestEnv {
     .unwrap();
     let runtime = Arc::new(Mutex::new(runtime));
 
-    let app = build_app_with_services(
+    let app = build_app_with_services_full(
         StreamStore::Redis(redis),
         Some(ViewerStore::Postgres(pg)),
         Some(runtime),
         None,
+        None,
+        None,
+        None,
+        None,
+        Some(error_group_store),
     );
 
     ViewerTestEnv {
@@ -7832,6 +7841,7 @@ async fn test_attribute_index_records_and_serves_attributes() {
         Some(attr_index),
         None,
         None,
+        None,
     );
 
     // Ingest a JSON trace payload carrying http.route and http.method.
@@ -8020,6 +8030,7 @@ async fn setup_incident_app() -> IncidentTestEnv {
         None,
         None,
         Some(IncidentStore::Postgres(pg)),
+        None,
         None,
     );
     IncidentTestEnv {
@@ -8486,6 +8497,7 @@ async fn setup_slo_app() -> ViewerTestEnv {
         None,
         None,
         Some(slo_store),
+        None,
     );
 
     ViewerTestEnv {
@@ -9074,4 +9086,139 @@ async fn test_service_map_endpoint_returns_nodes_and_edges() {
         .expect("backend node");
     assert_eq!(backend_node["span_count"], 1);
     assert_eq!(backend_node["error_count"], 1);
+}
+
+// --- error grouping ---------------------------------------------------------
+
+fn make_trace_payload_with_exception(
+    service_name: &str,
+    span_name: &str,
+    exception_type: &str,
+    exception_message: &str,
+    stacktrace: &str,
+) -> Bytes {
+    Bytes::from(
+        json!({
+            "resourceSpans": [
+                {
+                    "resource": {
+                        "attributes": [
+                            {"key": "service.name", "value": {"stringValue": service_name}}
+                        ]
+                    },
+                    "scopeSpans": [
+                        {
+                            "scope": {"name": "integration-test"},
+                            "spans": [
+                                {
+                                    "traceId": "00000000000000000000000000000001",
+                                    "spanId": "0000000000000001",
+                                    "name": span_name,
+                                    "kind": 1,
+                                    "events": [
+                                        {
+                                            "name": "exception",
+                                            "attributes": [
+                                                {"key": "exception.type", "value": {"stringValue": exception_type}},
+                                                {"key": "exception.message", "value": {"stringValue": exception_message}},
+                                                {"key": "exception.stacktrace", "value": {"stringValue": stacktrace}}
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        })
+        .to_string(),
+    )
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_error_groups_aggregate_exceptions_by_fingerprint() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    // Send three traces that map to two distinct fingerprints:
+    // - "RuntimeError" with similar messages differing only by digits → one bucket
+    // - "ValueError" → separate bucket
+    let payloads = vec![
+        make_trace_payload_with_exception(
+            "checkout-ui",
+            "render",
+            "RuntimeError",
+            "user 42 not found",
+            "trace-1",
+        ),
+        make_trace_payload_with_exception(
+            "checkout-ui",
+            "render",
+            "RuntimeError",
+            "user 9999 not found",
+            "trace-2",
+        ),
+        make_trace_payload_with_exception(
+            "checkout-ui",
+            "render",
+            "ValueError",
+            "invalid currency",
+            "trace-3",
+        ),
+    ];
+
+    for body in payloads {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/traces")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        let resp = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/error-groups?lookback_ms=600000")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let payload = response_json(resp).await;
+    let groups = payload["error_groups"].as_array().expect("array");
+
+    assert_eq!(
+        groups.len(),
+        2,
+        "expected two distinct fingerprints, got: {payload}"
+    );
+
+    let total: u64 = groups
+        .iter()
+        .map(|g| g["count"].as_u64().unwrap_or(0))
+        .sum();
+    assert_eq!(total, 3, "total occurrences should be 3, got: {payload}");
+
+    let runtime_group = groups
+        .iter()
+        .find(|g| {
+            g["signature"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("RuntimeError")
+        })
+        .expect("RuntimeError group missing");
+    assert_eq!(
+        runtime_group["count"].as_u64(),
+        Some(2),
+        "RuntimeError group should have 2 occurrences"
+    );
 }

@@ -82,6 +82,19 @@ CREATE TABLE IF NOT EXISTS notification_channels (
     enabled BOOLEAN NOT NULL DEFAULT TRUE
 )";
 
+const CREATE_ERROR_GROUPS_SQL: &str = "
+CREATE TABLE IF NOT EXISTS error_groups (
+    fingerprint TEXT PRIMARY KEY,
+    signature TEXT NOT NULL,
+    first_seen TIMESTAMPTZ NOT NULL,
+    last_seen TIMESTAMPTZ NOT NULL,
+    count BIGINT NOT NULL DEFAULT 0,
+    sample_payload JSONB NOT NULL DEFAULT '{}'::jsonb
+)";
+
+const CREATE_ERROR_GROUPS_LAST_SEEN_INDEX_SQL: &str =
+    "CREATE INDEX IF NOT EXISTS error_groups_last_seen_idx ON error_groups (last_seen)";
+
 impl PostgresStore {
     pub async fn new(url: &str) -> Result<Self, sqlx::Error> {
         let pool = PgPool::connect(url).await?;
@@ -126,6 +139,12 @@ impl PostgresStore {
             .execute(&self.pool)
             .await?;
         sqlx::query(crate::storage::slo_store::CREATE_SLO_DEFINITIONS_SQL)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(CREATE_ERROR_GROUPS_SQL)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(CREATE_ERROR_GROUPS_LAST_SEEN_INDEX_SQL)
             .execute(&self.pool)
             .await?;
         Ok(())

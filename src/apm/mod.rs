@@ -9,7 +9,10 @@
 //! Additional features:
 //! - `exemplars`: link metric viewer buckets to sample trace_ids observed in the same time window.
 //! - `service_map`: extract service-to-service edges from OTLP spans for the Service Map tab.
+//! - `error_groups`: aggregate exception events from traces and ERROR-severity logs into
+//!   fingerprinted issue groups.
 
+pub mod error_groups;
 pub mod exemplars;
 pub mod service_map;
 pub mod trace_search;
