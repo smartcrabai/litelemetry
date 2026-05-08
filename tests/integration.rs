@@ -21,7 +21,7 @@ use litelemetry::storage::memory::{MemoryStreamStore, MemoryViewerStore};
 use litelemetry::storage::postgres::{PostgresStore, ViewerSnapshotRow};
 use litelemetry::storage::redis::RedisStore;
 use litelemetry::storage::rollup::{RedisRollupStore, RollupStore};
-use litelemetry::storage::{StreamStore, ViewerStore};
+use litelemetry::storage::{IncidentStore, StreamStore, ViewerStore};
 use litelemetry::viewer_runtime::runtime::ViewerRuntime;
 use litelemetry::viewer_runtime::state::StreamCursor;
 use serde_json::json;
@@ -7830,6 +7830,7 @@ async fn test_attribute_index_records_and_serves_attributes() {
         None,
         None,
         Some(attr_index),
+        None,
     );
 
     // Ingest a JSON trace payload carrying http.route and http.method.
@@ -7994,4 +7995,162 @@ async fn test_attribute_index_returns_503_in_standalone_mode_memory() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+// --- Incident lifecycle (testcontainers + Postgres) -------------------------
+
+struct IncidentTestEnv {
+    app: axum::Router,
+    _pg_container: testcontainers::ContainerAsync<Postgres>,
+}
+
+async fn setup_incident_app() -> IncidentTestEnv {
+    let pg_container = Postgres::default().start().await.unwrap();
+    let pg_port = pg_container.get_host_port_ipv4(5432).await.unwrap();
+    let pg = make_postgres_store(pg_port).await;
+    pg.create_schema().await.unwrap();
+
+    let stream_store = StreamStore::Memory(MemoryStreamStore::new(100_000));
+    let app = build_app_with_services_full(
+        stream_store,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(IncidentStore::Postgres(pg)),
+    );
+    IncidentTestEnv {
+        app,
+        _pg_container: pg_container,
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_incident_full_lifecycle_open_ack_resolve_and_invalid_transitions() {
+    let env = setup_incident_app().await;
+    let app = env.app;
+
+    // Create an incident
+    let response = send_json_request(
+        &app,
+        "POST",
+        "/api/incidents",
+        json!({
+            "severity": "critical",
+            "details_json": {"message": "disk full on host-1"}
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = response_json(response).await;
+    let incident_id = body["id"].as_str().unwrap().to_string();
+    assert_eq!(body["status"], "open");
+    assert_eq!(body["severity"], "critical");
+
+    // Listing with status=open should include it
+    let response = send_get_request(&app, "/api/incidents?status=open").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    let incidents = body["incidents"].as_array().unwrap();
+    assert!(
+        incidents
+            .iter()
+            .any(|i| i["id"].as_str() == Some(&incident_id))
+    );
+
+    // GET /api/incidents/{id}
+    let response = send_get_request(&app, format!("/api/incidents/{incident_id}")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["status"], "open");
+
+    // open -> acknowledged
+    let response = send_json_request(
+        &app,
+        "PATCH",
+        format!("/api/incidents/{incident_id}"),
+        json!({ "status": "acknowledged" }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["status"], "acknowledged");
+    assert!(
+        body["acknowledged_at"].as_str().is_some(),
+        "acknowledged_at should be populated"
+    );
+
+    // acknowledged -> open is rejected (reverse transition)
+    let response = send_json_request(
+        &app,
+        "PATCH",
+        format!("/api/incidents/{incident_id}"),
+        json!({ "status": "open" }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // acknowledged -> acknowledged is rejected (idempotent same-status)
+    let response = send_json_request(
+        &app,
+        "PATCH",
+        format!("/api/incidents/{incident_id}"),
+        json!({ "status": "acknowledged" }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // unknown status string is rejected
+    let response = send_json_request(
+        &app,
+        "PATCH",
+        format!("/api/incidents/{incident_id}"),
+        json!({ "status": "bogus" }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // acknowledged -> resolved
+    let response = send_json_request(
+        &app,
+        "PATCH",
+        format!("/api/incidents/{incident_id}"),
+        json!({ "status": "resolved" }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["status"], "resolved");
+    assert!(
+        body["resolved_at"].as_str().is_some(),
+        "resolved_at should be populated"
+    );
+
+    // resolved -> acknowledged is rejected (reverse transition)
+    let response = send_json_request(
+        &app,
+        "PATCH",
+        format!("/api/incidents/{incident_id}"),
+        json!({ "status": "acknowledged" }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // PATCH on unknown id returns 404
+    let bogus_id = Uuid::new_v4();
+    let response = send_json_request(
+        &app,
+        "PATCH",
+        format!("/api/incidents/{bogus_id}"),
+        json!({ "status": "acknowledged" }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // Create with empty severity is rejected
+    let response =
+        send_json_request(&app, "POST", "/api/incidents", json!({ "severity": "   " })).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }

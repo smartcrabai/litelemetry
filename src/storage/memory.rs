@@ -1,6 +1,7 @@
 use crate::domain::dashboard::{
     DashboardDefinition, build_layout_json, panel_inputs_from_viewer_ids,
 };
+use crate::domain::incident::{Incident, IncidentStatus};
 use crate::domain::telemetry::{NormalizedEntry, Signal};
 use crate::domain::viewer::ViewerDefinition;
 use crate::storage::StorageError;
@@ -279,6 +280,70 @@ pub fn default_viewer_definitions() -> Vec<ViewerDefinition> {
             enabled: true,
         },
     ]
+}
+
+/// In-memory incident store
+#[derive(Clone, Default)]
+pub struct MemoryIncidentStore {
+    inner: Arc<Mutex<Vec<Incident>>>,
+}
+
+impl MemoryIncidentStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn insert_incident(&self, incident: &Incident) -> Result<(), StorageError> {
+        let mut guard = self.inner.lock().await;
+        guard.push(incident.clone());
+        Ok(())
+    }
+
+    pub async fn list_incidents(
+        &self,
+        status: Option<IncidentStatus>,
+    ) -> Result<Vec<Incident>, StorageError> {
+        let guard = self.inner.lock().await;
+        let mut out: Vec<Incident> = guard
+            .iter()
+            .filter(|i| status.is_none_or(|s| i.status == s))
+            .cloned()
+            .collect();
+        out.sort_by_key(|b| std::cmp::Reverse(b.opened_at));
+        Ok(out)
+    }
+
+    pub async fn get_incident(&self, id: Uuid) -> Result<Option<Incident>, StorageError> {
+        let guard = self.inner.lock().await;
+        Ok(guard.iter().find(|i| i.id == id).cloned())
+    }
+
+    pub async fn update_incident_status(
+        &self,
+        id: Uuid,
+        new_status: IncidentStatus,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<Incident>, StorageError> {
+        let mut guard = self.inner.lock().await;
+        let Some(incident) = guard.iter_mut().find(|i| i.id == id) else {
+            return Ok(None);
+        };
+        incident.status = new_status;
+        match new_status {
+            IncidentStatus::Acknowledged => {
+                if incident.acknowledged_at.is_none() {
+                    incident.acknowledged_at = Some(now);
+                }
+            }
+            IncidentStatus::Resolved => {
+                if incident.resolved_at.is_none() {
+                    incident.resolved_at = Some(now);
+                }
+            }
+            IncidentStatus::Open => {}
+        }
+        Ok(Some(incident.clone()))
+    }
 }
 
 /// Default dashboard definitions inserted at startup in standalone mode
