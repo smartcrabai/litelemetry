@@ -1,3 +1,4 @@
+use crate::apm::service_map::{ServiceMap, build_service_map};
 use crate::apm::waterfall::{TraceWaterfall, WaterfallError, build_waterfall};
 use crate::domain::dashboard::{
     DashboardDefinition, PanelInput, build_layout_json, panel_inputs_from_viewer_ids,
@@ -311,7 +312,8 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       #page-dashboard,
       #page-alerts,
       #page-incidents,
-      #page-notifications {
+      #page-notifications,
+      #page-service-map {
         display: grid;
         gap: 24px;
       }
@@ -430,6 +432,43 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         font-size: 12px;
       }
 
+      .service-map-svg {
+        width: 100%;
+        height: 420px;
+        background: rgba(255, 251, 243, 0.5);
+        border-radius: 18px;
+        border: 1px solid var(--line);
+      }
+
+      .service-map-node {
+        fill: var(--accent-soft);
+        stroke: var(--accent);
+        stroke-width: 1.5;
+      }
+
+      .service-map-node-label {
+        font-size: 12px;
+        fill: var(--ink);
+        font-weight: 600;
+        pointer-events: none;
+      }
+
+      .service-map-edge {
+        stroke: var(--muted);
+        stroke-width: 1.4;
+        fill: none;
+        marker-end: url(#service-map-arrow);
+      }
+
+      .service-map-edge-error {
+        stroke: var(--accent-strong);
+      }
+
+      .service-map-edge-label {
+        font-size: 10px;
+        fill: var(--muted);
+        pointer-events: none;
+      }
 
       .stack,
       .panel,
@@ -1517,6 +1556,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         <a id="nav-viewers" class="sidebar-item active" href="#viewers" data-page="viewers">Viewers</a>
         <a id="nav-waterfall" class="sidebar-item" href="#waterfall" data-page="waterfall">Trace Waterfall</a>
         <a id="nav-traces" class="sidebar-item" href="#traces" data-page="traces">Traces</a>
+        <a id="nav-service-map" class="sidebar-item" href="#service-map" data-page="service-map">Service Map</a>
         <a id="nav-alerts" class="sidebar-item" href="#alerts" data-page="alerts">Alerts</a>
         <a id="nav-incidents" class="sidebar-item" href="#incidents" data-page="incidents">Incidents</a>
         <a id="nav-slos" class="sidebar-item" href="#slos" data-page="slos">SLOs</a>
@@ -1766,6 +1806,69 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           </div>
         </section>
       </div><!-- #page-query -->
+
+      <div id="page-service-map" hidden>
+        <section class="panel panel-strong stack">
+          <div class="toolbar-row" style="align-items:center;gap:12px;">
+            <h2 style="margin:0;">Service Map</h2>
+            <label for="service-map-lookback" style="font-size:0.85rem;color:var(--muted);">Lookback</label>
+            <select id="service-map-lookback" aria-label="Lookback window">
+              <option value="60000">1m</option>
+              <option value="300000">5m</option>
+              <option value="600000" selected>10m</option>
+              <option value="1800000">30m</option>
+              <option value="3600000">1h</option>
+            </select>
+            <button id="service-map-refresh" class="secondary" type="button">Refresh</button>
+            <span id="service-map-status" class="preview-status" role="status" aria-live="polite"></span>
+          </div>
+          <svg id="service-map-svg" class="service-map-svg"
+               viewBox="0 0 800 420" preserveAspectRatio="xMidYMid meet"
+               xmlns="http://www.w3.org/2000/svg" aria-label="Service map graph">
+            <defs>
+              <marker id="service-map-arrow" viewBox="0 0 10 10" refX="9" refY="5"
+                      markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--muted)" />
+              </marker>
+            </defs>
+          </svg>
+          <p id="service-map-empty" hidden style="text-align:center;color:var(--muted);">
+            No services detected in this window. Send some OTLP traces with parent/child spans across services.
+          </p>
+        </section>
+        <section class="panel stack table-wrap">
+          <h3 style="margin:0;">Nodes</h3>
+          <div class="table-scroll">
+            <table data-testid="service-map-nodes-table">
+              <thead>
+                <tr>
+                  <th>Service</th>
+                  <th>Spans</th>
+                  <th>Errors</th>
+                  <th>p95 (ms)</th>
+                </tr>
+              </thead>
+              <tbody id="service-map-nodes-body"></tbody>
+            </table>
+          </div>
+        </section>
+        <section class="panel stack table-wrap">
+          <h3 style="margin:0;">Edges</h3>
+          <div class="table-scroll">
+            <table data-testid="service-map-edges-table">
+              <thead>
+                <tr>
+                  <th>From</th>
+                  <th>To</th>
+                  <th>Calls</th>
+                  <th>Error rate</th>
+                </tr>
+              </thead>
+              <tbody id="service-map-edges-body"></tbody>
+            </table>
+          </div>
+        </section>
+      </div><!-- #page-service-map -->
 
       <div id="page-dashboard" hidden>
         <div class="dashboard-page-header">
@@ -3818,6 +3921,8 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const newSloButton = document.getElementById('new-slo-button');
       const refreshSlosButton = document.getElementById('refresh-slos-button');
       const pageAnomaly = document.getElementById('page-anomaly');
+      const pageServiceMap = document.getElementById('page-service-map');
+      const navServiceMap = document.getElementById('nav-service-map');
       const dashboardTitle = document.getElementById('dashboard-title');
       const dashboardGrid = document.getElementById('dashboard-grid');
       const dashboardRefreshIntervalSelect = document.getElementById('dashboard-refresh-interval');
@@ -4008,6 +4113,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           pageQuery.hidden = page !== 'query';
         }
         if (pageAnomaly) pageAnomaly.hidden = page !== 'anomaly';
+        pageServiceMap.hidden = page !== 'service-map';
 
         navViewers.classList.toggle('active', page === 'viewers');
         const navWaterfallEl = document.getElementById('nav-waterfall');
@@ -4028,6 +4134,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           navQuery.classList.toggle('active', page === 'query');
         }
         if (navAnomaly) navAnomaly.classList.toggle('active', page === 'anomaly');
+        navServiceMap.classList.toggle('active', page === 'service-map');
 
         document.querySelectorAll('.sidebar-dashboard-item').forEach(el => {
           el.classList.toggle('active', el.dataset.id === dashboardId);
@@ -4074,6 +4181,9 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
         if (page === 'anomaly') {
           refreshAnomalyViewerOptions();
+        }
+        if (page === 'service-map') {
+          refreshServiceMap();
         }
         sidebar.classList.remove('open');
 
@@ -5789,6 +5899,163 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         nameInput.focus();
       }
 
+      // --- Service Map ----------------------------------------------------
+      const serviceMapLookback = document.getElementById('service-map-lookback');
+      const serviceMapRefreshButton = document.getElementById('service-map-refresh');
+      const serviceMapStatus = document.getElementById('service-map-status');
+      const serviceMapSvg = document.getElementById('service-map-svg');
+      const serviceMapEmpty = document.getElementById('service-map-empty');
+      const serviceMapNodesBody = document.getElementById('service-map-nodes-body');
+      const serviceMapEdgesBody = document.getElementById('service-map-edges-body');
+      const SVG_NS = 'http://www.w3.org/2000/svg';
+
+      function setServiceMapStatus(text, kind) {
+        serviceMapStatus.textContent = text || '';
+        serviceMapStatus.dataset.state = kind || '';
+      }
+
+      async function refreshServiceMap() {
+        const lookbackMs = parseInt(serviceMapLookback.value, 10) || 600000;
+        setServiceMapStatus('Loading...', 'working');
+        try {
+          const resp = await fetch(`/api/service-map?lookback_ms=${lookbackMs}`);
+          if (!resp.ok) {
+            throw new Error(`status ${resp.status}`);
+          }
+          const data = await resp.json();
+          renderServiceMap(data);
+          setServiceMapStatus(
+            `${data.nodes.length} services, ${data.edges.length} edges`,
+            'ok',
+          );
+        } catch (err) {
+          setServiceMapStatus(`Failed: ${err.message || err}`, 'error');
+        }
+      }
+
+      function renderServiceMap(data) {
+        const nodes = Array.isArray(data.nodes) ? data.nodes : [];
+        const edges = Array.isArray(data.edges) ? data.edges : [];
+
+        serviceMapNodesBody.innerHTML = '';
+        for (const node of nodes) {
+          const tr = document.createElement('tr');
+          tr.innerHTML =
+            `<td>${escapeHtml(node.name)}</td>` +
+            `<td>${node.span_count}</td>` +
+            `<td>${node.error_count}</td>` +
+            `<td>${(node.p95_duration_ms || 0).toFixed(2)}</td>`;
+          serviceMapNodesBody.appendChild(tr);
+        }
+
+        serviceMapEdgesBody.innerHTML = '';
+        for (const edge of edges) {
+          const tr = document.createElement('tr');
+          const ratePct = ((edge.error_rate || 0) * 100).toFixed(1) + '%';
+          tr.innerHTML =
+            `<td>${escapeHtml(edge.from)}</td>` +
+            `<td>${escapeHtml(edge.to)}</td>` +
+            `<td>${edge.calls}</td>` +
+            `<td>${ratePct}</td>`;
+          serviceMapEdgesBody.appendChild(tr);
+        }
+
+        serviceMapEmpty.hidden = nodes.length > 0;
+        renderServiceMapSvg(nodes, edges);
+      }
+
+      function renderServiceMapSvg(nodes, edges) {
+        // Wipe existing rendered children but keep <defs>.
+        for (const child of Array.from(serviceMapSvg.children)) {
+          if (child.tagName.toLowerCase() !== 'defs') {
+            serviceMapSvg.removeChild(child);
+          }
+        }
+        if (!nodes.length) return;
+
+        // Deterministic circular layout: positions depend only on node index.
+        const width = 800;
+        const height = 420;
+        const cx = width / 2;
+        const cy = height / 2;
+        const radius = Math.min(width, height) / 2 - 80;
+        const positions = new Map();
+        nodes.forEach((node, i) => {
+          const angle = (2 * Math.PI * i) / nodes.length - Math.PI / 2;
+          positions.set(node.name, {
+            x: cx + radius * Math.cos(angle),
+            y: cy + radius * Math.sin(angle),
+          });
+        });
+
+        // Edges first (so nodes overlay them).
+        for (const edge of edges) {
+          const from = positions.get(edge.from);
+          const to = positions.get(edge.to);
+          if (!from || !to) continue;
+          // Shorten the line so the arrowhead stops at the node boundary.
+          const dx = to.x - from.x;
+          const dy = to.y - from.y;
+          const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+          const nodeR = 26;
+          const sx = from.x + (dx / dist) * nodeR;
+          const sy = from.y + (dy / dist) * nodeR;
+          const ex = to.x - (dx / dist) * nodeR;
+          const ey = to.y - (dy / dist) * nodeR;
+          const line = document.createElementNS(SVG_NS, 'line');
+          line.setAttribute('x1', sx);
+          line.setAttribute('y1', sy);
+          line.setAttribute('x2', ex);
+          line.setAttribute('y2', ey);
+          line.setAttribute(
+            'class',
+            edge.error_rate > 0
+              ? 'service-map-edge service-map-edge-error'
+              : 'service-map-edge',
+          );
+          serviceMapSvg.appendChild(line);
+
+          const label = document.createElementNS(SVG_NS, 'text');
+          label.setAttribute('x', (sx + ex) / 2);
+          label.setAttribute('y', (sy + ey) / 2 - 4);
+          label.setAttribute('text-anchor', 'middle');
+          label.setAttribute('class', 'service-map-edge-label');
+          label.textContent = String(edge.calls);
+          serviceMapSvg.appendChild(label);
+        }
+
+        for (const node of nodes) {
+          const pos = positions.get(node.name);
+          if (!pos) continue;
+          const circle = document.createElementNS(SVG_NS, 'circle');
+          circle.setAttribute('cx', pos.x);
+          circle.setAttribute('cy', pos.y);
+          circle.setAttribute('r', 26);
+          circle.setAttribute('class', 'service-map-node');
+          serviceMapSvg.appendChild(circle);
+
+          const label = document.createElementNS(SVG_NS, 'text');
+          label.setAttribute('x', pos.x);
+          label.setAttribute('y', pos.y + 42);
+          label.setAttribute('text-anchor', 'middle');
+          label.setAttribute('class', 'service-map-node-label');
+          label.textContent = node.name;
+          serviceMapSvg.appendChild(label);
+        }
+      }
+
+      function escapeHtml(input) {
+        return String(input == null ? '' : input)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
+      serviceMapRefreshButton.addEventListener('click', refreshServiceMap);
+      serviceMapLookback.addEventListener('change', refreshServiceMap);
+
       function routeFromHash() {
         const hashData = parseDashboardHash();
         if (hashData) {
@@ -5809,6 +6076,10 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
         if (window.location.hash === '#slos') {
           navigateTo('slos');
+          return;
+        }
+        if (window.location.hash === '#service-map') {
+          navigateTo('service-map');
           return;
         }
         if (
@@ -6960,6 +7231,7 @@ pub fn build_app_with_services_full(
         .route("/api/slos/{id}/budget", get(get_slo_budget))
         .route("/api/exemplars", get(list_exemplars))
         .route("/api/anomaly/evaluate", post(evaluate_anomaly))
+        .route("/api/service-map", get(service_map))
         .route("/v1/traces", post(ingest_traces))
         .route("/v1/metrics", post(ingest_metrics))
         .route("/v1/logs", post(ingest_logs))
@@ -7219,6 +7491,42 @@ async fn evaluate_anomaly(
     let now = Utc::now();
     let result = payload.detector.evaluate(&viewer_state.entries, now);
     Ok(Json(result))
+}
+
+#[derive(Debug, Deserialize)]
+struct ServiceMapQuery {
+    lookback_ms: Option<i64>,
+}
+
+/// Default lookback window (10 minutes) for the service map API.
+const DEFAULT_SERVICE_MAP_LOOKBACK_MS: i64 = 10 * 60 * 1_000;
+
+async fn service_map(
+    State(state): State<AppState>,
+    Query(params): Query<ServiceMapQuery>,
+) -> Result<Json<ServiceMap>, StatusCode> {
+    let lookback_ms = params
+        .lookback_ms
+        .unwrap_or(DEFAULT_SERVICE_MAP_LOOKBACK_MS);
+    let now = Utc::now();
+
+    // Read traces directly from the stream so the endpoint works in
+    // standalone mode (where viewer_runtime is also memory-backed) and in
+    // the Redis/Postgres deployment without depending on user-configured
+    // viewers retaining trace history.
+    let mut stream_store = state.stream_store.clone();
+    let entries = stream_store
+        .read_entries_since(Signal::Traces, None, 100_000)
+        .await
+        .map_err(|error| {
+            tracing::error!("service_map: read_entries_since failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let normalized: Vec<_> = entries.into_iter().map(|(_, entry)| entry).collect();
+    let map = build_service_map(&normalized, now, lookback_ms);
+
+    Ok(Json(map))
 }
 
 async fn list_viewers(
