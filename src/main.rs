@@ -181,6 +181,7 @@ async fn main() {
         rollup_store,
         alert_store,
         attr_index,
+        None,
     );
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await

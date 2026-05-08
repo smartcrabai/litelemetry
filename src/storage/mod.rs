@@ -1,9 +1,12 @@
 pub mod alert_store;
 pub mod attr_index;
+pub mod incident_store;
 pub mod memory;
 pub mod postgres;
 pub mod redis;
 pub mod rollup;
+
+pub use incident_store::IncidentStore;
 
 use crate::domain::dashboard::DashboardDefinition;
 use crate::domain::telemetry::{NormalizedEntry, Signal};

@@ -52,6 +52,18 @@ CREATE TABLE IF NOT EXISTS attribute_index (
 CREATE INDEX IF NOT EXISTS attribute_index_observed_at_idx ON attribute_index (observed_at);
 CREATE INDEX IF NOT EXISTS attribute_index_key_idx ON attribute_index (attribute_key);
 
+CREATE TABLE IF NOT EXISTS incidents (
+    id UUID PRIMARY KEY,
+    alert_id UUID,
+    status TEXT NOT NULL DEFAULT 'open',
+    severity TEXT NOT NULL,
+    opened_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    acknowledged_at TIMESTAMPTZ,
+    resolved_at TIMESTAMPTZ,
+    details_json JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE INDEX IF NOT EXISTS incidents_status_idx ON incidents (status);
+
 
 INSERT INTO viewer_definitions (
     id,

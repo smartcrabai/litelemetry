@@ -2,6 +2,7 @@ use crate::apm::waterfall::{TraceWaterfall, WaterfallError, build_waterfall};
 use crate::domain::dashboard::{
     DashboardDefinition, PanelInput, build_layout_json, panel_inputs_from_viewer_ids,
 };
+use crate::domain::incident::{Incident, IncidentStatus, validate_transition};
 use crate::domain::telemetry::{NormalizedEntry, Signal, SignalMask};
 use crate::domain::viewer::{ViewerDefinition, ViewerStatus};
 use crate::ingest::decode::{DecodeError, decompress_body, parse_content_encoding};
@@ -10,7 +11,7 @@ use crate::ingest::otlp_http::{
 };
 use crate::ingest::otlp_pb::payload_as_value;
 use crate::storage::rollup::{Resolution, RollupStore};
-use crate::storage::{StreamStore, ViewerStore};
+use crate::storage::{IncidentStore, StreamStore, ViewerStore};
 use crate::viewer_runtime::compiler::{
     CompiledViewer, compile, extract_searchable_payload_text, query_from_definition,
 };
@@ -300,7 +301,8 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
       #page-viewers,
       #page-dashboard,
-      #page-alerts {
+      #page-alerts,
+      #page-incidents {
         display: grid;
         gap: 24px;
       }
@@ -382,6 +384,43 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         justify-content: flex-end;
         margin-top: 8px;
       }
+
+      .incident-status-pill {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .incident-status-pill.open {
+        background: rgba(220, 38, 38, 0.15);
+        color: #dc2626;
+      }
+      .incident-status-pill.acknowledged {
+        background: rgba(217, 119, 6, 0.15);
+        color: #d97706;
+      }
+      .incident-status-pill.resolved {
+        background: rgba(22, 163, 74, 0.15);
+        color: #16a34a;
+      }
+      .incident-detail-panel {
+        background: var(--surface, #1f2937);
+        border: 1px solid var(--border, rgba(148, 163, 184, 0.2));
+        border-radius: 8px;
+        padding: 16px;
+      }
+      .incident-detail-panel pre {
+        background: rgba(15, 23, 42, 0.4);
+        padding: 12px;
+        border-radius: 6px;
+        overflow: auto;
+        max-height: 300px;
+        font-size: 12px;
+      }
+
 
       .stack,
       .panel,
@@ -1437,6 +1476,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         <a id="nav-waterfall" class="sidebar-item" href="#waterfall" data-page="waterfall">Trace Waterfall</a>
         <a id="nav-traces" class="sidebar-item" href="#traces" data-page="traces">Traces</a>
         <a id="nav-alerts" class="sidebar-item" href="#alerts" data-page="alerts">Alerts</a>
+        <a id="nav-incidents" class="sidebar-item" href="#incidents" data-page="incidents">Incidents</a>
         <div class="sidebar-section-label">Dashboards</div>
         <div id="dashboard-list"></div>
         <button id="new-dashboard-button" class="secondary sidebar-new-btn" type="button">+ New Dashboard</button>
@@ -1846,6 +1886,55 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           </div>
         </div>
       </div>
+
+      <div id="page-incidents" hidden>
+        <section class="toolbar panel panel-strong">
+          <div class="toolbar-row">
+            <h2 style="margin:0;">Incidents</h2>
+            <select id="incident-status-filter" aria-label="Filter by status">
+              <option value="">All</option>
+              <option value="open" selected>Open</option>
+              <option value="acknowledged">Acknowledged</option>
+              <option value="resolved">Resolved</option>
+            </select>
+            <button id="incident-refresh-button" class="secondary" type="button">Refresh</button>
+            <span style="flex:1;"></span>
+            <input id="incident-create-severity" placeholder="severity (e.g. critical)" maxlength="32" style="max-width:200px;" />
+            <button id="incident-create-button" class="primary" type="button" data-testid="incident-create-button">+ Create incident</button>
+          </div>
+          <div id="incident-status-box" class="status-box" data-state="working">Loading incidents...</div>
+        </section>
+
+        <section class="panel panel-strong stack table-wrap">
+          <div id="incident-table-scroll" class="table-scroll" hidden>
+            <table data-testid="incident-table">
+              <thead>
+                <tr>
+                  <th>Status</th>
+                  <th>Severity</th>
+                  <th>Opened</th>
+                  <th>Acknowledged</th>
+                  <th>Resolved</th>
+                  <th>ID</th>
+                  <th aria-label="Actions"></th>
+                </tr>
+              </thead>
+              <tbody id="incident-table-body"></tbody>
+            </table>
+          </div>
+          <div id="incident-empty" class="empty" hidden>
+            <div class="stack">
+              <strong>No incidents</strong>
+              <p>No incidents match the current filter.</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="incident-detail-section" class="panel panel-strong stack" hidden>
+          <h3 id="incident-detail-title">Incident Detail</h3>
+          <div id="incident-detail-body" class="incident-detail-panel"></div>
+        </section>
+      </div><!-- #page-incidents -->
     </main>
 
     <script>
@@ -3289,10 +3378,12 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const navViewers = document.getElementById('nav-viewers');
       const navTraces = document.getElementById('nav-traces');
       const pageTraces = document.getElementById('page-traces');
+      const navIncidents = document.getElementById('nav-incidents');
       const newDashboardButton = document.getElementById('new-dashboard-button');
       const dashboardListEl = document.getElementById('dashboard-list');
       const pageViewers = document.getElementById('page-viewers');
       const pageDashboard = document.getElementById('page-dashboard');
+      const pageIncidents = document.getElementById('page-incidents');
       const dashboardTitle = document.getElementById('dashboard-title');
       const dashboardGrid = document.getElementById('dashboard-grid');
       const dashboardRefreshIntervalSelect = document.getElementById('dashboard-refresh-interval');
@@ -3476,6 +3567,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         pageTraces.hidden = page !== 'traces';
         const pageAlertsEl = document.getElementById('page-alerts');
         if (pageAlertsEl) pageAlertsEl.hidden = page !== 'alerts';
+        pageIncidents.hidden = page !== 'incidents';
 
         navViewers.classList.toggle('active', page === 'viewers');
         const navWaterfallEl = document.getElementById('nav-waterfall');
@@ -3487,6 +3579,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         if (page === 'alerts') {
           refreshAlerts();
         }
+        navIncidents.classList.toggle('active', page === 'incidents');
 
         document.querySelectorAll('.sidebar-dashboard-item').forEach(el => {
           el.classList.toggle('active', el.dataset.id === dashboardId);
@@ -3520,6 +3613,9 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
         if (page === 'traces') {
           loadTraceSearch();
+        }
+        if (page === 'incidents') {
+          refreshIncidents();
         }
         sidebar.classList.remove('open');
 
@@ -3581,6 +3677,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       });
 
       // --- Trace Waterfall page wiring ----------------------------------
+
       const navWaterfall = document.getElementById('nav-waterfall');
       const waterfallTraceIdInput = document.getElementById('waterfall-trace-id-input');
       const waterfallLoadButton = document.getElementById('waterfall-load-button');
@@ -4265,6 +4362,12 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           if (e.target === alertModal) closeAlertModal();
         });
       }
+
+      navIncidents.addEventListener('click', (e) => {
+        e.preventDefault();
+        window.location.hash = '#incidents';
+      });
+
 
       dashboardRefreshToggleButton.addEventListener('click', () => {
         if (dashboardRefreshIntervalMs === null) {
@@ -4990,6 +5093,10 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           navigateTo('traces');
           return;
         }
+        if (window.location.hash === '#incidents') {
+          navigateTo('incidents');
+          return;
+        }
         if (
           window.location.hash === '#viewers' ||
           window.location.hash === ''
@@ -5004,6 +5111,177 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       if (window.location.hash !== '') {
         routeFromHash();
       }
+
+      // --- Incidents -------------------------------------------------------
+      const incidentStatusFilter = document.getElementById('incident-status-filter');
+      const incidentRefreshButton = document.getElementById('incident-refresh-button');
+      const incidentCreateButton = document.getElementById('incident-create-button');
+      const incidentCreateSeverity = document.getElementById('incident-create-severity');
+      const incidentTableScroll = document.getElementById('incident-table-scroll');
+      const incidentTableBody = document.getElementById('incident-table-body');
+      const incidentEmpty = document.getElementById('incident-empty');
+      const incidentStatusBox = document.getElementById('incident-status-box');
+      const incidentDetailSection = document.getElementById('incident-detail-section');
+      const incidentDetailTitle = document.getElementById('incident-detail-title');
+      const incidentDetailBody = document.getElementById('incident-detail-body');
+
+      function setIncidentStatus(kind, message) {
+        incidentStatusBox.dataset.state = kind;
+        incidentStatusBox.textContent = message;
+      }
+
+      function formatIncidentTimestamp(ts) {
+        if (!ts) return '-';
+        try { return new Date(ts).toLocaleString(); } catch (_) { return String(ts); }
+      }
+
+      async function refreshIncidents() {
+        const status = incidentStatusFilter.value;
+        const url = new URL('/api/incidents', window.location.origin);
+        if (status) url.searchParams.set('status', status);
+        try {
+          const resp = await fetch(url.toString(), { headers: { accept: 'application/json' } });
+          if (!resp.ok) throw new Error('HTTP ' + resp.status);
+          const data = await resp.json();
+          renderIncidentList(data.incidents || []);
+          setIncidentStatus('ok', `Loaded ${data.incidents.length} incident(s).`);
+        } catch (err) {
+          setIncidentStatus('error', `Failed to load incidents: ${err.message}`);
+        }
+      }
+
+      function renderIncidentList(incidents) {
+        incidentTableBody.replaceChildren();
+        if (!incidents.length) {
+          incidentTableScroll.hidden = true;
+          incidentEmpty.hidden = false;
+          incidentDetailSection.hidden = true;
+          return;
+        }
+        incidentTableScroll.hidden = false;
+        incidentEmpty.hidden = true;
+        for (const incident of incidents) {
+          const tr = document.createElement('tr');
+          tr.dataset.incidentId = incident.id;
+
+          const statusTd = document.createElement('td');
+          const pill = document.createElement('span');
+          pill.className = 'incident-status-pill ' + incident.status;
+          pill.textContent = incident.status;
+          statusTd.appendChild(pill);
+          tr.appendChild(statusTd);
+
+          tr.appendChild(makeTextElement('td', incident.severity));
+          tr.appendChild(makeTextElement('td', formatIncidentTimestamp(incident.opened_at)));
+          tr.appendChild(makeTextElement('td', formatIncidentTimestamp(incident.acknowledged_at)));
+          tr.appendChild(makeTextElement('td', formatIncidentTimestamp(incident.resolved_at)));
+          tr.appendChild(makeTextElement('td', truncateId(incident.id)));
+
+          const actionsTd = document.createElement('td');
+          if (incident.status === 'open') {
+            const ackBtn = document.createElement('button');
+            ackBtn.className = 'secondary btn-compact';
+            ackBtn.type = 'button';
+            ackBtn.dataset.testid = 'incident-ack';
+            ackBtn.textContent = 'Ack';
+            ackBtn.addEventListener('click', () => transitionIncident(incident.id, 'acknowledged'));
+            actionsTd.appendChild(ackBtn);
+          }
+          if (incident.status !== 'resolved') {
+            const resolveBtn = document.createElement('button');
+            resolveBtn.className = 'primary btn-compact';
+            resolveBtn.type = 'button';
+            resolveBtn.dataset.testid = 'incident-resolve';
+            resolveBtn.textContent = 'Resolve';
+            resolveBtn.style.marginLeft = '6px';
+            resolveBtn.addEventListener('click', () => transitionIncident(incident.id, 'resolved'));
+            actionsTd.appendChild(resolveBtn);
+          }
+          const detailBtn = document.createElement('button');
+          detailBtn.className = 'secondary btn-compact';
+          detailBtn.type = 'button';
+          detailBtn.textContent = 'View';
+          detailBtn.style.marginLeft = '6px';
+          detailBtn.addEventListener('click', () => showIncidentDetail(incident));
+          actionsTd.appendChild(detailBtn);
+          tr.appendChild(actionsTd);
+
+          incidentTableBody.appendChild(tr);
+        }
+      }
+
+      function showIncidentDetail(incident) {
+        incidentDetailSection.hidden = false;
+        incidentDetailTitle.textContent = `Incident ${incident.id}`;
+        incidentDetailBody.replaceChildren();
+
+        const meta = document.createElement('div');
+        meta.style.marginBottom = '12px';
+        meta.appendChild(makeTextElement('div', `Status: ${incident.status}`));
+        meta.appendChild(makeTextElement('div', `Severity: ${incident.severity}`));
+        meta.appendChild(makeTextElement('div', `Opened: ${formatIncidentTimestamp(incident.opened_at)}`));
+        if (incident.acknowledged_at) {
+          meta.appendChild(makeTextElement('div', `Acknowledged: ${formatIncidentTimestamp(incident.acknowledged_at)}`));
+        }
+        if (incident.resolved_at) {
+          meta.appendChild(makeTextElement('div', `Resolved: ${formatIncidentTimestamp(incident.resolved_at)}`));
+        }
+        if (incident.alert_id) {
+          meta.appendChild(makeTextElement('div', `Alert ID: ${incident.alert_id}`));
+        }
+        incidentDetailBody.appendChild(meta);
+
+        const pre = document.createElement('pre');
+        pre.textContent = JSON.stringify(incident.details_json || {}, null, 2);
+        incidentDetailBody.appendChild(pre);
+      }
+
+      async function transitionIncident(id, status) {
+        try {
+          const resp = await fetch(`/api/incidents/${id}`, {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ status }),
+          });
+          if (!resp.ok) {
+            const text = await resp.text();
+            throw new Error(`HTTP ${resp.status}: ${text}`);
+          }
+          await refreshIncidents();
+        } catch (err) {
+          setIncidentStatus('error', `Transition failed: ${err.message}`);
+        }
+      }
+
+      async function createIncident() {
+        const severity = (incidentCreateSeverity.value || '').trim();
+        if (!severity) {
+          setIncidentStatus('error', 'Severity is required to create an incident.');
+          return;
+        }
+        try {
+          const resp = await fetch('/api/incidents', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              severity,
+              details_json: { message: 'Created via UI' },
+            }),
+          });
+          if (!resp.ok) {
+            const text = await resp.text();
+            throw new Error(`HTTP ${resp.status}: ${text}`);
+          }
+          incidentCreateSeverity.value = '';
+          await refreshIncidents();
+        } catch (err) {
+          setIncidentStatus('error', `Create failed: ${err.message}`);
+        }
+      }
+
+      incidentRefreshButton.addEventListener('click', () => refreshIncidents());
+      incidentStatusFilter.addEventListener('change', () => refreshIncidents());
+      incidentCreateButton.addEventListener('click', () => createIncident());
 
       // --- Polling ---------------------------------------------------------
 
@@ -5029,6 +5307,7 @@ pub struct AppState {
     /// Optional Postgres-backed inverted index for attributes.
     /// `None` in standalone (in-memory) mode -- index writes / lookups become no-ops.
     pub attr_index: Option<crate::storage::attr_index::AttrIndexStore>,
+    pub incident_store: IncidentStore,
 }
 
 pub type SharedViewerRuntime = Arc<Mutex<ViewerRuntime>>;
@@ -5318,13 +5597,18 @@ pub fn build_app_with_full_services(
         rollup_store,
         alert_store,
         None,
+        None,
     )
 }
 
-/// Full builder that also accepts an optional attribute inverted index.
+/// Full builder that also accepts an optional attribute inverted index and an
+/// optional incident store.
 ///
 /// `attr_index` is `None` in standalone (in-memory) mode; the `/api/attributes`
 /// endpoints then return 503 and ingest skips index writes.
+///
+/// `incident_store` is `None` in standalone (in-memory) mode; an in-memory
+/// incident store is used so the incident endpoints remain functional.
 pub fn build_app_with_services_full(
     stream_store: StreamStore,
     viewer_store: Option<ViewerStore>,
@@ -5332,7 +5616,11 @@ pub fn build_app_with_services_full(
     rollup_store: Option<RollupStore>,
     alert_store: Option<crate::storage::alert_store::AlertStore>,
     attr_index: Option<crate::storage::attr_index::AttrIndexStore>,
+    incident_store: Option<IncidentStore>,
 ) -> Router {
+    let incident_store = incident_store.unwrap_or_else(|| {
+        IncidentStore::Memory(crate::storage::memory::MemoryIncidentStore::new())
+    });
     let state = AppState {
         stream_store,
         viewer_store,
@@ -5340,6 +5628,7 @@ pub fn build_app_with_services_full(
         rollup_store,
         alert_store,
         attr_index,
+        incident_store,
     };
     let connect = crate::grpc::build_connect_router(state.clone());
 
@@ -5380,6 +5669,11 @@ pub fn build_app_with_services_full(
         .route(
             "/api/alerts/{id}",
             get(get_alert).patch(patch_alert).delete(delete_alert),
+        )
+        .route("/api/incidents", get(list_incidents).post(create_incident))
+        .route(
+            "/api/incidents/{id}",
+            get(get_incident).patch(patch_incident),
         )
         .route("/v1/traces", post(ingest_traces))
         .route("/v1/metrics", post(ingest_metrics))
@@ -7772,6 +8066,138 @@ fn parse_nano(value: Option<&serde_json::Value>) -> u64 {
         return s.parse::<u64>().unwrap_or(0);
     }
     0
+}
+
+// --- Incident API ----------------------------------------------------------
+
+const MAX_INCIDENT_SEVERITY_LEN: usize = 32;
+
+#[derive(Debug, Deserialize)]
+struct IncidentListQuery {
+    status: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct IncidentListResponse {
+    incidents: Vec<Incident>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateIncidentRequest {
+    #[serde(default)]
+    alert_id: Option<Uuid>,
+    severity: String,
+    #[serde(default)]
+    details_json: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchIncidentRequest {
+    status: String,
+}
+
+async fn list_incidents(
+    State(state): State<AppState>,
+    Query(query): Query<IncidentListQuery>,
+) -> Result<Json<IncidentListResponse>, StatusCode> {
+    let status_filter = match query.status.as_deref() {
+        None | Some("") => None,
+        Some(s) => Some(IncidentStatus::parse(s).ok_or(StatusCode::BAD_REQUEST)?),
+    };
+    let incidents = state
+        .incident_store
+        .list(status_filter)
+        .await
+        .map_err(|error| {
+            tracing::error!("list_incidents failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    Ok(Json(IncidentListResponse { incidents }))
+}
+
+async fn get_incident(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Incident>, StatusCode> {
+    let incident = state
+        .incident_store
+        .get(id)
+        .await
+        .map_err(|error| {
+            tracing::error!("get_incident failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(incident))
+}
+
+async fn create_incident(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateIncidentRequest>,
+) -> Result<(StatusCode, Json<Incident>), StatusCode> {
+    let severity = payload.severity.trim().to_string();
+    if severity.is_empty() || severity.chars().count() > MAX_INCIDENT_SEVERITY_LEN {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let details_json = payload
+        .details_json
+        .unwrap_or_else(|| serde_json::json!({}));
+    let incident = Incident {
+        id: Uuid::new_v4(),
+        alert_id: payload.alert_id,
+        status: IncidentStatus::Open,
+        severity,
+        opened_at: Utc::now(),
+        acknowledged_at: None,
+        resolved_at: None,
+        details_json,
+    };
+
+    state
+        .incident_store
+        .insert(&incident)
+        .await
+        .map_err(|error| {
+            tracing::error!("create_incident: insert failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok((StatusCode::CREATED, Json(incident)))
+}
+
+async fn patch_incident(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<PatchIncidentRequest>,
+) -> Result<Json<Incident>, StatusCode> {
+    let target = IncidentStatus::parse(payload.status.trim()).ok_or(StatusCode::BAD_REQUEST)?;
+
+    let current = state
+        .incident_store
+        .get(id)
+        .await
+        .map_err(|error| {
+            tracing::error!("patch_incident: get failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if let Err(err) = validate_transition(current.status, target) {
+        tracing::warn!("incident {id}: {err}");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let updated = state
+        .incident_store
+        .update_status(id, target, Utc::now())
+        .await
+        .map_err(|error| {
+            tracing::error!("patch_incident: update failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(Json(updated))
 }
 
 #[cfg(test)]
