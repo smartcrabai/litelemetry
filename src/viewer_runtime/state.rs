@@ -1,5 +1,6 @@
 use crate::domain::telemetry::{NormalizedEntry, Signal};
 use crate::domain::viewer::ViewerStatus;
+use crate::viewer_runtime::aggregator::Bucket;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -44,6 +45,9 @@ pub struct ViewerState {
     pub revision: i64,
     /// Ingested entries (ascending time order)
     pub entries: Vec<NormalizedEntry>,
+    /// Time-bucketed aggregations recomputed from `entries`. Empty when the
+    /// viewer has no `aggregation` block in its definition.
+    pub aggregated_buckets: Vec<Bucket>,
     pub last_cursor: StreamCursor,
     pub status: ViewerStatus,
 }
@@ -54,6 +58,7 @@ impl ViewerState {
             viewer_id,
             revision,
             entries: Vec::new(),
+            aggregated_buckets: Vec::new(),
             last_cursor: StreamCursor::default(),
             status: ViewerStatus::Ok,
         }

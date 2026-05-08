@@ -1,4 +1,5 @@
 use crate::domain::telemetry::NormalizedEntry;
+use crate::viewer_runtime::aggregator::aggregate_entries;
 use crate::viewer_runtime::compiler::CompiledViewer;
 use crate::viewer_runtime::state::ViewerState;
 use chrono::{DateTime, Utc};
@@ -10,10 +11,24 @@ use chrono::{DateTime, Utc};
 /// **Precondition**: The caller is responsible for passing entries in ascending time order (oldest first).
 /// prune_stale_buckets assumes entries are in ascending time order;
 /// if the order is disrupted, pruning will not work correctly.
+///
+/// Note: this does **not** recompute `state.aggregated_buckets` -- callers
+/// invoke [`recompute_aggregation`] once per refresh batch (after pruning) so
+/// that buckets reflect a consistent post-prune view of the entries.
 pub fn apply_entry(state: &mut ViewerState, viewer: &CompiledViewer, entry: NormalizedEntry) {
     if viewer.matches_signal(entry.signal) && viewer.matches_entry(&entry) {
         state.entries.push(entry);
     }
+}
+
+/// Recomputes `state.aggregated_buckets` from the current `state.entries` if
+/// the viewer has an aggregation spec. Clears it otherwise so stale buckets are
+/// not served after the spec is removed.
+pub fn recompute_aggregation(state: &mut ViewerState, viewer: &CompiledViewer) {
+    state.aggregated_buckets = match viewer.aggregation() {
+        Some(spec) => aggregate_entries(spec, &state.entries),
+        None => Vec::new(),
+    };
 }
 
 /// Removes entries from state that are older than lookback_ms before now.

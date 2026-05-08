@@ -5,7 +5,9 @@ use crate::storage::postgres::ViewerSnapshotRow;
 use crate::storage::redis::{cmp_stream_id, parse_stream_id};
 use crate::storage::{StorageError, StreamStore, ViewerStore};
 use crate::viewer_runtime::compiler::{CompileError, CompiledViewer, compile};
-use crate::viewer_runtime::reducer::{apply_entry, lookback_start_index, prune_stale_buckets};
+use crate::viewer_runtime::reducer::{
+    apply_entry, lookback_start_index, prune_stale_buckets, recompute_aggregation,
+};
 use crate::viewer_runtime::state::{StreamCursor, ViewerState};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -113,9 +115,10 @@ impl ViewerRuntime {
             fan_out_signal_entries(&mut viewers, &mut stream_store, signal).await?;
         }
 
-        // Prune entries that exceed the lookback window
+        // Prune entries that exceed the lookback window, then recompute aggregations
         for (viewer, state) in &mut viewers {
             prune_stale_buckets(state, viewer.lookback_ms(), now);
+            recompute_aggregation(state, viewer);
         }
 
         Ok(Self {
@@ -143,9 +146,10 @@ impl ViewerRuntime {
             fan_out_signal_entries(&mut self.viewers, &mut self.stream_store, signal).await?;
         }
 
-        // Prune entries that exceed the lookback window
+        // Prune entries that exceed the lookback window, then recompute aggregations
         for (viewer, state) in &mut self.viewers {
             prune_stale_buckets(state, viewer.lookback_ms(), now);
+            recompute_aggregation(state, viewer);
         }
 
         // Upsert snapshots only for viewers whose cursor advanced (failures are retried in the next batch)
@@ -189,6 +193,9 @@ impl ViewerRuntime {
             if viewer.definition().id == id {
                 viewer.update_definition_json(definition_json, layout_json);
                 state.revision += 1;
+                // Recompute buckets so a newly-added or modified aggregation
+                // block is reflected in the next API response.
+                recompute_aggregation(state, viewer);
                 return true;
             }
         }
@@ -246,12 +253,12 @@ impl ViewerRuntime {
         names.into_iter().collect()
     }
 
-    pub fn get_dashboard_viewer(
-        &self,
+    pub fn get_dashboard_viewer<'a>(
+        &'a self,
         viewer_id: &Uuid,
         lookback_override: Option<i64>,
         now: DateTime<Utc>,
-    ) -> Option<(&CompiledViewer, &[NormalizedEntry], &ViewerStatus, i64)> {
+    ) -> Option<DashboardViewerSlice<'a>> {
         let (viewer, state) = self
             .viewers
             .iter()
@@ -259,8 +266,23 @@ impl ViewerRuntime {
         let effective_lookback = lookback_override.unwrap_or(viewer.lookback_ms());
         let start_idx = lookback_start_index(&state.entries, effective_lookback, now);
         let filtered_entries = &state.entries[start_idx..];
-        Some((viewer, filtered_entries, &state.status, effective_lookback))
+        Some(DashboardViewerSlice {
+            viewer,
+            entries: filtered_entries,
+            status: &state.status,
+            effective_lookback_ms: effective_lookback,
+            aggregated_buckets: state.aggregated_buckets.as_slice(),
+        })
     }
+}
+
+/// Borrowed view of one viewer slice destined for a dashboard panel.
+pub struct DashboardViewerSlice<'a> {
+    pub viewer: &'a CompiledViewer,
+    pub entries: &'a [NormalizedEntry],
+    pub status: &'a ViewerStatus,
+    pub effective_lookback_ms: i64,
+    pub aggregated_buckets: &'a [crate::viewer_runtime::aggregator::Bucket],
 }
 
 /// Scans the stream for all signals the viewer cares about, applies matching entries to
@@ -284,6 +306,7 @@ async fn populate_state_from_stream(
         }
     }
     prune_stale_buckets(state, viewer.lookback_ms(), now);
+    recompute_aggregation(state, viewer);
     Ok(())
 }
 

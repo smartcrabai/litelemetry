@@ -1,6 +1,7 @@
 use crate::domain::telemetry::{NormalizedEntry, Signal};
 use crate::domain::viewer::ViewerDefinition;
 use crate::ingest::otlp_pb::payload_as_value;
+use crate::viewer_runtime::aggregator::{AggregationError, CompiledAggregation, parse_aggregation};
 use bytes::Bytes;
 use serde_json::Value;
 use thiserror::Error;
@@ -23,6 +24,8 @@ pub enum CompileError {
     InvalidFilterRegex(regex::Error),
     #[error("'filters' must be an array")]
     FiltersNotArray,
+    #[error("invalid aggregation: {0}")]
+    InvalidAggregation(#[from] AggregationError),
 }
 
 /// Field to match against in a filter condition.
@@ -68,6 +71,9 @@ pub struct CompiledViewer {
     filters: Option<Vec<CompiledFilter>>,
     /// How multiple filters are combined.
     filter_mode: FilterMode,
+    /// Compiled aggregation spec. `None` for non-aggregating viewers (table,
+    /// raw line/area charts).
+    aggregation: Option<CompiledAggregation>,
 }
 
 impl CompiledViewer {
@@ -116,6 +122,12 @@ impl CompiledViewer {
         self.definition.lookback_ms
     }
 
+    /// Returns the compiled aggregation spec, or `None` when the viewer has no
+    /// `aggregation` block.
+    pub fn aggregation(&self) -> Option<&CompiledAggregation> {
+        self.aggregation.as_ref()
+    }
+
     pub fn update_definition_json(&mut self, definition_json: Value, layout_json: Value) {
         self.query = query_from_definition(&definition_json);
         self.filters = filters_from_definition(&definition_json).unwrap_or_else(|e| {
@@ -127,6 +139,12 @@ impl CompiledViewer {
                 "update_definition_json: invalid filter_mode in persisted definition: {e}"
             );
             FilterMode::default()
+        });
+        self.aggregation = parse_aggregation(&definition_json).unwrap_or_else(|e| {
+            tracing::error!(
+                "update_definition_json: invalid aggregation in persisted definition: {e}"
+            );
+            None
         });
         self.definition.definition_json = definition_json;
         self.definition.layout_json = layout_json;
@@ -336,11 +354,13 @@ pub fn compile(definition: ViewerDefinition) -> Result<CompiledViewer, CompileEr
     let query = query_from_definition(&definition.definition_json);
     let filters = filters_from_definition(&definition.definition_json)?;
     let filter_mode = filter_mode_from_definition(&definition.definition_json)?;
+    let aggregation = parse_aggregation(&definition.definition_json)?;
     Ok(CompiledViewer {
         definition,
         query,
         filters,
         filter_mode,
+        aggregation,
     })
 }
 
