@@ -8844,3 +8844,118 @@ async fn test_run_query_endpoint_returns_400_on_parse_error() {
     let body = response_json(resp).await;
     assert!(body["error"].as_str().unwrap().contains("parse error"));
 }
+
+/// End-to-end: ingest traces -> POST /api/anomaly/evaluate covers no_data + zscore,
+/// breached + non-breached.
+///
+/// The integration test harness does not spawn the viewer-runtime poll loop, so a
+/// viewer's entries are populated only on creation (via `populate_state_from_stream`).
+/// We ingest before creating the viewer so that the entry is visible to the detector.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_anomaly_evaluate_no_data_and_zscore() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    // First viewer (no entries ingested before creation) -> no_data breaches.
+    let create_resp = send_json_request(
+        &app,
+        "POST",
+        "/api/viewers",
+        json!({ "name": "Empty check", "signal": "traces" }),
+    )
+    .await;
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let empty_viewer_id = response_json(create_resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = send_json_request(
+        &app,
+        "POST",
+        "/api/anomaly/evaluate",
+        json!({
+            "viewer_id": empty_viewer_id,
+            "detector": { "type": "no_data", "window_ms": 300_000 }
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["breached"], json!(true));
+
+    // Ingest a trace, then create a second viewer that picks it up at construction.
+    let ingest = Request::builder()
+        .method("POST")
+        .uri("/v1/traces")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(make_trace_payload(
+            "anomaly-svc",
+            "op-1",
+        )))
+        .unwrap();
+    let ir = app.clone().oneshot(ingest).await.unwrap();
+    assert_eq!(ir.status(), StatusCode::OK);
+
+    let create_resp = send_json_request(
+        &app,
+        "POST",
+        "/api/viewers",
+        json!({ "name": "Active check", "signal": "traces" }),
+    )
+    .await;
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let active_viewer_id = response_json(create_resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // no_data on a viewer with a fresh entry -> not breached.
+    let resp = send_json_request(
+        &app,
+        "POST",
+        "/api/anomaly/evaluate",
+        json!({
+            "viewer_id": active_viewer_id,
+            "detector": { "type": "no_data", "window_ms": 300_000 }
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(
+        body["breached"],
+        json!(false),
+        "no_data should not breach after ingest: {body:?}"
+    );
+
+    // Z-score with insufficient history -> not breached.
+    let resp = send_json_request(
+        &app,
+        "POST",
+        "/api/anomaly/evaluate",
+        json!({
+            "viewer_id": active_viewer_id,
+            "detector": { "type": "zscore", "threshold": 3.0, "bucket_ms": 60_000 }
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["breached"], json!(false));
+
+    // Unknown viewer -> 404.
+    let unknown = Uuid::new_v4();
+    let resp = send_json_request(
+        &app,
+        "POST",
+        "/api/anomaly/evaluate",
+        json!({
+            "viewer_id": unknown,
+            "detector": { "type": "no_data", "window_ms": 60_000 }
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
