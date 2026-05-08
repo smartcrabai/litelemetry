@@ -3,6 +3,7 @@ pub mod apm;
 pub mod domain;
 pub mod grpc;
 pub mod ingest;
+pub mod notifications;
 pub mod otlp_proto;
 pub mod server;
 pub mod storage;

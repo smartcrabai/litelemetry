@@ -2,6 +2,7 @@ use crate::domain::dashboard::DashboardDefinition;
 use crate::domain::incident::{Incident, IncidentStatus};
 use crate::domain::telemetry::SignalMask;
 use crate::domain::viewer::{ViewerDefinition, ViewerStatus};
+use crate::notifications::NotificationChannel;
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -72,6 +73,15 @@ CREATE TABLE IF NOT EXISTS incidents (
 const CREATE_INCIDENTS_STATUS_IDX_SQL: &str =
     "CREATE INDEX IF NOT EXISTS incidents_status_idx ON incidents (status)";
 
+const CREATE_NOTIFICATION_CHANNELS_SQL: &str = "
+CREATE TABLE IF NOT EXISTS notification_channels (
+    id UUID PRIMARY KEY,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    config_json JSONB NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE
+)";
+
 impl PostgresStore {
     pub async fn new(url: &str) -> Result<Self, sqlx::Error> {
         let pool = PgPool::connect(url).await?;
@@ -110,6 +120,9 @@ impl PostgresStore {
             .execute(&self.pool)
             .await?;
         sqlx::query(CREATE_INCIDENTS_STATUS_IDX_SQL)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(CREATE_NOTIFICATION_CHANNELS_SQL)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -509,4 +522,77 @@ fn incident_from_row(row: &sqlx::postgres::PgRow) -> Option<Incident> {
         resolved_at: row.get("resolved_at"),
         details_json: row.get("details_json"),
     })
+}
+
+impl PostgresStore {
+    // --- Notification channel CRUD ------------------------------------------
+
+    pub async fn insert_notification_channel(
+        &self,
+        channel: &NotificationChannel,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO notification_channels (id, name, kind, config_json, enabled)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(channel.id)
+        .bind(&channel.name)
+        .bind(&channel.kind)
+        .bind(&channel.config_json)
+        .bind(channel.enabled)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_notification_channels(
+        &self,
+    ) -> Result<Vec<NotificationChannel>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id, name, kind, config_json, enabled FROM notification_channels ORDER BY name",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        use sqlx::Row;
+        Ok(rows
+            .into_iter()
+            .map(|row| NotificationChannel {
+                id: row.get("id"),
+                name: row.get("name"),
+                kind: row.get("kind"),
+                config_json: row.get("config_json"),
+                enabled: row.get("enabled"),
+            })
+            .collect())
+    }
+
+    pub async fn load_notification_channel(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<NotificationChannel>, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT id, name, kind, config_json, enabled FROM notification_channels WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        use sqlx::Row;
+        Ok(row.map(|row| NotificationChannel {
+            id: row.get("id"),
+            name: row.get("name"),
+            kind: row.get("kind"),
+            config_json: row.get("config_json"),
+            enabled: row.get("enabled"),
+        }))
+    }
+
+    pub async fn delete_notification_channel(&self, id: Uuid) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM notification_channels WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
 }

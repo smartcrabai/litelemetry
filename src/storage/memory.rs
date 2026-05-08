@@ -4,6 +4,7 @@ use crate::domain::dashboard::{
 use crate::domain::incident::{Incident, IncidentStatus};
 use crate::domain::telemetry::{NormalizedEntry, Signal};
 use crate::domain::viewer::ViewerDefinition;
+use crate::notifications::NotificationChannel;
 use crate::storage::StorageError;
 use crate::storage::postgres::ViewerSnapshotRow;
 use crate::storage::redis::cmp_stream_id;
@@ -92,6 +93,7 @@ struct MemoryViewerData {
     definitions: Vec<ViewerDefinition>,
     snapshots: HashMap<Uuid, ViewerSnapshotRow>,
     dashboards: Vec<DashboardDefinition>,
+    notification_channels: Vec<NotificationChannel>,
 }
 
 impl MemoryViewerData {
@@ -100,6 +102,7 @@ impl MemoryViewerData {
             definitions: Vec::new(),
             snapshots: HashMap::new(),
             dashboards: Vec::new(),
+            notification_channels: Vec::new(),
         }
     }
 }
@@ -236,6 +239,45 @@ impl MemoryViewerStore {
         let before = guard.dashboards.len();
         guard.dashboards.retain(|d| d.id != id);
         Ok(guard.dashboards.len() < before)
+    }
+
+    // --- Notification channel CRUD ------------------------------------------
+
+    pub async fn insert_notification_channel(
+        &self,
+        channel: &NotificationChannel,
+    ) -> Result<(), StorageError> {
+        let mut guard = self.inner.lock().await;
+        guard.notification_channels.push(channel.clone());
+        Ok(())
+    }
+
+    pub async fn list_notification_channels(
+        &self,
+    ) -> Result<Vec<NotificationChannel>, StorageError> {
+        let guard = self.inner.lock().await;
+        let mut channels = guard.notification_channels.clone();
+        channels.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(channels)
+    }
+
+    pub async fn load_notification_channel(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<NotificationChannel>, StorageError> {
+        let guard = self.inner.lock().await;
+        Ok(guard
+            .notification_channels
+            .iter()
+            .find(|c| c.id == id)
+            .cloned())
+    }
+
+    pub async fn delete_notification_channel(&self, id: Uuid) -> Result<bool, StorageError> {
+        let mut guard = self.inner.lock().await;
+        let before = guard.notification_channels.len();
+        guard.notification_channels.retain(|c| c.id != id);
+        Ok(guard.notification_channels.len() < before)
     }
 }
 
