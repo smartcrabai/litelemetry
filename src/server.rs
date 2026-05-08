@@ -10,6 +10,9 @@ use crate::ingest::otlp_http::{
     attribute_string_value, extract_service_name_from_value, parse_ingest_request,
 };
 use crate::ingest::otlp_pb::payload_as_value;
+use crate::notifications::{
+    NotificationChannel, NotificationPayload, dispatch_to_channel, webhook::WebhookConfig,
+};
 use crate::storage::rollup::{Resolution, RollupStore};
 use crate::storage::{IncidentStore, StreamStore, ViewerStore};
 use crate::viewer_runtime::compiler::{
@@ -24,7 +27,7 @@ use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::Html,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -302,7 +305,8 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       #page-viewers,
       #page-dashboard,
       #page-alerts,
-      #page-incidents {
+      #page-incidents,
+      #page-notifications {
         display: grid;
         gap: 24px;
       }
@@ -1482,6 +1486,8 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         <button id="new-dashboard-button" class="secondary sidebar-new-btn" type="button">+ New Dashboard</button>
         <button id="import-dashboard-button" class="secondary sidebar-new-btn" type="button">Import</button>
         <input type="file" id="import-dashboard-file" accept=".json" style="display:none" aria-hidden="true">
+        <div class="sidebar-section-label">Settings</div>
+        <a id="nav-notifications" class="sidebar-item" href="#notifications" data-page="notifications">Notifications</a>
       </nav>
     </aside>
     <main class="with-sidebar">
@@ -1936,6 +1942,36 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           <div id="incident-detail-body" class="incident-detail-panel"></div>
         </section>
       </div><!-- #page-incidents -->
+
+      <div id="page-notifications" hidden>
+        <section class="toolbar panel panel-strong">
+          <div class="toolbar-row">
+            <h2 style="margin:0;font-size:1.1rem;flex:1;">Notification Channels</h2>
+            <button id="new-notification-channel-button" class="primary" type="button">+ New Channel</button>
+            <button id="refresh-notification-channels-button" class="secondary" type="button">Refresh</button>
+          </div>
+          <div id="notification-channels-status" class="status-box" data-state="idle">
+            Notification channels deliver alerts to external destinations (e.g. Slack, custom webhooks).
+          </div>
+        </section>
+
+        <section class="panel panel-strong stack table-wrap">
+          <div class="table-scroll">
+            <table data-testid="notification-channels-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Kind</th>
+                  <th>Destination</th>
+                  <th>Enabled</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="notification-channels-table-body"></tbody>
+            </table>
+          </div>
+        </section>
+      </div><!-- #page-notifications -->
     </main>
 
     <script>
@@ -3507,11 +3543,13 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const navTraces = document.getElementById('nav-traces');
       const pageTraces = document.getElementById('page-traces');
       const navIncidents = document.getElementById('nav-incidents');
+      const navNotifications = document.getElementById('nav-notifications');
       const newDashboardButton = document.getElementById('new-dashboard-button');
       const dashboardListEl = document.getElementById('dashboard-list');
       const pageViewers = document.getElementById('page-viewers');
       const pageDashboard = document.getElementById('page-dashboard');
       const pageIncidents = document.getElementById('page-incidents');
+      const pageNotifications = document.getElementById('page-notifications');
       const dashboardTitle = document.getElementById('dashboard-title');
       const dashboardGrid = document.getElementById('dashboard-grid');
       const dashboardRefreshIntervalSelect = document.getElementById('dashboard-refresh-interval');
@@ -3696,6 +3734,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         const pageAlertsEl = document.getElementById('page-alerts');
         if (pageAlertsEl) pageAlertsEl.hidden = page !== 'alerts';
         pageIncidents.hidden = page !== 'incidents';
+        pageNotifications.hidden = page !== 'notifications';
 
         navViewers.classList.toggle('active', page === 'viewers');
         const navWaterfallEl = document.getElementById('nav-waterfall');
@@ -3708,6 +3747,9 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           refreshAlerts();
         }
         navIncidents.classList.toggle('active', page === 'incidents');
+        if (navNotifications) {
+          navNotifications.classList.toggle('active', page === 'notifications');
+        }
 
         document.querySelectorAll('.sidebar-dashboard-item').forEach(el => {
           el.classList.toggle('active', el.dataset.id === dashboardId);
@@ -3744,6 +3786,9 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
         if (page === 'incidents') {
           refreshIncidents();
+        }
+        if (page === 'notifications') {
+          refreshNotificationChannels();
         }
         sidebar.classList.remove('open');
 
@@ -4497,6 +4542,13 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       });
 
 
+      if (navNotifications) {
+        navNotifications.addEventListener('click', (e) => {
+          e.preventDefault();
+          navigateTo('notifications');
+        });
+      }
+
       dashboardRefreshToggleButton.addEventListener('click', () => {
         if (dashboardRefreshIntervalMs === null) {
           return;
@@ -5225,6 +5277,10 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           navigateTo('incidents');
           return;
         }
+        if (window.location.hash === '#notifications') {
+          navigateTo('notifications');
+          return;
+        }
         if (
           window.location.hash === '#viewers' ||
           window.location.hash === ''
@@ -5410,6 +5466,223 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       incidentRefreshButton.addEventListener('click', () => refreshIncidents());
       incidentStatusFilter.addEventListener('change', () => refreshIncidents());
       incidentCreateButton.addEventListener('click', () => createIncident());
+
+      // --- Notification channels (Settings) --------------------------------
+      const notificationChannelsTableBody = document.getElementById('notification-channels-table-body');
+      const notificationChannelsStatus = document.getElementById('notification-channels-status');
+      const newNotificationChannelButton = document.getElementById('new-notification-channel-button');
+      const refreshNotificationChannelsButton = document.getElementById('refresh-notification-channels-button');
+
+      function setNotificationChannelsStatus(state, text) {
+        if (!notificationChannelsStatus) return;
+        notificationChannelsStatus.dataset.state = state;
+        notificationChannelsStatus.textContent = text;
+      }
+
+      function describeChannelDestination(channel) {
+        if (channel.kind === 'webhook') {
+          const url = channel.config && typeof channel.config.url === 'string' ? channel.config.url : '';
+          return url || '(no url)';
+        }
+        try { return JSON.stringify(channel.config); }
+        catch (_) { return ''; }
+      }
+
+      async function refreshNotificationChannels() {
+        if (!notificationChannelsTableBody) return;
+        try {
+          const resp = await fetch('/api/notification-channels', { headers: { accept: 'application/json' } });
+          if (!resp.ok) {
+            setNotificationChannelsStatus('error', `Failed to load channels (HTTP ${resp.status}).`);
+            return;
+          }
+          const { channels } = await resp.json();
+          renderNotificationChannels(channels || []);
+          setNotificationChannelsStatus('idle', channels && channels.length
+            ? `${channels.length} channel${channels.length === 1 ? '' : 's'} configured.`
+            : 'No channels yet. Click "+ New Channel" to add one.');
+        } catch (err) {
+          setNotificationChannelsStatus('error', `Failed to load channels: ${err.message}`);
+        }
+      }
+
+      function renderNotificationChannels(channels) {
+        notificationChannelsTableBody.replaceChildren();
+        for (const ch of channels) {
+          const tr = document.createElement('tr');
+          tr.dataset.id = ch.id;
+          appendTableCell(tr, ch.name);
+          appendTableCell(tr, ch.kind);
+          appendTableCell(tr, describeChannelDestination(ch));
+          appendTableCell(tr, ch.enabled ? 'Yes' : 'No');
+
+          const actionsTd = document.createElement('td');
+          const testBtn = document.createElement('button');
+          testBtn.className = 'secondary btn-compact';
+          testBtn.type = 'button';
+          testBtn.textContent = 'Test';
+          testBtn.addEventListener('click', () => testNotificationChannel(ch));
+          actionsTd.appendChild(testBtn);
+
+          const deleteBtn = document.createElement('button');
+          deleteBtn.className = 'secondary btn-compact';
+          deleteBtn.type = 'button';
+          deleteBtn.style.marginLeft = '6px';
+          deleteBtn.textContent = 'Delete';
+          deleteBtn.addEventListener('click', () => deleteNotificationChannel(ch));
+          actionsTd.appendChild(deleteBtn);
+
+          tr.appendChild(actionsTd);
+          notificationChannelsTableBody.appendChild(tr);
+        }
+      }
+
+      async function testNotificationChannel(channel) {
+        setNotificationChannelsStatus('working', `Sending test to ${channel.name}...`);
+        try {
+          const resp = await fetch(`/api/notification-channels/${channel.id}/test`, { method: 'POST' });
+          const data = await resp.json().catch(() => ({}));
+          if (resp.ok && data && data.delivered) {
+            setNotificationChannelsStatus('ok', `Test delivered to ${channel.name}.`);
+          } else {
+            const detail = (data && data.detail) || `HTTP ${resp.status}`;
+            setNotificationChannelsStatus('error', `Test failed for ${channel.name}: ${detail}`);
+          }
+        } catch (err) {
+          setNotificationChannelsStatus('error', `Test failed: ${err.message}`);
+        }
+      }
+
+      async function deleteNotificationChannel(channel) {
+        if (!confirm(`Delete channel "${channel.name}"?`)) return;
+        try {
+          const resp = await fetch(`/api/notification-channels/${channel.id}`, { method: 'DELETE' });
+          if (resp.status !== 204 && !resp.ok) throw new Error(`HTTP ${resp.status}`);
+          await refreshNotificationChannels();
+        } catch (err) {
+          setNotificationChannelsStatus('error', `Delete failed: ${err.message}`);
+        }
+      }
+
+      function openNewNotificationChannelModal() {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+
+        const box = document.createElement('div');
+        box.className = 'modal-box';
+        box.innerHTML = '<h3>New Notification Channel</h3>';
+
+        const nameLabel = document.createElement('label');
+        nameLabel.textContent = 'Name';
+        const nameInput = document.createElement('input');
+        nameInput.placeholder = 'slack-team-alerts';
+        nameInput.maxLength = 80;
+        nameLabel.appendChild(nameInput);
+        box.appendChild(nameLabel);
+
+        const kindLabel = document.createElement('label');
+        kindLabel.textContent = 'Kind';
+        const kindSelect = document.createElement('select');
+        const opt = document.createElement('option');
+        opt.value = 'webhook';
+        opt.textContent = 'Webhook';
+        kindSelect.appendChild(opt);
+        kindLabel.appendChild(kindSelect);
+        box.appendChild(kindLabel);
+
+        const urlLabel = document.createElement('label');
+        urlLabel.textContent = 'Webhook URL';
+        const urlInput = document.createElement('input');
+        urlInput.type = 'url';
+        urlInput.placeholder = 'https://hooks.example.com/services/...';
+        urlInput.maxLength = 2048;
+        urlLabel.appendChild(urlInput);
+        box.appendChild(urlLabel);
+
+        const headersLabel = document.createElement('label');
+        headersLabel.textContent = 'Headers (JSON object, optional)';
+        const headersInput = document.createElement('textarea');
+        headersInput.rows = 3;
+        headersInput.placeholder = '{"x-token":"abc"}';
+        headersLabel.appendChild(headersInput);
+        box.appendChild(headersLabel);
+
+        const errorEl = document.createElement('div');
+        errorEl.style.color = 'var(--coral, #d04545)';
+        errorEl.style.fontSize = '0.85rem';
+        errorEl.hidden = true;
+        box.appendChild(errorEl);
+
+        const actions = document.createElement('div');
+        actions.className = 'modal-actions';
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'secondary';
+        cancelBtn.type = 'button';
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.addEventListener('click', () => overlay.remove());
+
+        const createBtn = document.createElement('button');
+        createBtn.className = 'primary';
+        createBtn.type = 'button';
+        createBtn.textContent = 'Create';
+        createBtn.addEventListener('click', async () => {
+          errorEl.hidden = true;
+          const name = nameInput.value.trim();
+          if (!name) { errorEl.hidden = false; errorEl.textContent = 'Name is required.'; nameInput.focus(); return; }
+          const url = urlInput.value.trim();
+          if (!url) { errorEl.hidden = false; errorEl.textContent = 'URL is required.'; urlInput.focus(); return; }
+          const config = { url };
+          const rawHeaders = headersInput.value.trim();
+          if (rawHeaders) {
+            try {
+              const parsed = JSON.parse(rawHeaders);
+              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                config.headers = parsed;
+              } else {
+                throw new Error('Headers must be a JSON object.');
+              }
+            } catch (err) {
+              errorEl.hidden = false;
+              errorEl.textContent = `Headers JSON parse error: ${err.message}`;
+              return;
+            }
+          }
+          createBtn.disabled = true;
+          try {
+            const resp = await fetch('/api/notification-channels', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json', accept: 'application/json' },
+              body: JSON.stringify({ name, kind: kindSelect.value, config }),
+            });
+            if (!resp.ok) {
+              const text = await resp.text();
+              throw new Error(text || `HTTP ${resp.status}`);
+            }
+            overlay.remove();
+            await refreshNotificationChannels();
+          } catch (err) {
+            errorEl.hidden = false;
+            errorEl.textContent = `Create failed: ${err.message}`;
+            createBtn.disabled = false;
+          }
+        });
+
+        actions.appendChild(cancelBtn);
+        actions.appendChild(createBtn);
+        box.appendChild(actions);
+        overlay.appendChild(box);
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+        document.body.appendChild(overlay);
+        nameInput.focus();
+      }
+
+      if (newNotificationChannelButton) {
+        newNotificationChannelButton.addEventListener('click', openNewNotificationChannelModal);
+      }
+      if (refreshNotificationChannelsButton) {
+        refreshNotificationChannelsButton.addEventListener('click', () => refreshNotificationChannels());
+      }
 
       // --- Polling ---------------------------------------------------------
 
@@ -5827,6 +6100,18 @@ pub fn build_app_with_services_full(
         .route(
             "/api/incidents/{id}",
             get(get_incident).patch(patch_incident),
+        )
+        .route(
+            "/api/notification-channels",
+            get(list_notification_channels).post(create_notification_channel),
+        )
+        .route(
+            "/api/notification-channels/{id}",
+            delete(delete_notification_channel),
+        )
+        .route(
+            "/api/notification-channels/{id}/test",
+            post(test_notification_channel),
         )
         .route("/v1/traces", post(ingest_traces))
         .route("/v1/metrics", post(ingest_metrics))
@@ -7444,6 +7729,171 @@ async fn delete_alert(
         return Err(StatusCode::NOT_FOUND);
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+// --- Notification channels --------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct CreateNotificationChannelRequest {
+    name: String,
+    kind: String,
+    config: serde_json::Value,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Serialize)]
+struct NotificationChannelSummary {
+    id: Uuid,
+    name: String,
+    kind: String,
+    config: serde_json::Value,
+    enabled: bool,
+}
+
+impl From<NotificationChannel> for NotificationChannelSummary {
+    fn from(ch: NotificationChannel) -> Self {
+        Self {
+            id: ch.id,
+            name: ch.name,
+            kind: ch.kind,
+            config: ch.config_json,
+            enabled: ch.enabled,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct NotificationChannelListResponse {
+    channels: Vec<NotificationChannelSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateNotificationChannelResponse {
+    id: Uuid,
+}
+
+#[derive(Debug, Serialize)]
+struct TestNotificationChannelResponse {
+    delivered: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+}
+
+const VALID_NOTIFICATION_KINDS: &[&str] = &["webhook"];
+
+async fn list_notification_channels(
+    State(state): State<AppState>,
+) -> Result<Json<NotificationChannelListResponse>, StatusCode> {
+    let store = state.require_viewer_store()?;
+    let channels = store.list_notification_channels().await.map_err(|e| {
+        tracing::error!("list_notification_channels: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(Json(NotificationChannelListResponse {
+        channels: channels.into_iter().map(Into::into).collect(),
+    }))
+}
+
+async fn create_notification_channel(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateNotificationChannelRequest>,
+) -> Result<(StatusCode, Json<CreateNotificationChannelResponse>), StatusCode> {
+    let store = state.require_viewer_store()?;
+
+    let name = payload.name.trim();
+    if name.is_empty() || name.chars().count() > 80 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let kind = payload.kind.trim();
+    if !VALID_NOTIFICATION_KINDS.contains(&kind) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let channel = NotificationChannel {
+        id: Uuid::new_v4(),
+        name: name.to_string(),
+        kind: kind.to_string(),
+        config_json: payload.config,
+        enabled: payload.enabled,
+    };
+
+    // Validate kind-specific config fields up front to fail fast on bad input.
+    if kind == "webhook"
+        && let Err(e) = WebhookConfig::from_channel(&channel)
+    {
+        tracing::warn!("create_notification_channel: invalid webhook config: {e}");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    store
+        .insert_notification_channel(&channel)
+        .await
+        .map_err(|e| {
+            tracing::error!("insert_notification_channel: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateNotificationChannelResponse { id: channel.id }),
+    ))
+}
+
+async fn delete_notification_channel(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, StatusCode> {
+    let store = state.require_viewer_store()?;
+    let removed = store.delete_notification_channel(id).await.map_err(|e| {
+        tracing::error!("delete_notification_channel: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    if removed {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
+}
+
+async fn test_notification_channel(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<(StatusCode, Json<TestNotificationChannelResponse>), StatusCode> {
+    let store = state.require_viewer_store()?;
+    let channel = store
+        .load_notification_channel(id)
+        .await
+        .map_err(|e| {
+            tracing::error!("load_notification_channel: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let payload = NotificationPayload::test_message(&channel.name);
+    match dispatch_to_channel(&channel, &payload).await {
+        Ok(()) => Ok((
+            StatusCode::OK,
+            Json(TestNotificationChannelResponse {
+                delivered: true,
+                detail: None,
+            }),
+        )),
+        Err(e) => {
+            tracing::warn!("test_notification_channel {id}: {e}");
+            Ok((
+                StatusCode::BAD_GATEWAY,
+                Json(TestNotificationChannelResponse {
+                    delivered: false,
+                    detail: Some(e.to_string()),
+                }),
+            ))
+        }
+    }
 }
 
 // --- Ingest -----------------------------------------------------------------

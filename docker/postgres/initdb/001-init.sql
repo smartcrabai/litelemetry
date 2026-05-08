@@ -64,6 +64,14 @@ CREATE TABLE IF NOT EXISTS incidents (
 );
 CREATE INDEX IF NOT EXISTS incidents_status_idx ON incidents (status);
 
+CREATE TABLE IF NOT EXISTS notification_channels (
+    id UUID PRIMARY KEY,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    config_json JSONB NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE
+);
+
 
 INSERT INTO viewer_definitions (
     id,

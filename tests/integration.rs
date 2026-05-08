@@ -8209,3 +8209,242 @@ async fn test_create_viewer_with_timeseries_aggregation_returns_buckets() {
     assert_eq!(payload["aggregation"]["fn"], "count");
     assert_eq!(payload["aggregation"]["bucket_ms"], 60_000);
 }
+
+// --- Notification channels --------------------------------------------------
+
+/// Spawns a mock webhook receiver and returns (url, received_payloads_handle).
+async fn spawn_mock_webhook_server() -> (String, Arc<Mutex<Vec<serde_json::Value>>>) {
+    use axum::{Router, extract::State, routing::post};
+
+    let received: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let received_for_handler = received.clone();
+
+    let app = Router::new()
+        .route(
+            "/hook",
+            post(
+                |State(state): State<Arc<Mutex<Vec<serde_json::Value>>>>,
+                 axum::Json(body): axum::Json<serde_json::Value>| async move {
+                    state.lock().await.push(body);
+                    StatusCode::OK
+                },
+            ),
+        )
+        .with_state(received_for_handler);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+
+    (format!("http://{addr}/hook"), received)
+}
+
+#[tokio::test]
+async fn test_notification_channel_crud_and_test_endpoint_memory() {
+    // Given: a running app with the in-memory store and a mock webhook server.
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let (webhook_url, received) = spawn_mock_webhook_server().await;
+
+    // When: list channels initially
+    let resp = send_get_request(&app, "/api/notification-channels").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["channels"].as_array().unwrap().len(), 0);
+
+    // When: create a webhook channel
+    let resp = send_json_request(
+        &app,
+        "POST",
+        "/api/notification-channels",
+        json!({
+            "name": "primary-webhook",
+            "kind": "webhook",
+            "config": { "url": webhook_url },
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = response_json(resp).await;
+    let channel_id = body["id"].as_str().unwrap().to_string();
+
+    // Then: the channel appears in the list
+    let resp = send_get_request(&app, "/api/notification-channels").await;
+    let body = response_json(resp).await;
+    let channels = body["channels"].as_array().unwrap();
+    assert_eq!(channels.len(), 1);
+    assert_eq!(channels[0]["id"], channel_id);
+    assert_eq!(channels[0]["name"], "primary-webhook");
+    assert_eq!(channels[0]["kind"], "webhook");
+
+    // When: trigger the test endpoint
+    let resp = send_json_request(
+        &app,
+        "POST",
+        format!("/api/notification-channels/{channel_id}/test"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["delivered"], true);
+
+    // Then: the mock webhook received exactly one POST with the expected payload shape
+    let payloads = received.lock().await;
+    assert_eq!(payloads.len(), 1, "webhook should receive exactly one POST");
+    let payload = &payloads[0];
+    assert!(payload["title"].is_string());
+    assert!(payload["message"].is_string());
+    assert_eq!(payload["severity"], "info");
+    drop(payloads);
+
+    // When: delete the channel
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/notification-channels/{channel_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Then: the channel is gone, and /test returns 404
+    let resp = send_get_request(&app, "/api/notification-channels").await;
+    let body = response_json(resp).await;
+    assert_eq!(body["channels"].as_array().unwrap().len(), 0);
+
+    let resp = send_json_request(
+        &app,
+        "POST",
+        format!("/api/notification-channels/{channel_id}/test"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_notification_channel_create_rejects_invalid_url_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let resp = send_json_request(
+        &app,
+        "POST",
+        "/api/notification-channels",
+        json!({
+            "name": "broken",
+            "kind": "webhook",
+            "config": { "url": "not-a-url" },
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_notification_channel_test_returns_bad_gateway_on_failure_memory() {
+    // Given: a webhook channel that points at a closed port (no listener).
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // Bind a listener, capture its port, then drop it so future connections fail.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let url = format!("http://127.0.0.1:{port}/will-fail");
+    let resp = send_json_request(
+        &app,
+        "POST",
+        "/api/notification-channels",
+        json!({
+            "name": "broken-target",
+            "kind": "webhook",
+            "config": { "url": url },
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let id = response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // When: hitting the test endpoint, the dispatcher should fail to deliver.
+    let resp = send_json_request(
+        &app,
+        "POST",
+        format!("/api/notification-channels/{id}/test"),
+        json!({}),
+    )
+    .await;
+    // Then: server reports BAD_GATEWAY with delivered=false.
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    let body = response_json(resp).await;
+    assert_eq!(body["delivered"], false);
+    assert!(body["detail"].is_string());
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_notification_channel_crud_and_test_endpoint_postgres() {
+    // Given: a Postgres-backed app and a mock webhook server.
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    let (webhook_url, received) = spawn_mock_webhook_server().await;
+
+    // When: create a webhook channel
+    let resp = send_json_request(
+        &app,
+        "POST",
+        "/api/notification-channels",
+        json!({
+            "name": "pg-webhook",
+            "kind": "webhook",
+            "config": { "url": webhook_url, "headers": { "x-token": "abc" } },
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let id = response_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // When: list channels — DDL should be in place and the row should be readable.
+    let resp = send_get_request(&app, "/api/notification-channels").await;
+    let body = response_json(resp).await;
+    let channels = body["channels"].as_array().unwrap();
+    assert_eq!(channels.len(), 1);
+    assert_eq!(channels[0]["id"], id);
+    assert_eq!(
+        channels[0]["config"]["url"],
+        serde_json::Value::String(webhook_url.clone())
+    );
+
+    // When: test endpoint
+    let resp = send_json_request(
+        &app,
+        "POST",
+        format!("/api/notification-channels/{id}/test"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    assert_eq!(body["delivered"], true);
+
+    // Then: webhook received the POST.
+    let payloads = received.lock().await;
+    assert_eq!(payloads.len(), 1);
+    assert_eq!(payloads[0]["severity"], "info");
+}

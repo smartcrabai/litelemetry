@@ -11,6 +11,7 @@ pub use incident_store::IncidentStore;
 use crate::domain::dashboard::DashboardDefinition;
 use crate::domain::telemetry::{NormalizedEntry, Signal};
 use crate::domain::viewer::ViewerDefinition;
+use crate::notifications::NotificationChannel;
 use postgres::ViewerSnapshotRow;
 use serde_json::Value;
 use uuid::Uuid;
@@ -186,6 +187,56 @@ impl ViewerStore {
                 s.delete_dashboard(id).await.map_err(StorageError::Postgres)
             }
             ViewerStore::Memory(s) => s.delete_dashboard(id).await,
+        }
+    }
+
+    // --- Notification channel CRUD ------------------------------------------
+
+    pub async fn insert_notification_channel(
+        &self,
+        channel: &NotificationChannel,
+    ) -> Result<(), StorageError> {
+        match self {
+            ViewerStore::Postgres(s) => s
+                .insert_notification_channel(channel)
+                .await
+                .map_err(StorageError::Postgres),
+            ViewerStore::Memory(s) => s.insert_notification_channel(channel).await,
+        }
+    }
+
+    pub async fn list_notification_channels(
+        &self,
+    ) -> Result<Vec<NotificationChannel>, StorageError> {
+        match self {
+            ViewerStore::Postgres(s) => s
+                .list_notification_channels()
+                .await
+                .map_err(StorageError::Postgres),
+            ViewerStore::Memory(s) => s.list_notification_channels().await,
+        }
+    }
+
+    pub async fn load_notification_channel(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<NotificationChannel>, StorageError> {
+        match self {
+            ViewerStore::Postgres(s) => s
+                .load_notification_channel(id)
+                .await
+                .map_err(StorageError::Postgres),
+            ViewerStore::Memory(s) => s.load_notification_channel(id).await,
+        }
+    }
+
+    pub async fn delete_notification_channel(&self, id: Uuid) -> Result<bool, StorageError> {
+        match self {
+            ViewerStore::Postgres(s) => s
+                .delete_notification_channel(id)
+                .await
+                .map_err(StorageError::Postgres),
+            ViewerStore::Memory(s) => s.delete_notification_channel(id).await,
         }
     }
 }
