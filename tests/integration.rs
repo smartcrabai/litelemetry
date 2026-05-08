@@ -8627,3 +8627,108 @@ async fn test_slo_create_and_evaluate_budget() {
     let after = send_get_request(&app, format!("/api/slos/{slo_id}")).await;
     assert_eq!(after.status(), StatusCode::NOT_FOUND);
 }
+
+// --- Exemplar linking (testcontainers, Docker) ------------------------------
+
+/// Exemplar linking: ingest metric + traces in the same minute window
+/// then verify GET /api/exemplars exposes the trace_id under the metric viewer's bucket.
+///
+/// The test ingests metric/trace OTLP payloads first, then creates the viewers so that
+/// `add_viewer` re-scans the Redis stream and includes the freshly-written entries.
+/// (The test harness does not spawn the periodic `apply_diff_batch` task.)
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_exemplars_links_trace_id_to_metric_bucket() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    // 1. Ingest the metric + trace via OTLP/HTTP JSON.
+    let metric_payload = make_metric_payload("orders-api", "http.server.requests", 7);
+    let trace_payload = bytes::Bytes::from(
+        serde_json::json!({
+            "resourceSpans": [{
+                "resource": {
+                    "attributes": [{
+                        "key": "service.name",
+                        "value": { "stringValue": "orders-api" }
+                    }]
+                },
+                "scopeSpans": [{
+                    "spans": [{
+                        "traceId": "deadbeefdeadbeefdeadbeefdeadbeef",
+                        "spanId": "0000000000000007",
+                        "name": "GET /orders"
+                    }]
+                }]
+            }]
+        })
+        .to_string(),
+    );
+
+    let metric_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/metrics")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(metric_payload))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(metric_resp.status(), StatusCode::OK, "metric ingest failed");
+    let trace_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/traces")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(trace_payload))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(trace_resp.status(), StatusCode::OK, "trace ingest failed");
+
+    // 2. Now create the metric and trace viewers. add_viewer rescans the stream so the
+    //    just-ingested entries are picked up immediately without waiting for poll cycles.
+    let metric_viewer_id = create_viewer_id(
+        &app,
+        json!({ "name": "Orders metrics", "signal": "metrics" }),
+    )
+    .await;
+    let _trace_viewer_id =
+        create_viewer_id(&app, json!({ "name": "Orders traces", "signal": "traces" })).await;
+
+    // 3. Sanity-check the metric viewer holds the metric entry.
+    let metric_detail = fetch_viewer_payload(&app, &metric_viewer_id).await;
+    assert!(
+        metric_detail["entry_count"].as_u64().unwrap_or(0) >= 1,
+        "metric viewer should contain the ingested metric, got {metric_detail}"
+    );
+
+    // 4. Hit /api/exemplars and assert the trace_id appears under the metric viewer's bucket.
+    let resp = send_get_request(
+        &app,
+        format!(
+            "/api/exemplars?metric_viewer_id={metric_viewer_id}&bucket_ms=60000&lookback_ms=600000"
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = response_json(resp).await;
+    let buckets_arr = body["buckets"]
+        .as_array()
+        .expect("buckets array in response");
+    assert_eq!(buckets_arr.len(), 1, "expected exactly one bucket: {body}");
+    let trace_ids = buckets_arr[0]["sample_trace_ids"]
+        .as_array()
+        .expect("sample_trace_ids array");
+    let ids: Vec<&str> = trace_ids.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        ids.contains(&"deadbeefdeadbeefdeadbeefdeadbeef"),
+        "expected linked trace_id in bucket, got {ids:?}"
+    );
+}
