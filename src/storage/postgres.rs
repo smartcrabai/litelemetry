@@ -62,6 +62,11 @@ impl PostgresStore {
         Ok(Self { pool })
     }
 
+    /// Returns the underlying connection pool, used to construct sibling stores.
+    pub fn pool(&self) -> PgPool {
+        self.pool.clone()
+    }
+
     /// For startup bootstrap: creates the required schema
     pub async fn create_schema(&self) -> Result<(), sqlx::Error> {
         sqlx::query(CREATE_VIEWER_DEFINITIONS_SQL)
@@ -71,6 +76,9 @@ impl PostgresStore {
             .execute(&self.pool)
             .await?;
         sqlx::query(CREATE_DASHBOARD_DEFINITIONS_SQL)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(crate::storage::alert_store::CREATE_ALERT_DEFINITIONS_SQL)
             .execute(&self.pool)
             .await?;
         Ok(())

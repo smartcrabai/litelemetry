@@ -30,6 +30,17 @@ CREATE TABLE IF NOT EXISTS viewer_snapshots (
     generated_at TIMESTAMPTZ NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS alert_definitions (
+    id UUID PRIMARY KEY,
+    name TEXT NOT NULL,
+    viewer_id UUID NOT NULL,
+    condition_json JSONB NOT NULL,
+    severity TEXT NOT NULL,
+    evaluation_interval_ms INTEGER NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    revision BIGINT NOT NULL DEFAULT 0
+);
+
 INSERT INTO viewer_definitions (
     id,
     slug,

@@ -299,9 +299,88 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       }
 
       #page-viewers,
-      #page-dashboard {
+      #page-dashboard,
+      #page-alerts {
         display: grid;
         gap: 24px;
+      }
+
+      .alerts-toolbar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      #alert-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 14px;
+      }
+      #alert-table th,
+      #alert-table td {
+        padding: 10px 12px;
+        text-align: left;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      }
+      #alert-table tbody tr:hover {
+        background: rgba(255, 255, 255, 0.03);
+      }
+      .alert-severity-badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .alert-severity-warning {
+        background: #c4810022;
+        color: #f5b400;
+      }
+      .alert-severity-critical {
+        background: #d2222222;
+        color: #ff7373;
+      }
+      .modal-backdrop {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.55);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 100;
+      }
+      .modal-backdrop[hidden] {
+        display: none !important;
+      }
+      .modal-card {
+        background: var(--panel-bg, #15171f);
+        padding: 24px;
+        border-radius: 16px;
+        max-width: 480px;
+        width: 92%;
+        display: grid;
+        gap: 12px;
+      }
+      .modal-card label {
+        font-size: 12px;
+        color: var(--muted, #9aa0aa);
+        display: grid;
+        gap: 4px;
+      }
+      .modal-card input,
+      .modal-card select {
+        padding: 8px 10px;
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        color: inherit;
+      }
+      .modal-actions {
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+        margin-top: 8px;
       }
 
       .stack,
@@ -1357,6 +1436,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         <a id="nav-viewers" class="sidebar-item active" href="#viewers" data-page="viewers">Viewers</a>
         <a id="nav-waterfall" class="sidebar-item" href="#waterfall" data-page="waterfall">Trace Waterfall</a>
         <a id="nav-traces" class="sidebar-item" href="#traces" data-page="traces">Traces</a>
+        <a id="nav-alerts" class="sidebar-item" href="#alerts" data-page="alerts">Alerts</a>
         <div class="sidebar-section-label">Dashboards</div>
         <div id="dashboard-list"></div>
         <button id="new-dashboard-button" class="secondary sidebar-new-btn" type="button">+ New Dashboard</button>
@@ -1694,6 +1774,78 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           </div>
         </section>
       </div><!-- #page-traces -->
+
+      <div id="page-alerts" hidden>
+        <section class="toolbar panel panel-strong">
+          <div class="alerts-toolbar">
+            <h2 style="margin:0;">Alerts</h2>
+            <button id="new-alert-button" class="primary" type="button">+ New Alert</button>
+            <button id="refresh-alerts-button" class="secondary" type="button">Refresh</button>
+          </div>
+          <div id="alerts-status" class="status-box" data-state="working">Loading alerts...</div>
+        </section>
+        <section class="panel panel-strong table-wrap">
+          <table id="alert-table" data-testid="alert-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Viewer</th>
+                <th>Condition</th>
+                <th>Severity</th>
+                <th>Interval</th>
+                <th>Enabled</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="alert-table-body"></tbody>
+          </table>
+          <p id="alert-empty" hidden style="text-align:center;color:var(--muted);">No alerts configured yet.</p>
+        </section>
+      </div><!-- #page-alerts -->
+
+      <div id="alert-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true">
+        <div class="modal-card">
+          <h3 style="margin:0;">Create Alert</h3>
+          <label>Name
+            <input id="alert-modal-name" type="text" maxlength="80" placeholder="High traffic" />
+          </label>
+          <label>Viewer
+            <select id="alert-modal-viewer"></select>
+          </label>
+          <label>Condition operator
+            <select id="alert-modal-op">
+              <option value=">">&gt;</option>
+              <option value=">=">&gt;=</option>
+              <option value="<">&lt;</option>
+              <option value="<=">&lt;=</option>
+              <option value="==">==</option>
+              <option value="!=">!=</option>
+            </select>
+          </label>
+          <label>Threshold value
+            <input id="alert-modal-value" type="number" step="any" value="100" />
+          </label>
+          <label>Metric
+            <select id="alert-modal-metric">
+              <option value="count">count</option>
+            </select>
+          </label>
+          <label>Severity
+            <select id="alert-modal-severity">
+              <option value="warning">warning</option>
+              <option value="critical">critical</option>
+            </select>
+          </label>
+          <label>Evaluation interval (ms)
+            <input id="alert-modal-interval" type="number" min="1000" step="1000" value="5000" />
+          </label>
+          <div id="alert-modal-error" class="status-box" data-state="error" hidden></div>
+          <div class="modal-actions">
+            <button id="alert-modal-cancel" class="secondary" type="button">Cancel</button>
+            <button id="alert-modal-save" class="primary" type="button">Create</button>
+          </div>
+        </div>
+      </div>
     </main>
 
     <script>
@@ -3322,11 +3474,19 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         const pageWaterfallEl = document.getElementById('page-waterfall');
         if (pageWaterfallEl) pageWaterfallEl.hidden = page !== 'waterfall';
         pageTraces.hidden = page !== 'traces';
+        const pageAlertsEl = document.getElementById('page-alerts');
+        if (pageAlertsEl) pageAlertsEl.hidden = page !== 'alerts';
 
         navViewers.classList.toggle('active', page === 'viewers');
         const navWaterfallEl = document.getElementById('nav-waterfall');
         if (navWaterfallEl) navWaterfallEl.classList.toggle('active', page === 'waterfall');
         navTraces.classList.toggle('active', page === 'traces');
+        const navAlertsEl = document.getElementById('nav-alerts');
+        if (navAlertsEl) navAlertsEl.classList.toggle('active', page === 'alerts');
+
+        if (page === 'alerts') {
+          refreshAlerts();
+        }
 
         document.querySelectorAll('.sidebar-dashboard-item').forEach(el => {
           el.classList.toggle('active', el.dataset.id === dashboardId);
@@ -3897,6 +4057,214 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           loadTraceSearch();
         }
       });
+
+      const navAlerts = document.getElementById('nav-alerts');
+      if (navAlerts) {
+        navAlerts.addEventListener('click', (e) => {
+          e.preventDefault();
+          navigateTo('alerts');
+        });
+      }
+
+      // --- Alerts UI ------------------------------------------------------
+      const alertModal = document.getElementById('alert-modal');
+      const alertModalName = document.getElementById('alert-modal-name');
+      const alertModalViewer = document.getElementById('alert-modal-viewer');
+      const alertModalOp = document.getElementById('alert-modal-op');
+      const alertModalValue = document.getElementById('alert-modal-value');
+      const alertModalMetric = document.getElementById('alert-modal-metric');
+      const alertModalSeverity = document.getElementById('alert-modal-severity');
+      const alertModalInterval = document.getElementById('alert-modal-interval');
+      const alertModalSave = document.getElementById('alert-modal-save');
+      const alertModalCancel = document.getElementById('alert-modal-cancel');
+      const alertModalError = document.getElementById('alert-modal-error');
+      const alertTableBody = document.getElementById('alert-table-body');
+      const alertEmpty = document.getElementById('alert-empty');
+      const alertsStatus = document.getElementById('alerts-status');
+      const newAlertButton = document.getElementById('new-alert-button');
+      const refreshAlertsButton = document.getElementById('refresh-alerts-button');
+
+      function setAlertsStatus(state, text) {
+        if (!alertsStatus) return;
+        alertsStatus.dataset.state = state;
+        alertsStatus.textContent = text;
+      }
+
+      function escapeHtml(s) {
+        return String(s)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;');
+      }
+
+      function renderAlerts(alerts, viewerNamesById) {
+        if (!alertTableBody) return;
+        alertTableBody.innerHTML = '';
+        if (!alerts.length) {
+          alertEmpty.hidden = false;
+          return;
+        }
+        alertEmpty.hidden = true;
+        for (const a of alerts) {
+          const tr = document.createElement('tr');
+          const cond = a.condition || {};
+          const condText = `${cond.metric || ''} ${cond.op || ''} ${cond.value ?? ''}`;
+          const viewerName = viewerNamesById.get(a.viewer_id) || a.viewer_id;
+          const sevClass = a.severity === 'critical' ? 'alert-severity-critical' : 'alert-severity-warning';
+          tr.innerHTML = `
+            <td>${escapeHtml(a.name)}</td>
+            <td>${escapeHtml(viewerName)}</td>
+            <td><code>${escapeHtml(condText)}</code></td>
+            <td><span class="alert-severity-badge ${sevClass}">${escapeHtml(a.severity)}</span></td>
+            <td>${a.evaluation_interval_ms} ms</td>
+            <td>${a.enabled ? 'yes' : 'no'}</td>
+            <td><button class="secondary btn-compact" type="button" data-alert-id="${a.id}">Delete</button></td>
+          `;
+          tr.querySelector('button[data-alert-id]').addEventListener('click', async () => {
+            if (!confirm(`Delete alert "${a.name}"?`)) return;
+            try {
+              const resp = await fetch(`/api/alerts/${a.id}`, { method: 'DELETE' });
+              if (!resp.ok && resp.status !== 204) {
+                setAlertsStatus('error', `Delete failed (${resp.status})`);
+                return;
+              }
+              refreshAlerts();
+            } catch (err) {
+              setAlertsStatus('error', `Delete failed: ${err.message}`);
+            }
+          });
+          alertTableBody.appendChild(tr);
+        }
+      }
+
+      async function refreshAlerts() {
+        if (!alertTableBody) return;
+        setAlertsStatus('working', 'Loading alerts...');
+        try {
+          const [alertsResp, viewersResp] = await Promise.all([
+            fetch('/api/alerts', { headers: { accept: 'application/json' } }),
+            fetch('/api/viewers', { headers: { accept: 'application/json' } }),
+          ]);
+          if (!alertsResp.ok) {
+            setAlertsStatus('error', `Failed to load alerts (${alertsResp.status})`);
+            return;
+          }
+          const alertsBody = await alertsResp.json();
+          const viewersBody = viewersResp.ok ? await viewersResp.json() : { viewers: [] };
+          const viewerNamesById = new Map();
+          for (const v of viewersBody.viewers || []) {
+            viewerNamesById.set(v.id, v.name);
+          }
+          renderAlerts(alertsBody.alerts || [], viewerNamesById);
+          setAlertsStatus('idle', `Loaded ${(alertsBody.alerts || []).length} alerts`);
+        } catch (err) {
+          setAlertsStatus('error', `Failed to load alerts: ${err.message}`);
+        }
+      }
+
+      async function populateAlertViewers() {
+        if (!alertModalViewer) return;
+        try {
+          const resp = await fetch('/api/viewers', { headers: { accept: 'application/json' } });
+          if (!resp.ok) {
+            alertModalViewer.innerHTML = '<option value="">(failed to load viewers)</option>';
+            return;
+          }
+          const body = await resp.json();
+          const viewers = body.viewers || [];
+          alertModalViewer.innerHTML = viewers
+            .map(v => `<option value="${v.id}">${escapeHtml(v.name)}</option>`)
+            .join('');
+        } catch (err) {
+          alertModalViewer.innerHTML = `<option value="">(error: ${escapeHtml(err.message)})</option>`;
+        }
+      }
+
+      function openAlertModal() {
+        alertModalError.hidden = true;
+        alertModalError.textContent = '';
+        alertModalName.value = '';
+        alertModalValue.value = '100';
+        alertModalInterval.value = '5000';
+        alertModalOp.value = '>';
+        alertModalSeverity.value = 'warning';
+        alertModalMetric.value = 'count';
+        populateAlertViewers();
+        alertModal.hidden = false;
+      }
+
+      function closeAlertModal() {
+        alertModal.hidden = true;
+      }
+
+      async function saveAlert() {
+        alertModalError.hidden = true;
+        const name = alertModalName.value.trim();
+        const viewerId = alertModalViewer.value;
+        const value = Number(alertModalValue.value);
+        const intervalMs = parseInt(alertModalInterval.value, 10);
+        if (!name) {
+          alertModalError.textContent = 'Name is required';
+          alertModalError.hidden = false;
+          return;
+        }
+        if (!viewerId) {
+          alertModalError.textContent = 'Select a viewer';
+          alertModalError.hidden = false;
+          return;
+        }
+        if (!Number.isFinite(value)) {
+          alertModalError.textContent = 'Threshold value must be a number';
+          alertModalError.hidden = false;
+          return;
+        }
+        if (!Number.isFinite(intervalMs) || intervalMs < 1000) {
+          alertModalError.textContent = 'Evaluation interval must be >= 1000 ms';
+          alertModalError.hidden = false;
+          return;
+        }
+        const payload = {
+          name,
+          viewer_id: viewerId,
+          condition: {
+            type: 'threshold',
+            op: alertModalOp.value,
+            value,
+            metric: alertModalMetric.value,
+          },
+          severity: alertModalSeverity.value,
+          evaluation_interval_ms: intervalMs,
+        };
+        try {
+          const resp = await fetch('/api/alerts', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          if (!resp.ok) {
+            const text = await resp.text();
+            alertModalError.textContent = `Create failed (${resp.status}): ${text}`;
+            alertModalError.hidden = false;
+            return;
+          }
+          closeAlertModal();
+          refreshAlerts();
+        } catch (err) {
+          alertModalError.textContent = `Create failed: ${err.message}`;
+          alertModalError.hidden = false;
+        }
+      }
+
+      if (newAlertButton) newAlertButton.addEventListener('click', openAlertModal);
+      if (refreshAlertsButton) refreshAlertsButton.addEventListener('click', refreshAlerts);
+      if (alertModalCancel) alertModalCancel.addEventListener('click', closeAlertModal);
+      if (alertModalSave) alertModalSave.addEventListener('click', saveAlert);
+      if (alertModal) {
+        alertModal.addEventListener('click', (e) => {
+          if (e.target === alertModal) closeAlertModal();
+        });
+      }
 
       dashboardRefreshToggleButton.addEventListener('click', () => {
         if (dashboardRefreshIntervalMs === null) {
@@ -4625,6 +4993,7 @@ pub struct AppState {
     pub viewer_store: Option<ViewerStore>,
     pub viewer_runtime: Option<SharedViewerRuntime>,
     pub rollup_store: Option<RollupStore>,
+    pub alert_store: Option<crate::storage::alert_store::AlertStore>,
 }
 
 pub type SharedViewerRuntime = Arc<Mutex<ViewerRuntime>>;
@@ -4638,6 +5007,12 @@ impl AppState {
 
     fn require_viewer_store(&self) -> Result<&crate::storage::ViewerStore, StatusCode> {
         self.viewer_store
+            .as_ref()
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)
+    }
+
+    fn require_alert_store(&self) -> Result<&crate::storage::alert_store::AlertStore, StatusCode> {
+        self.alert_store
             .as_ref()
             .ok_or(StatusCode::SERVICE_UNAVAILABLE)
     }
@@ -4849,15 +5224,22 @@ struct TraceSummary {
 
 /// Builds and returns an Axum app (for ingest-only mode)
 pub fn build_app(stream_store: StreamStore) -> Router {
-    build_app_with_services(stream_store, None, None)
+    build_app_with_services(stream_store, None, None, None)
 }
 
 pub fn build_app_with_services(
     stream_store: StreamStore,
     viewer_store: Option<ViewerStore>,
     viewer_runtime: Option<SharedViewerRuntime>,
+    alert_store: Option<crate::storage::alert_store::AlertStore>,
 ) -> Router {
-    build_app_with_full_services(stream_store, viewer_store, viewer_runtime, None)
+    build_app_with_full_services(
+        stream_store,
+        viewer_store,
+        viewer_runtime,
+        None,
+        alert_store,
+    )
 }
 
 /// Same as [`build_app_with_services`] but also wires the rollup store used by
@@ -4868,12 +5250,14 @@ pub fn build_app_with_full_services(
     viewer_store: Option<ViewerStore>,
     viewer_runtime: Option<SharedViewerRuntime>,
     rollup_store: Option<RollupStore>,
+    alert_store: Option<crate::storage::alert_store::AlertStore>,
 ) -> Router {
     let state = AppState {
         stream_store,
         viewer_store,
         viewer_runtime,
         rollup_store,
+        alert_store,
     };
     let connect = crate::grpc::build_connect_router(state.clone());
 
@@ -4908,6 +5292,11 @@ pub fn build_app_with_full_services(
         .route("/api/rollups", get(get_rollups))
         .route("/api/traces", get(get_trace_by_id))
         .route("/api/traces/search", get(search_traces_handler))
+        .route("/api/alerts", get(list_alerts).post(create_alert))
+        .route(
+            "/api/alerts/{id}",
+            get(get_alert).patch(patch_alert).delete(delete_alert),
+        )
         .route("/v1/traces", post(ingest_traces))
         .route("/v1/metrics", post(ingest_metrics))
         .route("/v1/logs", post(ingest_logs))
@@ -6238,6 +6627,226 @@ async fn get_trace_waterfall(
         Ok(waterfall) => Ok(Json(waterfall)),
         Err(WaterfallError::TraceNotFound(_)) => Err(StatusCode::NOT_FOUND),
     }
+}
+
+// --- Alerts API -------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+struct AlertListItem {
+    id: Uuid,
+    name: String,
+    viewer_id: Uuid,
+    condition: serde_json::Value,
+    severity: String,
+    evaluation_interval_ms: i32,
+    enabled: bool,
+    revision: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct AlertListResponse {
+    alerts: Vec<AlertListItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateAlertRequest {
+    name: String,
+    viewer_id: Uuid,
+    condition: serde_json::Value,
+    severity: String,
+    evaluation_interval_ms: i32,
+    #[serde(default = "default_alert_enabled")]
+    enabled: bool,
+}
+
+fn default_alert_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Serialize)]
+struct CreateAlertResponse {
+    id: Uuid,
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchAlertRequest {
+    name: Option<String>,
+    viewer_id: Option<Uuid>,
+    condition: Option<serde_json::Value>,
+    severity: Option<String>,
+    evaluation_interval_ms: Option<i32>,
+    enabled: Option<bool>,
+}
+
+const MIN_ALERT_EVAL_INTERVAL_MS: i32 = 1_000;
+const MAX_ALERT_NAME_CHARS: usize = 80;
+
+fn alert_to_item(def: &crate::domain::alert::AlertDefinition) -> AlertListItem {
+    let condition = serde_json::to_value(&def.condition)
+        .expect("AlertCondition serialization should never fail");
+    AlertListItem {
+        id: def.id,
+        name: def.name.clone(),
+        viewer_id: def.viewer_id,
+        condition,
+        severity: def.severity.as_str().to_string(),
+        evaluation_interval_ms: def.evaluation_interval_ms,
+        enabled: def.enabled,
+        revision: def.revision,
+    }
+}
+
+fn validate_alert_name(name: &str) -> Result<String, StatusCode> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > MAX_ALERT_NAME_CHARS {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(trimmed.to_string())
+}
+
+fn validate_alert_interval(value: i32) -> Result<i32, StatusCode> {
+    if value < MIN_ALERT_EVAL_INTERVAL_MS {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(value)
+}
+
+fn parse_severity(value: &str) -> Result<crate::domain::alert::AlertSeverity, StatusCode> {
+    crate::domain::alert::AlertSeverity::parse(value.trim()).ok_or(StatusCode::BAD_REQUEST)
+}
+
+fn parse_condition(
+    value: &serde_json::Value,
+) -> Result<crate::domain::alert::AlertCondition, StatusCode> {
+    serde_json::from_value(value.clone()).map_err(|e| {
+        tracing::warn!("invalid alert condition: {e}");
+        StatusCode::BAD_REQUEST
+    })
+}
+
+async fn list_alerts(State(state): State<AppState>) -> Result<Json<AlertListResponse>, StatusCode> {
+    let store = state.require_alert_store()?;
+    let defs = store.load_all().await.map_err(|e| {
+        tracing::error!("list_alerts failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let alerts = defs.iter().map(alert_to_item).collect();
+    Ok(Json(AlertListResponse { alerts }))
+}
+
+async fn get_alert(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<AlertListItem>, StatusCode> {
+    let store = state.require_alert_store()?;
+    let def = store
+        .load(id)
+        .await
+        .map_err(|e| {
+            tracing::error!("get_alert failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(alert_to_item(&def)))
+}
+
+async fn create_alert(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateAlertRequest>,
+) -> Result<(StatusCode, Json<CreateAlertResponse>), StatusCode> {
+    let store = state.require_alert_store()?;
+    let viewer_store = state.require_viewer_store()?;
+
+    let name = validate_alert_name(&payload.name)?;
+    let interval = validate_alert_interval(payload.evaluation_interval_ms)?;
+    let severity = parse_severity(&payload.severity)?;
+    let condition = parse_condition(&payload.condition)?;
+
+    // Verify referenced viewer exists.
+    let viewers = viewer_store.load_viewer_definitions().await.map_err(|e| {
+        tracing::error!("create_alert: load_viewer_definitions failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    if !viewers.iter().any(|v| v.id == payload.viewer_id) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let id = Uuid::new_v4();
+    let def = crate::domain::alert::AlertDefinition {
+        id,
+        name,
+        viewer_id: payload.viewer_id,
+        condition,
+        severity,
+        evaluation_interval_ms: interval,
+        enabled: payload.enabled,
+        revision: 0,
+    };
+    store.insert(&def).await.map_err(|e| {
+        tracing::error!("create_alert: insert failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok((StatusCode::CREATED, Json(CreateAlertResponse { id })))
+}
+
+async fn patch_alert(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<PatchAlertRequest>,
+) -> Result<StatusCode, StatusCode> {
+    let store = state.require_alert_store()?;
+    let mut def = store
+        .load(id)
+        .await
+        .map_err(|e| {
+            tracing::error!("patch_alert: load failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if let Some(name) = payload.name.as_deref() {
+        def.name = validate_alert_name(name)?;
+    }
+    if let Some(viewer_id) = payload.viewer_id {
+        def.viewer_id = viewer_id;
+    }
+    if let Some(condition) = payload.condition.as_ref() {
+        def.condition = parse_condition(condition)?;
+    }
+    if let Some(severity) = payload.severity.as_deref() {
+        def.severity = parse_severity(severity)?;
+    }
+    if let Some(interval) = payload.evaluation_interval_ms {
+        def.evaluation_interval_ms = validate_alert_interval(interval)?;
+    }
+    if let Some(enabled) = payload.enabled {
+        def.enabled = enabled;
+    }
+
+    let updated = store.update(&def).await.map_err(|e| {
+        tracing::error!("patch_alert: update failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    if !updated {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(StatusCode::OK)
+}
+
+async fn delete_alert(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, StatusCode> {
+    let store = state.require_alert_store()?;
+    let deleted = store.delete(id).await.map_err(|e| {
+        tracing::error!("delete_alert failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    if !deleted {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // --- Ingest -----------------------------------------------------------------

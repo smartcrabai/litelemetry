@@ -475,6 +475,7 @@ impl MemoryTestApp {
             StreamStore::Memory(stream_store.clone()),
             Some(ViewerStore::Memory(viewer_store)),
             Some(runtime),
+            None,
         );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();

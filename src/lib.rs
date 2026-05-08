@@ -1,3 +1,4 @@
+pub mod alerts;
 pub mod apm;
 pub mod domain;
 pub mod grpc;
