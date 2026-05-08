@@ -322,9 +322,9 @@ dependencies = [
 
 [[package]]
 name = "buffa-codegen"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a50dd3ca45146a2878eb7854e8c54d1b299d4e0268d3ff1bebf78a15b78982d3"
+checksum = "08feef8ec49ed91e84315f50338afcef34b9ec074609a8da03e5b60dd3acea08"
 dependencies = [
  "buffa",
  "buffa-descriptor",
@@ -337,9 +337,9 @@ dependencies = [
 
 [[package]]
 name = "buffa-descriptor"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b60f63b38417e539089f6aaca6622a60dbdf8f656663c81e6870ae0788d2060"
+checksum = "0b068a626acb77c120c11fa642181a2d968082d158b9958a10d6653ddeba1711"
 dependencies = [
  "buffa",
 ]
@@ -452,8 +452,8 @@ dependencies = [
 
 [[package]]
 name = "connectrpc"
-version = "0.4.1"
-source = "git+https://github.com/anthropics/connect-rust?rev=c2aa616d5c1ce431982491f2fdba04e40c451911#c2aa616d5c1ce431982491f2fdba04e40c451911"
+version = "0.4.2"
+source = "git+https://github.com/anthropics/connect-rust?rev=4599ae3a4567d6d6bf985b8bb34b45849c03ca7a#4599ae3a4567d6d6bf985b8bb34b45849c03ca7a"
 dependencies = [
  "async-compression",
  "axum",
@@ -484,8 +484,8 @@ dependencies = [
 
 [[package]]
 name = "connectrpc-build"
-version = "0.4.1"
-source = "git+https://github.com/anthropics/connect-rust?rev=c2aa616d5c1ce431982491f2fdba04e40c451911#c2aa616d5c1ce431982491f2fdba04e40c451911"
+version = "0.4.2"
+source = "git+https://github.com/anthropics/connect-rust?rev=4599ae3a4567d6d6bf985b8bb34b45849c03ca7a#4599ae3a4567d6d6bf985b8bb34b45849c03ca7a"
 dependencies = [
  "anyhow",
  "buffa",
@@ -496,8 +496,8 @@ dependencies = [
 
 [[package]]
 name = "connectrpc-codegen"
-version = "0.4.1"
-source = "git+https://github.com/anthropics/connect-rust?rev=c2aa616d5c1ce431982491f2fdba04e40c451911#c2aa616d5c1ce431982491f2fdba04e40c451911"
+version = "0.4.2"
+source = "git+https://github.com/anthropics/connect-rust?rev=4599ae3a4567d6d6bf985b8bb34b45849c03ca7a#4599ae3a4567d6d6bf985b8bb34b45849c03ca7a"
 dependencies = [
  "anyhow",
  "buffa",
