@@ -5,6 +5,7 @@ pub mod grpc;
 pub mod ingest;
 pub mod notifications;
 pub mod otlp_proto;
+pub mod query;
 pub mod server;
 pub mod slo;
 pub mod storage;
