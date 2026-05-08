@@ -1521,6 +1521,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         <a id="nav-incidents" class="sidebar-item" href="#incidents" data-page="incidents">Incidents</a>
         <a id="nav-slos" class="sidebar-item" href="#slos" data-page="slos">SLOs</a>
         <a id="nav-query" class="sidebar-item" href="#query" data-page="query">Query</a>
+        <a id="nav-anomaly" class="sidebar-item" href="#anomaly" data-page="anomaly">Anomaly</a>
         <div class="sidebar-section-label">Dashboards</div>
         <div id="dashboard-list"></div>
         <button id="new-dashboard-button" class="secondary sidebar-new-btn" type="button">+ New Dashboard</button>
@@ -2092,6 +2093,46 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           </table>
         </section>
       </div><!-- #page-slos -->
+
+      <div id="page-anomaly" hidden>
+        <section class="toolbar panel panel-strong">
+          <h2 style="margin:0 0 8px 0;">Anomaly Detection</h2>
+          <div class="toolbar-row">
+            <label for="anomaly-viewer-select">Viewer</label>
+            <select id="anomaly-viewer-select" data-testid="anomaly-viewer-select" style="min-width:240px;">
+              <option value="">Loading...</option>
+            </select>
+            <label for="anomaly-detector-type">Detector</label>
+            <select id="anomaly-detector-type" data-testid="anomaly-detector-type">
+              <option value="no_data">No Data</option>
+              <option value="zscore">Z-Score</option>
+            </select>
+            <span id="anomaly-no-data-fields" class="toolbar-row" style="gap:6px;display:inline-flex;align-items:center;">
+              <label for="anomaly-window-ms">Window (ms)</label>
+              <input id="anomaly-window-ms" type="number" value="300000" min="1000" step="1000" style="max-width:120px;">
+            </span>
+            <span id="anomaly-zscore-fields" class="toolbar-row" hidden style="gap:6px;display:inline-flex;align-items:center;">
+              <label for="anomaly-threshold">Threshold</label>
+              <input id="anomaly-threshold" type="number" value="3" min="0" step="0.1" style="max-width:80px;">
+              <label for="anomaly-bucket-ms">Bucket (ms)</label>
+              <input id="anomaly-bucket-ms" type="number" value="60000" min="1000" step="1000" style="max-width:120px;">
+            </span>
+            <button id="anomaly-evaluate-button" data-testid="anomaly-evaluate-button" class="primary" type="button">Evaluate</button>
+          </div>
+          <div id="anomaly-status" class="status-box" data-state="idle">Choose a viewer and detector, then click Evaluate.</div>
+        </section>
+        <section class="panel panel-strong" id="anomaly-result-panel" hidden>
+          <h3 style="margin:0 0 8px 0;">Result</h3>
+          <table>
+            <tbody>
+              <tr><th style="text-align:left;">Breached</th><td id="anomaly-result-breached">--</td></tr>
+              <tr><th style="text-align:left;">Value</th><td id="anomaly-result-value">--</td></tr>
+              <tr><th style="text-align:left;">Expected</th><td id="anomaly-result-expected">--</td></tr>
+              <tr><th style="text-align:left;">Observed at</th><td id="anomaly-result-observed">--</td></tr>
+            </tbody>
+          </table>
+        </section>
+      </div><!-- #page-anomaly -->
     </main>
 
     <script>
@@ -3760,6 +3801,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const navIncidents = document.getElementById('nav-incidents');
       const navNotifications = document.getElementById('nav-notifications');
       const navQuery = document.getElementById('nav-query');
+      const navAnomaly = document.getElementById('nav-anomaly');
       const newDashboardButton = document.getElementById('new-dashboard-button');
       const dashboardListEl = document.getElementById('dashboard-list');
       const pageViewers = document.getElementById('page-viewers');
@@ -3775,6 +3817,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const sloEmpty = document.getElementById('slo-empty');
       const newSloButton = document.getElementById('new-slo-button');
       const refreshSlosButton = document.getElementById('refresh-slos-button');
+      const pageAnomaly = document.getElementById('page-anomaly');
       const dashboardTitle = document.getElementById('dashboard-title');
       const dashboardGrid = document.getElementById('dashboard-grid');
       const dashboardRefreshIntervalSelect = document.getElementById('dashboard-refresh-interval');
@@ -3964,6 +4007,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         if (pageQuery) {
           pageQuery.hidden = page !== 'query';
         }
+        if (pageAnomaly) pageAnomaly.hidden = page !== 'anomaly';
 
         navViewers.classList.toggle('active', page === 'viewers');
         const navWaterfallEl = document.getElementById('nav-waterfall');
@@ -3983,6 +4027,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         if (navQuery) {
           navQuery.classList.toggle('active', page === 'query');
         }
+        if (navAnomaly) navAnomaly.classList.toggle('active', page === 'anomaly');
 
         document.querySelectorAll('.sidebar-dashboard-item').forEach(el => {
           el.classList.toggle('active', el.dataset.id === dashboardId);
@@ -4026,6 +4071,9 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
         if (page === 'notifications') {
           refreshNotificationChannels();
+        }
+        if (page === 'anomaly') {
+          refreshAnomalyViewerOptions();
         }
         sidebar.classList.remove('open');
 
@@ -4897,6 +4945,135 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           }
         });
       }
+
+      navAnomaly.addEventListener('click', (e) => {
+        e.preventDefault();
+        navigateTo('anomaly');
+      });
+
+      // --- Anomaly tab ----------------------------------------------------
+      const anomalyViewerSelect = document.getElementById('anomaly-viewer-select');
+      const anomalyDetectorTypeSelect = document.getElementById('anomaly-detector-type');
+      const anomalyNoDataFields = document.getElementById('anomaly-no-data-fields');
+      const anomalyZScoreFields = document.getElementById('anomaly-zscore-fields');
+      const anomalyWindowMsInput = document.getElementById('anomaly-window-ms');
+      const anomalyThresholdInput = document.getElementById('anomaly-threshold');
+      const anomalyBucketMsInput = document.getElementById('anomaly-bucket-ms');
+      const anomalyEvaluateButton = document.getElementById('anomaly-evaluate-button');
+      const anomalyStatus = document.getElementById('anomaly-status');
+      const anomalyResultPanel = document.getElementById('anomaly-result-panel');
+      const anomalyResultBreached = document.getElementById('anomaly-result-breached');
+      const anomalyResultValue = document.getElementById('anomaly-result-value');
+      const anomalyResultExpected = document.getElementById('anomaly-result-expected');
+      const anomalyResultObserved = document.getElementById('anomaly-result-observed');
+
+      function setAnomalyDetectorVisibility() {
+        const t = anomalyDetectorTypeSelect.value;
+        anomalyNoDataFields.hidden = t !== 'no_data';
+        anomalyZScoreFields.hidden = t !== 'zscore';
+      }
+
+      anomalyDetectorTypeSelect.addEventListener('change', setAnomalyDetectorVisibility);
+      setAnomalyDetectorVisibility();
+
+      async function refreshAnomalyViewerOptions() {
+        try {
+          const resp = await fetch('/api/viewers', { headers: { accept: 'application/json' } });
+          if (!resp.ok) {
+            anomalyStatus.dataset.state = 'error';
+            anomalyStatus.textContent = `Failed to load viewers: HTTP ${resp.status}`;
+            return;
+          }
+          const data = await resp.json();
+          const viewers = (data && data.viewers) || [];
+          const previous = anomalyViewerSelect.value;
+          anomalyViewerSelect.innerHTML = '';
+          if (!viewers.length) {
+            const opt = document.createElement('option');
+            opt.value = '';
+            opt.textContent = 'No viewers available';
+            anomalyViewerSelect.appendChild(opt);
+            anomalyStatus.dataset.state = 'idle';
+            anomalyStatus.textContent = 'Create a viewer first.';
+            return;
+          }
+          for (const v of viewers) {
+            const opt = document.createElement('option');
+            opt.value = v.id;
+            opt.textContent = `${v.name} (${v.id.slice(0, 8)})`;
+            anomalyViewerSelect.appendChild(opt);
+          }
+          if (previous && viewers.some(v => v.id === previous)) {
+            anomalyViewerSelect.value = previous;
+          }
+          anomalyStatus.dataset.state = 'idle';
+          anomalyStatus.textContent = 'Choose a viewer and detector, then click Evaluate.';
+        } catch (err) {
+          anomalyStatus.dataset.state = 'error';
+          anomalyStatus.textContent = `Failed to load viewers: ${err.message}`;
+        }
+      }
+
+      anomalyEvaluateButton.addEventListener('click', async () => {
+        const viewerId = anomalyViewerSelect.value;
+        if (!viewerId) {
+          anomalyStatus.dataset.state = 'error';
+          anomalyStatus.textContent = 'Select a viewer.';
+          return;
+        }
+        const detectorType = anomalyDetectorTypeSelect.value;
+        let detector;
+        if (detectorType === 'no_data') {
+          const windowMs = parseInt(anomalyWindowMsInput.value, 10);
+          if (!Number.isFinite(windowMs) || windowMs <= 0) {
+            anomalyStatus.dataset.state = 'error';
+            anomalyStatus.textContent = 'Window (ms) must be a positive integer.';
+            return;
+          }
+          detector = { type: 'no_data', window_ms: windowMs };
+        } else {
+          const threshold = parseFloat(anomalyThresholdInput.value);
+          const bucketMs = parseInt(anomalyBucketMsInput.value, 10);
+          if (!Number.isFinite(threshold) || threshold < 0) {
+            anomalyStatus.dataset.state = 'error';
+            anomalyStatus.textContent = 'Threshold must be non-negative.';
+            return;
+          }
+          if (!Number.isFinite(bucketMs) || bucketMs <= 0) {
+            anomalyStatus.dataset.state = 'error';
+            anomalyStatus.textContent = 'Bucket (ms) must be a positive integer.';
+            return;
+          }
+          detector = { type: 'zscore', threshold, bucket_ms: bucketMs };
+        }
+        anomalyStatus.dataset.state = 'working';
+        anomalyStatus.textContent = 'Evaluating...';
+        try {
+          const resp = await fetch('/api/anomaly/evaluate', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', accept: 'application/json' },
+            body: JSON.stringify({ viewer_id: viewerId, detector }),
+          });
+          if (!resp.ok) {
+            anomalyStatus.dataset.state = 'error';
+            anomalyStatus.textContent = `Evaluation failed: HTTP ${resp.status}`;
+            return;
+          }
+          const result = await resp.json();
+          anomalyResultBreached.textContent = result.breached ? 'YES' : 'no';
+          anomalyResultValue.textContent = String(result.value);
+          anomalyResultExpected.textContent = String(result.expected);
+          anomalyResultObserved.textContent = result.observed_at;
+          anomalyResultPanel.hidden = false;
+          anomalyStatus.dataset.state = result.breached ? 'error' : 'ok';
+          anomalyStatus.textContent = result.breached
+            ? 'Anomaly detected (breached).'
+            : 'No anomaly detected.';
+        } catch (err) {
+          anomalyStatus.dataset.state = 'error';
+          anomalyStatus.textContent = `Evaluation failed: ${err.message}`;
+        }
+      });
 
       dashboardRefreshToggleButton.addEventListener('click', () => {
         if (dashboardRefreshIntervalMs === null) {
@@ -6782,6 +6959,7 @@ pub fn build_app_with_services_full(
         .route("/api/slos/{id}", get(get_slo).delete(delete_slo))
         .route("/api/slos/{id}/budget", get(get_slo_budget))
         .route("/api/exemplars", get(list_exemplars))
+        .route("/api/anomaly/evaluate", post(evaluate_anomaly))
         .route("/v1/traces", post(ingest_traces))
         .route("/v1/metrics", post(ingest_metrics))
         .route("/v1/logs", post(ingest_logs))
@@ -7019,6 +7197,28 @@ fn collect_trace_entries(runtime: &ViewerRuntime) -> Vec<NormalizedEntry> {
         }
     }
     out
+}
+
+#[derive(Debug, Deserialize)]
+struct EvaluateAnomalyRequest {
+    viewer_id: Uuid,
+    detector: crate::anomaly::DetectorSpec,
+}
+
+async fn evaluate_anomaly(
+    State(state): State<AppState>,
+    Json(payload): Json<EvaluateAnomalyRequest>,
+) -> Result<Json<crate::anomaly::DetectorResult>, StatusCode> {
+    let runtime = state.require_viewer_runtime()?.lock().await;
+    let (_, viewer_state) = runtime
+        .viewers()
+        .iter()
+        .find(|(viewer, _)| viewer.definition().id == payload.viewer_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let now = Utc::now();
+    let result = payload.detector.evaluate(&viewer_state.entries, now);
+    Ok(Json(result))
 }
 
 async fn list_viewers(
