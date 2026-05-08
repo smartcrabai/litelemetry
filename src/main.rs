@@ -1,9 +1,10 @@
-use litelemetry::server::{SharedViewerRuntime, build_app_with_services};
+use litelemetry::server::{SharedViewerRuntime, build_app_with_full_services};
 use litelemetry::storage::memory::{
     MemoryStreamStore, MemoryViewerStore, default_dashboard_definitions, default_viewer_definitions,
 };
 use litelemetry::storage::postgres::PostgresStore;
 use litelemetry::storage::redis::RedisStore;
+use litelemetry::storage::rollup::{MemoryRollupStore, RedisRollupStore, RollupStore};
 use litelemetry::storage::{StreamStore, ViewerStore};
 use litelemetry::viewer_runtime::runtime::ViewerRuntime;
 use std::time::Duration;
@@ -45,7 +46,7 @@ async fn main() {
     ));
     let standalone = exit_on_config_error(read_standalone(standalone_raw.as_deref()));
 
-    let (stream_store, viewer_store, viewer_runtime) = if standalone {
+    let (stream_store, viewer_store, viewer_runtime, rollup_store) = if standalone {
         tracing::warn!(
             "starting in standalone (in-memory) mode; set STANDALONE=false to use persistent storage"
         );
@@ -81,7 +82,14 @@ async fn main() {
         )
         .await;
 
-        (stream_store, Some(viewer_store), Some(runtime))
+        let rollup_store = RollupStore::Memory(MemoryRollupStore::new());
+
+        (
+            stream_store,
+            Some(viewer_store),
+            Some(runtime),
+            Some(rollup_store),
+        )
     } else {
         let redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -100,6 +108,11 @@ async fn main() {
             .await
             .expect("failed to connect to Redis");
         let stream_store = StreamStore::Redis(redis);
+
+        let rollup_redis = RedisRollupStore::new(&redis_url)
+            .await
+            .expect("failed to connect to Redis for rollups");
+        let rollup_store = Some(RollupStore::Redis(rollup_redis));
 
         let mut viewer_store = None;
         let mut viewer_runtime: Option<SharedViewerRuntime> = None;
@@ -127,10 +140,11 @@ async fn main() {
             tracing::info!("DATABASE_URL is not set; starting in ingest-only mode");
         }
 
-        (stream_store, viewer_store, viewer_runtime)
+        (stream_store, viewer_store, viewer_runtime, rollup_store)
     };
 
-    let app = build_app_with_services(stream_store, viewer_store, viewer_runtime);
+    let app =
+        build_app_with_full_services(stream_store, viewer_store, viewer_runtime, rollup_store);
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await
         .expect("failed to bind");

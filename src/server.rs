@@ -9,6 +9,7 @@ use crate::ingest::otlp_http::{
     attribute_string_value, extract_service_name_from_value, parse_ingest_request,
 };
 use crate::ingest::otlp_pb::payload_as_value;
+use crate::storage::rollup::{Resolution, RollupStore};
 use crate::storage::{StreamStore, ViewerStore};
 use crate::viewer_runtime::compiler::{
     CompiledViewer, compile, extract_searchable_payload_text, query_from_definition,
@@ -4257,6 +4258,7 @@ pub struct AppState {
     pub stream_store: StreamStore,
     pub viewer_store: Option<ViewerStore>,
     pub viewer_runtime: Option<SharedViewerRuntime>,
+    pub rollup_store: Option<RollupStore>,
 }
 
 pub type SharedViewerRuntime = Arc<Mutex<ViewerRuntime>>;
@@ -4489,10 +4491,23 @@ pub fn build_app_with_services(
     viewer_store: Option<ViewerStore>,
     viewer_runtime: Option<SharedViewerRuntime>,
 ) -> Router {
+    build_app_with_full_services(stream_store, viewer_store, viewer_runtime, None)
+}
+
+/// Same as [`build_app_with_services`] but also wires the rollup store used by
+/// `/api/rollups`. Callers that don't care about rollups can keep using
+/// [`build_app_with_services`] and the rollup endpoint will return 503.
+pub fn build_app_with_full_services(
+    stream_store: StreamStore,
+    viewer_store: Option<ViewerStore>,
+    viewer_runtime: Option<SharedViewerRuntime>,
+    rollup_store: Option<RollupStore>,
+) -> Router {
     let state = AppState {
         stream_store,
         viewer_store,
         viewer_runtime,
+        rollup_store,
     };
     let connect = crate::grpc::build_connect_router(state.clone());
 
@@ -4524,6 +4539,7 @@ pub fn build_app_with_services(
         )
         .route("/api/dashboards/{id}/export", get(export_dashboard))
         .route("/api/traces/{trace_id}/waterfall", get(get_trace_waterfall))
+        .route("/api/rollups", get(get_rollups))
         .route("/v1/traces", post(ingest_traces))
         .route("/v1/metrics", post(ingest_metrics))
         .route("/v1/logs", post(ingest_logs))
@@ -5915,7 +5931,15 @@ async fn handle_ingest(
         Ok(entry) => {
             let mut stream_store = state.stream_store;
             match stream_store.append_entry(&entry).await {
-                Ok(_) => StatusCode::OK,
+                Ok(_) => {
+                    if let Some(rollup) = state.rollup_store.as_ref()
+                        && let Err(error) = rollup.record_entry(&entry).await
+                    {
+                        // Rollups are best-effort; ingest must not fail because of them.
+                        tracing::warn!("rollup record_entry failed: {error}");
+                    }
+                    StatusCode::OK
+                }
                 Err(error) => {
                     tracing::error!("stream append_entry failed: {error}");
                     StatusCode::INTERNAL_SERVER_ERROR
@@ -5928,6 +5952,82 @@ async fn handle_ingest(
             StatusCode::BAD_REQUEST
         }
     }
+}
+
+// --- Rollups ----------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct RollupQueryParams {
+    signal: String,
+    #[serde(default)]
+    resolution: Option<String>,
+    from: i64,
+    to: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct RollupBucketRow {
+    bucket_start_ms: i64,
+    count: u64,
+    by_service: std::collections::BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct RollupResponse {
+    signal: &'static str,
+    resolution: &'static str,
+    from_ms: i64,
+    to_ms: i64,
+    buckets: Vec<RollupBucketRow>,
+}
+
+const DEFAULT_ROLLUP_RESOLUTION: &str = "1m";
+
+async fn get_rollups(
+    State(state): State<AppState>,
+    Query(params): Query<RollupQueryParams>,
+) -> Result<Json<RollupResponse>, StatusCode> {
+    let signal = parse_signal_name(params.signal.trim()).ok_or(StatusCode::BAD_REQUEST)?;
+    let resolution_str = params
+        .resolution
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_ROLLUP_RESOLUTION);
+    let resolution = Resolution::parse(resolution_str).ok_or(StatusCode::BAD_REQUEST)?;
+
+    if params.from > params.to {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let store = state
+        .rollup_store
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let buckets = store
+        .fetch_range(signal, resolution, params.from, params.to)
+        .await
+        .map_err(|error| {
+            tracing::error!("rollup fetch_range failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let buckets = buckets
+        .into_iter()
+        .map(|bucket| RollupBucketRow {
+            bucket_start_ms: bucket.bucket_start_seconds.saturating_mul(1_000),
+            count: bucket.count,
+            by_service: bucket.by_service,
+        })
+        .collect();
+
+    Ok(Json(RollupResponse {
+        signal: signal_name(signal),
+        resolution: resolution.as_str(),
+        from_ms: params.from,
+        to_ms: params.to,
+        buckets,
+    }))
 }
 
 fn map_entries_to_rows<'a>(
