@@ -3,6 +3,7 @@ use crate::domain::dashboard::{
     DashboardDefinition, PanelInput, build_layout_json, panel_inputs_from_viewer_ids,
 };
 use crate::domain::incident::{Incident, IncidentStatus, validate_transition};
+use crate::domain::slo::{SloDefinition, SloFilterClause, SloFilterList};
 use crate::domain::telemetry::{NormalizedEntry, Signal, SignalMask};
 use crate::domain::viewer::{ViewerDefinition, ViewerStatus};
 use crate::ingest::decode::{DecodeError, decompress_body, parse_content_encoding};
@@ -13,7 +14,9 @@ use crate::ingest::otlp_pb::payload_as_value;
 use crate::notifications::{
     NotificationChannel, NotificationPayload, dispatch_to_channel, webhook::WebhookConfig,
 };
+use crate::slo::calculator::{CompiledSlo, ErrorBudget};
 use crate::storage::rollup::{Resolution, RollupStore};
+use crate::storage::slo_store::SloStore;
 use crate::storage::{IncidentStore, StreamStore, ViewerStore};
 use crate::viewer_runtime::compiler::{
     CompiledViewer, compile, extract_searchable_payload_text, query_from_definition,
@@ -1468,6 +1471,39 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       #preview-chart-container {
         max-height: 220px;
       }
+
+      .slo-budget-bar {
+        position: relative;
+        height: 16px;
+        background: rgba(184, 64, 52, 0.18);
+        border-radius: 6px;
+        overflow: hidden;
+      }
+      .slo-budget-bar-fill {
+        height: 100%;
+        background: var(--teal);
+        transition: width 0.3s ease;
+      }
+      .slo-budget-bar.warn .slo-budget-bar-fill {
+        background: #c8932a;
+      }
+      .slo-budget-bar.crit .slo-budget-bar-fill {
+        background: var(--accent);
+      }
+      .slo-budget-bar-label {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 11px;
+        color: var(--ink);
+        font-variant-numeric: tabular-nums;
+      }
+      #slo-list-table th,
+      #slo-list-table td {
+        border-bottom: 1px solid var(--line);
+      }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
   </head>
@@ -1481,6 +1517,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         <a id="nav-traces" class="sidebar-item" href="#traces" data-page="traces">Traces</a>
         <a id="nav-alerts" class="sidebar-item" href="#alerts" data-page="alerts">Alerts</a>
         <a id="nav-incidents" class="sidebar-item" href="#incidents" data-page="incidents">Incidents</a>
+        <a id="nav-slos" class="sidebar-item" href="#slos" data-page="slos">SLOs</a>
         <div class="sidebar-section-label">Dashboards</div>
         <div id="dashboard-list"></div>
         <button id="new-dashboard-button" class="secondary sidebar-new-btn" type="button">+ New Dashboard</button>
@@ -1972,6 +2009,36 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           </div>
         </section>
       </div><!-- #page-notifications -->
+
+      <div id="page-slos" hidden>
+        <section class="toolbar panel panel-strong">
+          <div class="toolbar-row">
+            <h2 style="margin:0;font-size:18px;">SLOs &amp; Error Budgets</h2>
+            <button id="refresh-slos-button" class="secondary btn-compact" type="button">Refresh</button>
+            <button id="new-slo-button" class="primary" type="button">+ New SLO</button>
+          </div>
+          <div id="slo-status-box" class="status-box" data-state="working">Loading SLOs...</div>
+        </section>
+
+        <section class="panel" id="slo-list-panel">
+          <div id="slo-empty" class="status-box" data-state="empty" hidden>
+            No SLOs yet. Click <strong>+ New SLO</strong> to define one.
+          </div>
+          <table id="slo-list-table" style="width:100%;border-collapse:collapse;" hidden>
+            <thead>
+              <tr>
+                <th style="text-align:left;padding:8px;">Name</th>
+                <th style="text-align:left;padding:8px;">Target</th>
+                <th style="text-align:left;padding:8px;">Window</th>
+                <th style="text-align:left;padding:8px;">Current</th>
+                <th style="text-align:left;padding:8px;width:30%;">Remaining budget</th>
+                <th style="text-align:left;padding:8px;">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="slo-list-body"></tbody>
+          </table>
+        </section>
+      </div><!-- #page-slos -->
     </main>
 
     <script>
@@ -3550,6 +3617,14 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const pageDashboard = document.getElementById('page-dashboard');
       const pageIncidents = document.getElementById('page-incidents');
       const pageNotifications = document.getElementById('page-notifications');
+      const pageSlos = document.getElementById('page-slos');
+      const navSlos = document.getElementById('nav-slos');
+      const sloStatusBox = document.getElementById('slo-status-box');
+      const sloListTable = document.getElementById('slo-list-table');
+      const sloListBody = document.getElementById('slo-list-body');
+      const sloEmpty = document.getElementById('slo-empty');
+      const newSloButton = document.getElementById('new-slo-button');
+      const refreshSlosButton = document.getElementById('refresh-slos-button');
       const dashboardTitle = document.getElementById('dashboard-title');
       const dashboardGrid = document.getElementById('dashboard-grid');
       const dashboardRefreshIntervalSelect = document.getElementById('dashboard-refresh-interval');
@@ -3735,6 +3810,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         if (pageAlertsEl) pageAlertsEl.hidden = page !== 'alerts';
         pageIncidents.hidden = page !== 'incidents';
         pageNotifications.hidden = page !== 'notifications';
+        if (pageSlos) pageSlos.hidden = page !== 'slos';
 
         navViewers.classList.toggle('active', page === 'viewers');
         const navWaterfallEl = document.getElementById('nav-waterfall');
@@ -3750,12 +3826,17 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         if (navNotifications) {
           navNotifications.classList.toggle('active', page === 'notifications');
         }
+        if (navSlos) navSlos.classList.toggle('active', page === 'slos');
 
         document.querySelectorAll('.sidebar-dashboard-item').forEach(el => {
           el.classList.toggle('active', el.dataset.id === dashboardId);
         });
 
         updateDashboardRefreshControls();
+
+        if (page === 'slos') {
+          refreshSlos();
+        }
 
         if (page === 'dashboard' && dashboardId) {
           setDashboardLastUpdated(null);
@@ -5281,6 +5362,10 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           navigateTo('notifications');
           return;
         }
+        if (window.location.hash === '#slos') {
+          navigateTo('slos');
+          return;
+        }
         if (
           window.location.hash === '#viewers' ||
           window.location.hash === ''
@@ -5684,6 +5769,292 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         refreshNotificationChannelsButton.addEventListener('click', () => refreshNotificationChannels());
       }
 
+      // --- SLO tab ---------------------------------------------------------
+
+      function setSloStatus(state, message) {
+        if (!sloStatusBox) return;
+        sloStatusBox.dataset.state = state;
+        sloStatusBox.textContent = message;
+      }
+
+      function formatWindowMs(ms) {
+        if (!Number.isFinite(ms) || ms <= 0) return `${ms}ms`;
+        const sec = Math.round(ms / 1000);
+        if (sec < 60) return `${sec}s`;
+        const min = Math.round(sec / 60);
+        if (min < 60) return `${min}m`;
+        const hr = Math.round(min / 60);
+        if (hr < 24) return `${hr}h`;
+        const day = Math.round(hr / 24);
+        return `${day}d`;
+      }
+
+      function pctClass(remainingPct) {
+        if (remainingPct < 20) return 'crit';
+        if (remainingPct < 50) return 'warn';
+        return '';
+      }
+
+      function renderBudgetCell(td, budget) {
+        const remaining = budget && Number.isFinite(budget.remaining_pct) ? budget.remaining_pct : 100;
+        const current = budget && Number.isFinite(budget.current_pct) ? budget.current_pct : 100;
+        const wrap = document.createElement('div');
+        wrap.className = `slo-budget-bar ${pctClass(remaining)}`.trim();
+        const fill = document.createElement('div');
+        fill.className = 'slo-budget-bar-fill';
+        fill.style.width = `${Math.max(0, Math.min(100, remaining)).toFixed(1)}%`;
+        const label = document.createElement('div');
+        label.className = 'slo-budget-bar-label';
+        label.textContent = `${remaining.toFixed(2)}% remaining (current ${current.toFixed(2)}%)`;
+        wrap.appendChild(fill);
+        wrap.appendChild(label);
+        td.replaceChildren(wrap);
+      }
+
+      async function fetchBudget(id) {
+        try {
+          const r = await fetch(`/api/slos/${id}/budget`, { headers: { accept: 'application/json' } });
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return await r.json();
+        } catch (err) {
+          return null;
+        }
+      }
+
+      async function refreshSlos() {
+        setSloStatus('working', 'Loading SLOs...');
+        let payload;
+        try {
+          const r = await fetch('/api/slos', { headers: { accept: 'application/json' } });
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          payload = await r.json();
+        } catch (err) {
+          setSloStatus('error', `Failed to load SLOs: ${err.message}`);
+          return;
+        }
+
+        const slos = (payload && payload.slos) || [];
+        sloListBody.replaceChildren();
+        if (!slos.length) {
+          sloListTable.hidden = true;
+          sloEmpty.hidden = false;
+          setSloStatus('ok', 'No SLOs configured.');
+          return;
+        }
+        sloListTable.hidden = false;
+        sloEmpty.hidden = true;
+
+        for (const slo of slos) {
+          const tr = document.createElement('tr');
+          tr.dataset.id = slo.id;
+
+          const nameTd = document.createElement('td');
+          nameTd.style.padding = '8px';
+          nameTd.textContent = slo.name;
+          tr.appendChild(nameTd);
+
+          const targetTd = document.createElement('td');
+          targetTd.style.padding = '8px';
+          targetTd.textContent = `${slo.target_pct}%`;
+          tr.appendChild(targetTd);
+
+          const windowTd = document.createElement('td');
+          windowTd.style.padding = '8px';
+          windowTd.textContent = formatWindowMs(slo.window_ms);
+          tr.appendChild(windowTd);
+
+          const currentTd = document.createElement('td');
+          currentTd.style.padding = '8px';
+          currentTd.textContent = '...';
+          tr.appendChild(currentTd);
+
+          const budgetTd = document.createElement('td');
+          budgetTd.style.padding = '8px';
+          budgetTd.textContent = 'Loading...';
+          tr.appendChild(budgetTd);
+
+          const actionsTd = document.createElement('td');
+          actionsTd.style.padding = '8px';
+          const delBtn = document.createElement('button');
+          delBtn.className = 'secondary btn-compact';
+          delBtn.type = 'button';
+          delBtn.textContent = 'Delete';
+          delBtn.addEventListener('click', async () => {
+            if (!window.confirm(`Delete SLO "${slo.name}"?`)) return;
+            try {
+              const r = await fetch(`/api/slos/${slo.id}`, { method: 'DELETE' });
+              if (!r.ok && r.status !== 204) throw new Error(`HTTP ${r.status}`);
+              refreshSlos();
+            } catch (err) {
+              setSloStatus('error', `Delete failed: ${err.message}`);
+            }
+          });
+          actionsTd.appendChild(delBtn);
+          tr.appendChild(actionsTd);
+
+          sloListBody.appendChild(tr);
+        }
+
+        setSloStatus('ok', `${slos.length} SLO${slos.length === 1 ? '' : 's'} configured.`);
+
+        await Promise.all(slos.map(async (slo) => {
+          const tr = sloListBody.querySelector(`tr[data-id="${slo.id}"]`);
+          if (!tr) return;
+          const budget = await fetchBudget(slo.id);
+          const currentTd = tr.children[3];
+          const budgetTd = tr.children[4];
+          if (!budget) {
+            currentTd.textContent = 'n/a';
+            budgetTd.textContent = 'n/a';
+            return;
+          }
+          currentTd.textContent = `${budget.current_pct.toFixed(2)}% (${budget.success_count}/${budget.total_count})`;
+          renderBudgetCell(budgetTd, budget);
+        }));
+      }
+
+      function openCreateSloModal() {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        const box = document.createElement('div');
+        box.className = 'modal-box';
+
+        const title = document.createElement('h3');
+        title.textContent = 'New SLO';
+        title.style.marginTop = '0';
+        box.appendChild(title);
+
+        const fieldset = document.createElement('div');
+        fieldset.style.display = 'grid';
+        fieldset.style.gap = '8px';
+
+        const nameInput = document.createElement('input');
+        nameInput.placeholder = 'Name (e.g. checkout availability)';
+        nameInput.maxLength = 120;
+        fieldset.appendChild(nameInput);
+
+        const targetInput = document.createElement('input');
+        targetInput.type = 'number';
+        targetInput.min = '0';
+        targetInput.max = '100';
+        targetInput.step = '0.01';
+        targetInput.placeholder = 'Target % (e.g. 99.5)';
+        fieldset.appendChild(targetInput);
+
+        const windowInput = document.createElement('input');
+        windowInput.type = 'number';
+        windowInput.min = '1';
+        windowInput.placeholder = 'Window minutes (e.g. 60)';
+        fieldset.appendChild(windowInput);
+
+        const viewerSelect = document.createElement('select');
+        const noneOpt = document.createElement('option');
+        noneOpt.value = '';
+        noneOpt.textContent = '(no source viewer)';
+        viewerSelect.appendChild(noneOpt);
+        fetch('/api/viewers', { headers: { accept: 'application/json' } })
+          .then(r => r.ok ? r.json() : { viewers: [] })
+          .then(data => {
+            for (const v of (data.viewers || [])) {
+              const o = document.createElement('option');
+              o.value = v.id;
+              o.textContent = v.name;
+              viewerSelect.appendChild(o);
+            }
+          })
+          .catch(() => {});
+        fieldset.appendChild(viewerSelect);
+
+        const successInput = document.createElement('input');
+        successInput.placeholder = 'Success service_name (optional, eq match)';
+        fieldset.appendChild(successInput);
+
+        const totalInput = document.createElement('input');
+        totalInput.placeholder = 'Total service_name (optional, eq match)';
+        fieldset.appendChild(totalInput);
+
+        box.appendChild(fieldset);
+
+        const errMsg = document.createElement('div');
+        errMsg.style.color = 'var(--accent-strong)';
+        errMsg.style.fontSize = '12px';
+        errMsg.style.marginTop = '8px';
+        box.appendChild(errMsg);
+
+        const actions = document.createElement('div');
+        actions.className = 'modal-actions';
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'secondary';
+        cancelBtn.type = 'button';
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.addEventListener('click', () => overlay.remove());
+        const createBtn = document.createElement('button');
+        createBtn.className = 'primary';
+        createBtn.type = 'button';
+        createBtn.textContent = 'Create';
+        createBtn.addEventListener('click', async () => {
+          const name = nameInput.value.trim();
+          const target_pct = Number.parseFloat(targetInput.value);
+          const minutes = Number.parseInt(windowInput.value, 10);
+          if (!name) { errMsg.textContent = 'Name is required.'; return; }
+          if (!Number.isFinite(target_pct) || target_pct < 0 || target_pct > 100) {
+            errMsg.textContent = 'Target must be between 0 and 100.'; return;
+          }
+          if (!Number.isFinite(minutes) || minutes <= 0) {
+            errMsg.textContent = 'Window must be a positive integer (minutes).'; return;
+          }
+          const success_filters = successInput.value.trim()
+            ? [{ field: 'service_name', op: 'eq', value: successInput.value.trim() }]
+            : [];
+          const total_filters = totalInput.value.trim()
+            ? [{ field: 'service_name', op: 'eq', value: totalInput.value.trim() }]
+            : [];
+          const body = {
+            name,
+            target_pct,
+            window_ms: minutes * 60_000,
+            success_filters,
+            total_filters,
+          };
+          if (viewerSelect.value) body.viewer_id = viewerSelect.value;
+          createBtn.disabled = true;
+          try {
+            const r = await fetch('/api/slos', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json', accept: 'application/json' },
+              body: JSON.stringify(body),
+            });
+            if (!r.ok) {
+              const txt = await r.text();
+              throw new Error(`HTTP ${r.status}: ${txt}`);
+            }
+            overlay.remove();
+            refreshSlos();
+          } catch (err) {
+            errMsg.textContent = `Create failed: ${err.message}`;
+            createBtn.disabled = false;
+          }
+        });
+        actions.appendChild(cancelBtn);
+        actions.appendChild(createBtn);
+        box.appendChild(actions);
+
+        overlay.appendChild(box);
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+        document.body.appendChild(overlay);
+        nameInput.focus();
+      }
+
+      if (newSloButton) newSloButton.addEventListener('click', openCreateSloModal);
+      if (refreshSlosButton) refreshSlosButton.addEventListener('click', () => refreshSlos());
+      if (navSlos) {
+        navSlos.addEventListener('click', (e) => {
+          e.preventDefault();
+          window.location.hash = '#slos';
+          if (window.location.hash === '#slos') navigateTo('slos');
+        });
+      }
+
       // --- Polling ---------------------------------------------------------
 
       refreshDashboardList();
@@ -5709,6 +6080,7 @@ pub struct AppState {
     /// `None` in standalone (in-memory) mode -- index writes / lookups become no-ops.
     pub attr_index: Option<crate::storage::attr_index::AttrIndexStore>,
     pub incident_store: IncidentStore,
+    pub slo_store: Option<SloStore>,
 }
 
 pub type SharedViewerRuntime = Arc<Mutex<ViewerRuntime>>;
@@ -5736,6 +6108,12 @@ impl AppState {
         &self,
     ) -> Result<&crate::storage::attr_index::AttrIndexStore, StatusCode> {
         self.attr_index
+            .as_ref()
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)
+    }
+
+    fn require_slo_store(&self) -> Result<&SloStore, StatusCode> {
+        self.slo_store
             .as_ref()
             .ok_or(StatusCode::SERVICE_UNAVAILABLE)
     }
@@ -6024,17 +6402,22 @@ pub fn build_app_with_full_services(
         alert_store,
         None,
         None,
+        None,
     )
 }
 
-/// Full builder that also accepts an optional attribute inverted index and an
-/// optional incident store.
+/// Full builder that also accepts an optional attribute inverted index, an
+/// optional incident store, and an optional SLO store.
 ///
 /// `attr_index` is `None` in standalone (in-memory) mode; the `/api/attributes`
 /// endpoints then return 503 and ingest skips index writes.
 ///
 /// `incident_store` is `None` in standalone (in-memory) mode; an in-memory
 /// incident store is used so the incident endpoints remain functional.
+///
+/// `slo_store` is `None` when no SLO storage backend is wired; the `/api/slos`
+/// endpoints then return 503.
+#[allow(clippy::too_many_arguments)]
 pub fn build_app_with_services_full(
     stream_store: StreamStore,
     viewer_store: Option<ViewerStore>,
@@ -6043,6 +6426,7 @@ pub fn build_app_with_services_full(
     alert_store: Option<crate::storage::alert_store::AlertStore>,
     attr_index: Option<crate::storage::attr_index::AttrIndexStore>,
     incident_store: Option<IncidentStore>,
+    slo_store: Option<SloStore>,
 ) -> Router {
     let incident_store = incident_store.unwrap_or_else(|| {
         IncidentStore::Memory(crate::storage::memory::MemoryIncidentStore::new())
@@ -6055,6 +6439,7 @@ pub fn build_app_with_services_full(
         alert_store,
         attr_index,
         incident_store,
+        slo_store,
     };
     let connect = crate::grpc::build_connect_router(state.clone());
 
@@ -6113,6 +6498,9 @@ pub fn build_app_with_services_full(
             "/api/notification-channels/{id}/test",
             post(test_notification_channel),
         )
+        .route("/api/slos", get(list_slos).post(create_slo))
+        .route("/api/slos/{id}", get(get_slo).delete(delete_slo))
+        .route("/api/slos/{id}/budget", get(get_slo_budget))
         .route("/v1/traces", post(ingest_traces))
         .route("/v1/metrics", post(ingest_metrics))
         .route("/v1/logs", post(ingest_logs))
@@ -8839,6 +9227,193 @@ async fn patch_incident(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     Ok(Json(updated))
+}
+
+// --- SLO API ----------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct CreateSloRequest {
+    name: String,
+    #[serde(default)]
+    viewer_id: Option<Uuid>,
+    target_pct: f64,
+    window_ms: i64,
+    #[serde(default)]
+    success_filters: Vec<SloFilterClause>,
+    #[serde(default)]
+    total_filters: Vec<SloFilterClause>,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateSloResponse {
+    id: Uuid,
+}
+
+#[derive(Debug, Serialize)]
+struct SloSummary {
+    id: Uuid,
+    name: String,
+    viewer_id: Option<Uuid>,
+    target_pct: f64,
+    window_ms: i64,
+    success_filters: Vec<SloFilterClause>,
+    total_filters: Vec<SloFilterClause>,
+    enabled: bool,
+}
+
+impl From<SloDefinition> for SloSummary {
+    fn from(def: SloDefinition) -> Self {
+        Self {
+            id: def.id,
+            name: def.name,
+            viewer_id: def.viewer_id,
+            target_pct: def.target_pct,
+            window_ms: def.window_ms,
+            success_filters: def.success_filter.filters,
+            total_filters: def.total_filter.filters,
+            enabled: def.enabled,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct SloListResponse {
+    slos: Vec<SloSummary>,
+}
+
+async fn list_slos(State(state): State<AppState>) -> Result<Json<SloListResponse>, StatusCode> {
+    let store = state.require_slo_store()?;
+    let slos = store.list().await.map_err(|e| {
+        tracing::error!("list_slos failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(Json(SloListResponse {
+        slos: slos.into_iter().map(SloSummary::from).collect(),
+    }))
+}
+
+async fn create_slo(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateSloRequest>,
+) -> Result<(StatusCode, Json<CreateSloResponse>), StatusCode> {
+    let store = state.require_slo_store()?;
+
+    let name = payload.name.trim().to_string();
+    if name.is_empty() || name.chars().count() > 120 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let definition = SloDefinition {
+        id: Uuid::new_v4(),
+        name,
+        viewer_id: payload.viewer_id,
+        target_pct: payload.target_pct,
+        window_ms: payload.window_ms,
+        success_filter: SloFilterList {
+            filters: payload.success_filters,
+        },
+        total_filter: SloFilterList {
+            filters: payload.total_filters,
+        },
+        enabled: true,
+    };
+
+    // Validate target/window/filter syntax up front so bad payloads get 400.
+    CompiledSlo::compile(&definition).map_err(|e| {
+        tracing::warn!("create_slo: compile failed: {e}");
+        StatusCode::BAD_REQUEST
+    })?;
+
+    store.insert(&definition).await.map_err(|e| {
+        tracing::error!("create_slo: insert failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateSloResponse { id: definition.id }),
+    ))
+}
+
+async fn get_slo(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<SloSummary>, StatusCode> {
+    let store = state.require_slo_store()?;
+    let slo = store
+        .get(id)
+        .await
+        .map_err(|e| {
+            tracing::error!("get_slo failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(SloSummary::from(slo)))
+}
+
+async fn delete_slo(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, StatusCode> {
+    let store = state.require_slo_store()?;
+    let removed = store.delete(id).await.map_err(|e| {
+        tracing::error!("delete_slo failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    if removed {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
+}
+
+async fn get_slo_budget(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ErrorBudget>, StatusCode> {
+    let store = state.require_slo_store()?;
+    let slo = store
+        .get(id)
+        .await
+        .map_err(|e| {
+            tracing::error!("get_slo_budget: storage error: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // A persisted SLO that no longer compiles is a server-side data corruption
+    // bug, not a client error -- return 500 for any compile failure here.
+    let compiled = CompiledSlo::compile(&slo).map_err(|e| {
+        tracing::error!("get_slo_budget: compile failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let now = Utc::now();
+    let entries = collect_slo_entries(&state, slo.viewer_id).await?;
+    let budget = compiled.evaluate(&entries, now);
+    Ok(Json(budget))
+}
+
+/// Collects entries from the viewer runtime to evaluate the SLO against.
+///
+/// When `viewer_id` is provided, uses that viewer's in-memory entries;
+/// when None, returns an empty list (a not-yet-bound SLO has nothing to score).
+async fn collect_slo_entries(
+    state: &AppState,
+    viewer_id: Option<Uuid>,
+) -> Result<Vec<NormalizedEntry>, StatusCode> {
+    let Some(viewer_id) = viewer_id else {
+        return Ok(Vec::new());
+    };
+    let runtime = state.require_viewer_runtime()?.lock().await;
+    let Some((_, viewer_state)) = runtime
+        .viewers()
+        .iter()
+        .find(|(viewer, _)| viewer.definition().id == viewer_id)
+    else {
+        // Bound viewer was deleted: treat as no entries (budget = 100% / 0 total).
+        return Ok(Vec::new());
+    };
+    Ok(viewer_state.entries.clone())
 }
 
 #[cfg(test)]

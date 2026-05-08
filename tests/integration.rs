@@ -7831,6 +7831,7 @@ async fn test_attribute_index_records_and_serves_attributes() {
         None,
         Some(attr_index),
         None,
+        None,
     );
 
     // Ingest a JSON trace payload carrying http.route and http.method.
@@ -8019,6 +8020,7 @@ async fn setup_incident_app() -> IncidentTestEnv {
         None,
         None,
         Some(IncidentStore::Postgres(pg)),
+        None,
     );
     IncidentTestEnv {
         app,
@@ -8447,4 +8449,181 @@ async fn test_notification_channel_crud_and_test_endpoint_postgres() {
     let payloads = received.lock().await;
     assert_eq!(payloads.len(), 1);
     assert_eq!(payloads[0]["severity"], "info");
+}
+
+// --- SLO + Error Budget -----------------------------------------------------
+
+async fn setup_slo_app() -> ViewerTestEnv {
+    use litelemetry::server::build_app_with_services_full;
+    use litelemetry::storage::slo_store::{PostgresSloStore, SloStore};
+
+    let (redis_container, pg_container) =
+        tokio::join!(Redis::default().start(), Postgres::default().start(),);
+    let redis_container = redis_container.unwrap();
+    let pg_container = pg_container.unwrap();
+    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
+    let pg_port = pg_container.get_host_port_ipv4(5432).await.unwrap();
+
+    let pg = make_postgres_store(pg_port).await;
+    pg.create_schema().await.unwrap();
+
+    let redis = make_redis_store(redis_port).await;
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Postgres(pg.clone()),
+        StreamStore::Redis(redis.clone()),
+    )
+    .await
+    .unwrap();
+    let runtime = Arc::new(Mutex::new(runtime));
+
+    let slo_store = SloStore::Postgres(PostgresSloStore::new(pg.pool()));
+    let app = build_app_with_services_full(
+        StreamStore::Redis(redis),
+        Some(ViewerStore::Postgres(pg)),
+        Some(runtime),
+        None,
+        None,
+        None,
+        None,
+        Some(slo_store),
+    );
+
+    ViewerTestEnv {
+        app,
+        _redis_container: redis_container,
+        _pg_container: pg_container,
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_slo_create_and_evaluate_budget() {
+    let env = setup_slo_app().await;
+    let app = env.app;
+
+    // 1. Ingest 8 success entries (ok-svc) and 2 error entries (err-svc) BEFORE
+    //    creating the viewer so that `add_viewer` picks them up via
+    //    populate_state_from_stream and we don't need to drive the runtime tick.
+    for _ in 0..8 {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/traces")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(make_trace_payload(
+                        "ok-svc",
+                        "render-checkout",
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+    for _ in 0..2 {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/traces")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(make_trace_payload(
+                        "err-svc",
+                        "render-checkout",
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // 2. Create the source viewer. add_viewer reads the existing stream so the
+    //    viewer is created with all 10 entries already populated.
+    let viewer_resp = send_json_request(
+        &app,
+        "POST",
+        "/api/viewers",
+        json!({ "name": "checkout-traces", "signal": "traces" }),
+    )
+    .await;
+    assert_eq!(viewer_resp.status(), StatusCode::CREATED);
+    let viewer_id = response_json(viewer_resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Sanity check: the viewer reports 10 entries before we create the SLO.
+    let viewers_body = response_json(send_get_request(&app, "/api/viewers").await).await;
+    let entry_count = viewers_body["viewers"][0]["entry_count"]
+        .as_u64()
+        .unwrap_or(0);
+    assert_eq!(entry_count, 10, "expected 10 entries, got {entry_count}");
+
+    // 4. Create the SLO bound to that viewer; success = service_name == ok-svc.
+    let slo_resp = send_json_request(
+        &app,
+        "POST",
+        "/api/slos",
+        json!({
+            "name": "checkout availability",
+            "viewer_id": viewer_id,
+            "target_pct": 99.0,
+            "window_ms": 60_000,
+            "success_filters": [
+                { "field": "service_name", "op": "eq", "value": "ok-svc" }
+            ],
+            "total_filters": []
+        }),
+    )
+    .await;
+    assert_eq!(slo_resp.status(), StatusCode::CREATED);
+    let slo_id = response_json(slo_resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 5. Listing should include the SLO.
+    let list_resp = send_get_request(&app, "/api/slos").await;
+    assert_eq!(list_resp.status(), StatusCode::OK);
+    let list_body = response_json(list_resp).await;
+    let slos = list_body["slos"].as_array().unwrap();
+    assert_eq!(slos.len(), 1);
+    assert_eq!(slos[0]["name"], "checkout availability");
+
+    // 6. Budget should report 80% current_pct and consumed_pct=100% (target=99 means
+    //    1% allowed errors but observed 20%).
+    let budget_resp = send_get_request(&app, format!("/api/slos/{slo_id}/budget")).await;
+    assert_eq!(budget_resp.status(), StatusCode::OK);
+    let budget = response_json(budget_resp).await;
+    assert_eq!(budget["window_ms"], 60_000);
+    assert_eq!(budget["target_pct"].as_f64().unwrap(), 99.0);
+    assert_eq!(budget["total_count"].as_u64().unwrap(), 10);
+    assert_eq!(budget["success_count"].as_u64().unwrap(), 8);
+    let current = budget["current_pct"].as_f64().unwrap();
+    assert!((current - 80.0).abs() < 0.5, "current_pct={current}");
+    assert_eq!(budget["consumed_pct"].as_f64().unwrap(), 100.0);
+    assert_eq!(budget["remaining_pct"].as_f64().unwrap(), 0.0);
+
+    // 7. Get details by id and delete.
+    let detail = response_json(send_get_request(&app, format!("/api/slos/{slo_id}")).await).await;
+    assert_eq!(detail["target_pct"].as_f64().unwrap(), 99.0);
+
+    let del = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/slos/{slo_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(del.status(), StatusCode::NO_CONTENT);
+    let after = send_get_request(&app, format!("/api/slos/{slo_id}")).await;
+    assert_eq!(after.status(), StatusCode::NOT_FOUND);
 }

@@ -72,6 +72,17 @@ CREATE TABLE IF NOT EXISTS notification_channels (
     enabled BOOLEAN NOT NULL DEFAULT TRUE
 );
 
+CREATE TABLE IF NOT EXISTS slo_definitions (
+    id UUID PRIMARY KEY,
+    name TEXT NOT NULL,
+    viewer_id UUID,
+    target_pct DOUBLE PRECISION NOT NULL,
+    window_ms BIGINT NOT NULL,
+    success_filter_json JSONB NOT NULL,
+    total_filter_json JSONB NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE
+);
+
 
 INSERT INTO viewer_definitions (
     id,

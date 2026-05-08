@@ -5,6 +5,7 @@ pub mod memory;
 pub mod postgres;
 pub mod redis;
 pub mod rollup;
+pub mod slo_store;
 
 pub use incident_store::IncidentStore;
 
