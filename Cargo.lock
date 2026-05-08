@@ -307,9 +307,9 @@ dependencies = [
 
 [[package]]
 name = "buffa"
-version = "0.5.1"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01ca40a275c18a1056fb8077e5016a95089fa9873e3b11db0e734aff714cfb96"
+checksum = "e7a22fed63b429c4928fd5ed18dcacd3a98d0df1f06cd7cf651b2bbf3dbf0500"
 dependencies = [
  "base64",
  "bytes",
