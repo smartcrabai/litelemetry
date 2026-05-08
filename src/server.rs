@@ -1565,6 +1565,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         <a id="nav-slos" class="sidebar-item" href="#slos" data-page="slos">SLOs</a>
         <a id="nav-query" class="sidebar-item" href="#query" data-page="query">Query</a>
         <a id="nav-anomaly" class="sidebar-item" href="#anomaly" data-page="anomaly">Anomaly</a>
+        <a id="nav-db-insights" class="sidebar-item" href="#db-insights" data-page="db-insights">DB Insights</a>
         <div class="sidebar-section-label">Dashboards</div>
         <div id="dashboard-list"></div>
         <button id="new-dashboard-button" class="secondary sidebar-new-btn" type="button">+ New Dashboard</button>
@@ -2287,6 +2288,78 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           </table>
         </section>
       </div><!-- #page-anomaly -->
+
+      <div id="page-db-insights" hidden>
+        <section class="toolbar panel panel-strong">
+          <div class="toolbar-row">
+            <h2 style="margin: 0;">DB Insights</h2>
+            <label for="db-insights-lookback">
+              Lookback
+              <select id="db-insights-lookback">
+                <option value="60000">1m</option>
+                <option value="300000">5m</option>
+                <option value="600000" selected>10m</option>
+                <option value="1800000">30m</option>
+                <option value="3600000">1h</option>
+              </select>
+            </label>
+            <label for="db-insights-min-p95">
+              Min p95 (ms)
+              <input id="db-insights-min-p95" type="number" min="0" step="1" value="10" style="width:80px;">
+            </label>
+            <label for="db-insights-min-repetitions">
+              N+1 threshold
+              <input id="db-insights-min-repetitions" type="number" min="2" step="1" value="5" style="width:80px;">
+            </label>
+            <button id="db-insights-refresh" class="primary" type="button">Refresh</button>
+          </div>
+          <div id="db-insights-status" class="status-box" data-state="idle">Ready.</div>
+        </section>
+
+        <section class="panel panel-strong stack table-wrap">
+          <h3 style="margin: 0;">Slow Queries</h3>
+          <div id="slow-queries-empty" class="empty">
+            <p>No slow queries detected in the selected window.</p>
+          </div>
+          <div id="slow-queries-wrap" class="table-scroll" hidden>
+            <table data-testid="slow-queries-table">
+              <thead>
+                <tr>
+                  <th>Statement</th>
+                  <th>System</th>
+                  <th>Count</th>
+                  <th>p50 (ms)</th>
+                  <th>p95 (ms)</th>
+                  <th>p99 (ms)</th>
+                  <th>Max (ms)</th>
+                </tr>
+              </thead>
+              <tbody id="slow-queries-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel panel-strong stack table-wrap">
+          <h3 style="margin: 0;">N+1 Detections</h3>
+          <div id="n-plus-one-empty" class="empty">
+            <p>No N+1 patterns detected in the selected window.</p>
+          </div>
+          <div id="n-plus-one-wrap" class="table-scroll" hidden>
+            <table data-testid="n-plus-one-table">
+              <thead>
+                <tr>
+                  <th>Trace ID</th>
+                  <th>Statement</th>
+                  <th>System</th>
+                  <th>Count</th>
+                  <th>Services</th>
+                </tr>
+              </thead>
+              <tbody id="n-plus-one-body"></tbody>
+            </table>
+          </div>
+        </section>
+      </div><!-- #page-db-insights -->
     </main>
 
     <script>
@@ -3957,6 +4030,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const navQuery = document.getElementById('nav-query');
       const navAnomaly = document.getElementById('nav-anomaly');
       const navErrors = document.getElementById('nav-errors');
+      const navDbInsights = document.getElementById('nav-db-insights');
       const newDashboardButton = document.getElementById('new-dashboard-button');
       const dashboardListEl = document.getElementById('dashboard-list');
       const pageViewers = document.getElementById('page-viewers');
@@ -3987,6 +4061,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const errorDetailMeta = document.getElementById('error-detail-meta');
       const errorDetailStacktrace = document.getElementById('error-detail-stacktrace');
       const errorDetailClose = document.getElementById('error-detail-close');
+      const pageDbInsights = document.getElementById('page-db-insights');
       const dashboardTitle = document.getElementById('dashboard-title');
       const dashboardGrid = document.getElementById('dashboard-grid');
       const dashboardRefreshIntervalSelect = document.getElementById('dashboard-refresh-interval');
@@ -4179,6 +4254,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
         if (pageAnomaly) pageAnomaly.hidden = page !== 'anomaly';
         pageServiceMap.hidden = page !== 'service-map';
+        if (pageDbInsights) pageDbInsights.hidden = page !== 'db-insights';
 
         navViewers.classList.toggle('active', page === 'viewers');
         const navWaterfallEl = document.getElementById('nav-waterfall');
@@ -4201,6 +4277,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         if (navAnomaly) navAnomaly.classList.toggle('active', page === 'anomaly');
         navServiceMap.classList.toggle('active', page === 'service-map');
         navErrors.classList.toggle('active', page === 'errors');
+        if (navDbInsights) navDbInsights.classList.toggle('active', page === 'db-insights');
 
         document.querySelectorAll('.sidebar-dashboard-item').forEach(el => {
           el.classList.toggle('active', el.dataset.id === dashboardId);
@@ -4253,6 +4330,9 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
         if (page === 'errors') {
           loadErrorGroups();
+        }
+        if (page === 'db-insights') {
+          refreshDbInsights();
         }
         sidebar.classList.remove('open');
 
@@ -5360,6 +5440,120 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           anomalyStatus.textContent = `Evaluation failed: ${err.message}`;
         }
       });
+
+      navDbInsights.addEventListener('click', (e) => {
+        e.preventDefault();
+        navigateTo('db-insights');
+      });
+
+      // --- DB Insights -----------------------------------------------------
+      const dbInsightsLookbackEl = document.getElementById('db-insights-lookback');
+      const dbInsightsMinP95El = document.getElementById('db-insights-min-p95');
+      const dbInsightsMinRepetitionsEl = document.getElementById('db-insights-min-repetitions');
+      const dbInsightsRefreshBtn = document.getElementById('db-insights-refresh');
+      const dbInsightsStatus = document.getElementById('db-insights-status');
+      const slowQueriesBody = document.getElementById('slow-queries-body');
+      const slowQueriesEmpty = document.getElementById('slow-queries-empty');
+      const slowQueriesWrap = document.getElementById('slow-queries-wrap');
+      const nPlusOneBody = document.getElementById('n-plus-one-body');
+      const nPlusOneEmpty = document.getElementById('n-plus-one-empty');
+      const nPlusOneWrap = document.getElementById('n-plus-one-wrap');
+
+      function setDbInsightsStatus(state, message) {
+        dbInsightsStatus.dataset.state = state;
+        dbInsightsStatus.textContent = message;
+      }
+
+      function renderSlowQueries(rows) {
+        slowQueriesBody.innerHTML = '';
+        if (!rows || rows.length === 0) {
+          slowQueriesEmpty.hidden = false;
+          slowQueriesWrap.hidden = true;
+          return;
+        }
+        slowQueriesEmpty.hidden = true;
+        slowQueriesWrap.hidden = false;
+        for (const row of rows) {
+          const tr = document.createElement('tr');
+          const cells = [
+            row.statement || '',
+            row.system || '-',
+            String(row.count),
+            String(row.p50_ms),
+            String(row.p95_ms),
+            String(row.p99_ms),
+            String(row.max_ms),
+          ];
+          for (const text of cells) {
+            const td = document.createElement('td');
+            td.textContent = text;
+            tr.appendChild(td);
+          }
+          slowQueriesBody.appendChild(tr);
+        }
+      }
+
+      function renderNPlusOne(rows) {
+        nPlusOneBody.innerHTML = '';
+        if (!rows || rows.length === 0) {
+          nPlusOneEmpty.hidden = false;
+          nPlusOneWrap.hidden = true;
+          return;
+        }
+        nPlusOneEmpty.hidden = true;
+        nPlusOneWrap.hidden = false;
+        for (const row of rows) {
+          const tr = document.createElement('tr');
+          const services = (row.services || []).join(', ') || '-';
+          const cells = [
+            row.trace_id || '',
+            row.statement || '',
+            row.system || '-',
+            String(row.count),
+            services,
+          ];
+          for (const text of cells) {
+            const td = document.createElement('td');
+            td.textContent = text;
+            tr.appendChild(td);
+          }
+          nPlusOneBody.appendChild(tr);
+        }
+      }
+
+      async function refreshDbInsights() {
+        const lookbackMs = parseInt(dbInsightsLookbackEl.value, 10) || 600000;
+        const minP95 = parseInt(dbInsightsMinP95El.value, 10);
+        const minRepetitions = parseInt(dbInsightsMinRepetitionsEl.value, 10);
+        setDbInsightsStatus('working', 'Loading...');
+        try {
+          const slowParams = new URLSearchParams({ lookback_ms: String(lookbackMs) });
+          if (Number.isFinite(minP95) && minP95 >= 0) {
+            slowParams.set('min_p95_ms', String(minP95));
+          }
+          const npParams = new URLSearchParams({ lookback_ms: String(lookbackMs) });
+          if (Number.isFinite(minRepetitions) && minRepetitions >= 1) {
+            npParams.set('min_repetitions', String(minRepetitions));
+          }
+          const [slowResp, npResp] = await Promise.all([
+            fetch(`/api/slow-queries?${slowParams}`, { headers: { accept: 'application/json' } }),
+            fetch(`/api/n-plus-one?${npParams}`, { headers: { accept: 'application/json' } }),
+          ]);
+          if (!slowResp.ok) throw new Error(`slow-queries: HTTP ${slowResp.status}`);
+          if (!npResp.ok) throw new Error(`n-plus-one: HTTP ${npResp.status}`);
+          const slowRows = await slowResp.json();
+          const npRows = await npResp.json();
+          renderSlowQueries(slowRows);
+          renderNPlusOne(npRows);
+          setDbInsightsStatus('idle',
+            `Slow queries: ${slowRows.length} | N+1: ${npRows.length}`);
+        } catch (err) {
+          setDbInsightsStatus('error', `Failed: ${err.message}`);
+        }
+      }
+
+      dbInsightsRefreshBtn.addEventListener('click', refreshDbInsights);
+      dbInsightsLookbackEl.addEventListener('change', refreshDbInsights);
 
       dashboardRefreshToggleButton.addEventListener('click', () => {
         if (dashboardRefreshIntervalMs === null) {
@@ -7413,6 +7607,8 @@ pub fn build_app_with_services_full(
         .route("/api/anomaly/evaluate", post(evaluate_anomaly))
         .route("/api/service-map", get(service_map))
         .route("/api/error-groups", get(list_error_groups))
+        .route("/api/slow-queries", get(list_slow_queries))
+        .route("/api/n-plus-one", get(list_n_plus_one))
         .route("/v1/traces", post(ingest_traces))
         .route("/v1/metrics", post(ingest_metrics))
         .route("/v1/logs", post(ingest_logs))
@@ -9560,6 +9756,99 @@ async fn test_notification_channel(
             ))
         }
     }
+}
+
+// --- APM: slow queries / N+1 ------------------------------------------------
+
+use crate::apm::slow_query::{
+    NPlusOneStats, SlowQueryStats, aggregate_slow_queries, detect_n_plus_one, extract_db_spans,
+};
+
+const DEFAULT_APM_LOOKBACK_MS: i64 = 5 * 60 * 1_000;
+const DEFAULT_SLOW_QUERY_MIN_P95_MS: u64 = 100;
+const DEFAULT_N_PLUS_ONE_MIN_REPETITIONS: usize = 5;
+
+#[derive(Debug, Deserialize)]
+struct SlowQueriesQuery {
+    #[serde(default)]
+    lookback_ms: Option<i64>,
+    #[serde(default)]
+    min_p95_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NPlusOneQuery {
+    #[serde(default)]
+    lookback_ms: Option<i64>,
+    #[serde(default)]
+    min_repetitions: Option<usize>,
+}
+
+/// Collects every traces [`NormalizedEntry`] currently held by the runtime,
+/// deduplicating across viewers and trimming to the requested lookback window.
+///
+/// The viewer runtime fans the same entries out to every traces-watching
+/// viewer, so we dedupe by `Bytes` pointer + observed_at.
+async fn collect_traces_entries(
+    runtime: &SharedViewerRuntime,
+    lookback_ms: i64,
+) -> Vec<NormalizedEntry> {
+    let cutoff = Utc::now() - chrono::Duration::milliseconds(lookback_ms);
+    let runtime = runtime.lock().await;
+
+    let mut seen: HashSet<(*const u8, usize, i64)> = HashSet::new();
+    let mut out: Vec<NormalizedEntry> = Vec::new();
+
+    for (_, state) in runtime.viewers() {
+        for entry in &state.entries {
+            if entry.signal != Signal::Traces || entry.observed_at < cutoff {
+                continue;
+            }
+            let key = (
+                entry.payload.as_ptr(),
+                entry.payload.len(),
+                entry.observed_at.timestamp_nanos_opt().unwrap_or(0),
+            );
+            if seen.insert(key) {
+                out.push(entry.clone());
+            }
+        }
+    }
+
+    out
+}
+
+async fn list_slow_queries(
+    State(state): State<AppState>,
+    Query(query): Query<SlowQueriesQuery>,
+) -> Result<Json<Vec<SlowQueryStats>>, StatusCode> {
+    let runtime = state.require_viewer_runtime()?;
+    let lookback_ms = query.lookback_ms.unwrap_or(DEFAULT_APM_LOOKBACK_MS).max(0);
+    let min_p95_ms = query.min_p95_ms.unwrap_or(DEFAULT_SLOW_QUERY_MIN_P95_MS);
+
+    let entries = collect_traces_entries(runtime, lookback_ms).await;
+    let facts = extract_db_spans(&entries);
+    let stats = aggregate_slow_queries(&facts, min_p95_ms).map_err(|error| {
+        tracing::error!("aggregate_slow_queries failed: {error}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(Json(stats))
+}
+
+async fn list_n_plus_one(
+    State(state): State<AppState>,
+    Query(query): Query<NPlusOneQuery>,
+) -> Result<Json<Vec<NPlusOneStats>>, StatusCode> {
+    let runtime = state.require_viewer_runtime()?;
+    let lookback_ms = query.lookback_ms.unwrap_or(DEFAULT_APM_LOOKBACK_MS).max(0);
+    let min_repetitions = query
+        .min_repetitions
+        .unwrap_or(DEFAULT_N_PLUS_ONE_MIN_REPETITIONS)
+        .max(1);
+
+    let entries = collect_traces_entries(runtime, lookback_ms).await;
+    let facts = extract_db_spans(&entries);
+    Ok(Json(detect_n_plus_one(&facts, min_repetitions)))
 }
 
 // --- Ingest -----------------------------------------------------------------

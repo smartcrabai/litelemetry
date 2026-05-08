@@ -9222,3 +9222,173 @@ async fn test_error_groups_aggregate_exceptions_by_fingerprint() {
         "RuntimeError group should have 2 occurrences"
     );
 }
+
+// --- DB Insights (slow query / N+1) -----------------------------------------
+
+fn make_db_trace_payload(
+    service_name: &str,
+    trace_id: &str,
+    spans: &[(&str, &str, &str, u64, u64)],
+) -> Bytes {
+    // (span_id, statement, db_system, start_ns, end_ns)
+    let span_values: Vec<serde_json::Value> = spans
+        .iter()
+        .map(|(span_id, statement, system, start, end)| {
+            json!({
+                "traceId": trace_id,
+                "spanId": span_id,
+                "name": "db.query",
+                "kind": 3,
+                "startTimeUnixNano": start.to_string(),
+                "endTimeUnixNano": end.to_string(),
+                "attributes": [
+                    {"key": "db.statement", "value": {"stringValue": statement}},
+                    {"key": "db.system", "value": {"stringValue": system}},
+                ],
+                "status": {"code": 0}
+            })
+        })
+        .collect();
+
+    Bytes::from(
+        json!({
+            "resourceSpans": [{
+                "resource": {
+                    "attributes": [
+                        {"key": "service.name", "value": {"stringValue": service_name}}
+                    ]
+                },
+                "scopeSpans": [{
+                    "scope": {"name": "integration-test"},
+                    "spans": span_values
+                }]
+            }]
+        })
+        .to_string(),
+    )
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_db_insights_endpoints_return_slow_queries_and_n_plus_one() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    // Trace A: 6 quick repeats of the same statement -> N+1.
+    let trace_a_payload = make_db_trace_payload(
+        "orders-api",
+        "00000000000000000000000000000001",
+        &[
+            (
+                "0000000000000001",
+                "SELECT * FROM items WHERE order_id = 1",
+                "postgresql",
+                0,
+                2_000_000,
+            ),
+            (
+                "0000000000000002",
+                "SELECT * FROM items WHERE order_id = 2",
+                "postgresql",
+                0,
+                2_000_000,
+            ),
+            (
+                "0000000000000003",
+                "SELECT * FROM items WHERE order_id = 3",
+                "postgresql",
+                0,
+                2_000_000,
+            ),
+            (
+                "0000000000000004",
+                "SELECT * FROM items WHERE order_id = 4",
+                "postgresql",
+                0,
+                2_000_000,
+            ),
+            (
+                "0000000000000005",
+                "SELECT * FROM items WHERE order_id = 5",
+                "postgresql",
+                0,
+                2_000_000,
+            ),
+            (
+                "0000000000000006",
+                "SELECT * FROM items WHERE order_id = 6",
+                "postgresql",
+                0,
+                2_000_000,
+            ),
+        ],
+    );
+
+    // Trace B: a single slow query (500ms)
+    let trace_b_payload = make_db_trace_payload(
+        "reports",
+        "00000000000000000000000000000002",
+        &[(
+            "0000000000000010",
+            "SELECT count(*) FROM big_table WHERE created_at > '2024-01-01'",
+            "postgresql",
+            0,
+            500_000_000,
+        )],
+    );
+
+    for body in [trace_a_payload, trace_b_payload] {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/traces")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // Create a traces viewer so the runtime fans the entries out into a
+    // viewer state that the APM endpoints can read from.
+    let viewer_id = create_viewer_id(&app, json!({"name": "All Traces", "signal": "traces"})).await;
+    assert!(!viewer_id.is_empty());
+
+    // Slow queries: a 500ms query should clearly clear a 50ms threshold.
+    let slow_resp =
+        send_get_request(&app, "/api/slow-queries?lookback_ms=600000&min_p95_ms=50").await;
+    assert_eq!(slow_resp.status(), StatusCode::OK);
+    let slow_rows = response_json(slow_resp).await;
+    let slow_arr = slow_rows.as_array().unwrap();
+    assert!(
+        slow_arr.iter().any(|row| row["statement"]
+            .as_str()
+            .unwrap_or("")
+            .contains("big_table")
+            && row["p95_ms"].as_u64().unwrap_or(0) >= 500),
+        "expected slow query for big_table, got: {slow_rows:?}"
+    );
+
+    // N+1: 6 repeats in trace A should be reported.
+    let np_resp =
+        send_get_request(&app, "/api/n-plus-one?lookback_ms=600000&min_repetitions=5").await;
+    assert_eq!(np_resp.status(), StatusCode::OK);
+    let np_rows = response_json(np_resp).await;
+    let np_arr = np_rows.as_array().unwrap();
+    let trace_a_hex = "00000000000000000000000000000001";
+    let detection = np_arr
+        .iter()
+        .find(|r| r["trace_id"].as_str().unwrap_or("") == trace_a_hex)
+        .unwrap_or_else(|| panic!("expected N+1 detection for {trace_a_hex}: {np_rows:?}"));
+    assert_eq!(detection["count"].as_u64(), Some(6));
+    assert_eq!(
+        detection["statement"].as_str().unwrap_or(""),
+        "SELECT * FROM items WHERE order_id = ?"
+    );
+    let services: Vec<String> = detection["services"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap_or("").to_string())
+        .collect();
+    assert!(services.contains(&"orders-api".to_string()));
+}
