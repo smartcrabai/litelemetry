@@ -11,9 +11,12 @@
 //! - `service_map`: extract service-to-service edges from OTLP spans for the Service Map tab.
 //! - `error_groups`: aggregate exception events from traces and ERROR-severity logs into
 //!   fingerprinted issue groups.
+//! - `slow_query`: detect slow database queries (p95) and N+1 patterns by aggregating
+//!   spans carrying `db.statement` / `db.system` attributes.
 
 pub mod error_groups;
 pub mod exemplars;
 pub mod service_map;
+pub mod slow_query;
 pub mod trace_search;
 pub mod waterfall;
