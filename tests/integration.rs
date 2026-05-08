@@ -8154,3 +8154,58 @@ async fn test_incident_full_lifecycle_open_ack_resolve_and_invalid_transitions()
         send_json_request(&app, "POST", "/api/incidents", json!({ "severity": "   " })).await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
+
+// --- aggregation engine -----------------------------------------------------
+
+/// Verifies the aggregation pipeline end-to-end against a Postgres + Redis
+/// stack: a viewer with `chart_type = timeseries` and `aggregation = count`
+/// must surface `aggregated_buckets` in `GET /api/viewers/{id}`.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_create_viewer_with_timeseries_aggregation_returns_buckets() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    // Ingest two traces so the runtime has at least one bucket.
+    for _ in 0..2 {
+        let trace_request = Request::builder()
+            .method("POST")
+            .uri("/v1/traces")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(make_trace_payload(
+                "checkout-ui",
+                "render-checkout",
+            )))
+            .unwrap();
+        let resp = app.clone().oneshot(trace_request).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    let viewer_id = create_viewer_id(
+        &app,
+        json!({
+            "name": "Trace rate",
+            "signal": "traces",
+            "chart_type": "timeseries",
+            "aggregation": { "fn": "count", "bucket_ms": 60_000 }
+        }),
+    )
+    .await;
+
+    let payload = fetch_viewer_payload(&app, &viewer_id).await;
+    assert_eq!(payload["chart_type"], "timeseries");
+    let buckets = payload["aggregated_buckets"]
+        .as_array()
+        .expect("aggregated_buckets must be present");
+    assert!(
+        !buckets.is_empty(),
+        "expected at least one bucket for ingested traces"
+    );
+    let total: f64 = buckets.iter().map(|b| b["value"].as_f64().unwrap()).sum();
+    assert!(
+        total >= 2.0,
+        "expected count to total at least 2, got {total} (buckets={buckets:?})"
+    );
+    assert_eq!(payload["aggregation"]["fn"], "count");
+    assert_eq!(payload["aggregation"]["bucket_ms"], 60_000);
+}

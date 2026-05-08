@@ -1502,6 +1502,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             <option value="pie">Pie</option>
             <option value="donut">Donut</option>
             <option value="billboard">Billboard</option>
+            <option value="timeseries">Timeseries</option>
           </select>
           <input id="viewer-name-input" data-testid="viewer-name-input" name="viewer-name" placeholder="checkout traces" maxlength="80" style="max-width: 200px;" list="viewer-name-datalist" aria-label="Viewer name" />
           <datalist id="viewer-name-datalist"></datalist>
@@ -2342,6 +2343,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         pie: 'Pie',
         donut: 'Donut',
         billboard: 'Billboard',
+        timeseries: 'Timeseries',
       };
       const CIRCULAR_CHART_TYPES = { pie: 'pie', donut: 'doughnut' };
       const MIN_DASHBOARD_COLUMNS = 1;
@@ -2811,7 +2813,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         const isStacked = chartType === 'stacked_bar';
         return { type: isStacked ? 'bar' : 'line', isStacked };
       }
-      function renderChart(chartType, entries, lookbackMs) {
+      function renderChart(chartType, entries, lookbackMs, aggregatedBuckets) {
         if (currentChart) {
           currentChart.destroy();
           currentChart = null;
@@ -2825,6 +2827,13 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         if (chartType === 'billboard') {
           viewerChartContainer.hidden = false;
           renderBillboard(entries, lookbackMs, viewerChartContainer);
+          return;
+        }
+
+        if (chartType === 'timeseries') {
+          viewerChartContainer.replaceChildren(viewerChartCanvas);
+          viewerChartContainer.hidden = false;
+          renderTimeseriesCanvas(viewerChartCanvas, aggregatedBuckets || []);
           return;
         }
 
@@ -2865,6 +2874,123 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             },
           },
         });
+      }
+
+      // Vanilla canvas-based line chart for timeseries aggregations.
+      // Each `aggregatedBuckets` entry is `{ bucket_start_ms, group_keys, value }`.
+      // Series are keyed by `group_keys.join(' / ')` (or 'all' if empty).
+      function renderTimeseriesCanvas(canvas, buckets) {
+        const ctx = canvas.getContext('2d');
+        const cssWidth = canvas.clientWidth || 600;
+        const cssHeight = canvas.clientHeight || 240;
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = cssWidth * dpr;
+        canvas.height = cssHeight * dpr;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, cssWidth, cssHeight);
+
+        if (!buckets || !buckets.length) {
+          ctx.fillStyle = '#5d6778';
+          ctx.font = '13px "Avenir Next", sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText('No aggregated data yet.', cssWidth / 2, cssHeight / 2);
+          return;
+        }
+
+        const seriesMap = new Map();
+        for (const b of buckets) {
+          const key = (b.group_keys && b.group_keys.length) ? b.group_keys.join(' / ') : 'all';
+          if (!seriesMap.has(key)) seriesMap.set(key, []);
+          seriesMap.get(key).push({ t: b.bucket_start_ms, v: b.value });
+        }
+        for (const arr of seriesMap.values()) arr.sort((a, b) => a.t - b.t);
+
+        const allTs = buckets.map(b => b.bucket_start_ms);
+        const allVs = buckets.map(b => b.value);
+        const minT = Math.min(...allTs);
+        const maxT = Math.max(...allTs);
+        const tSpan = Math.max(1, maxT - minT);
+        const minV = 0;
+        const maxV = Math.max(1, Math.max(...allVs));
+
+        const padL = 48, padR = 16, padT = 16, padB = 28;
+        const w = cssWidth - padL - padR;
+        const h = cssHeight - padT - padB;
+
+        // axes
+        ctx.strokeStyle = 'rgba(23, 32, 51, 0.18)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(padL, padT);
+        ctx.lineTo(padL, padT + h);
+        ctx.lineTo(padL + w, padT + h);
+        ctx.stroke();
+
+        // y ticks
+        ctx.fillStyle = '#5d6778';
+        ctx.font = '11px "Avenir Next", sans-serif';
+        ctx.textAlign = 'right';
+        const yTicks = 4;
+        for (let i = 0; i <= yTicks; i++) {
+          const v = minV + (maxV - minV) * (i / yTicks);
+          const y = padT + h - (h * i / yTicks);
+          ctx.fillText(v.toFixed(2), padL - 4, y + 3);
+          ctx.strokeStyle = 'rgba(23, 32, 51, 0.06)';
+          ctx.beginPath();
+          ctx.moveTo(padL, y);
+          ctx.lineTo(padL + w, y);
+          ctx.stroke();
+        }
+
+        // x ticks (start, mid, end)
+        ctx.textAlign = 'center';
+        const xTickTs = [minT, (minT + maxT) / 2, maxT];
+        for (const t of xTickTs) {
+          const x = padL + ((t - minT) / tSpan) * w;
+          const label = new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+          ctx.fillText(label, x, padT + h + 16);
+        }
+
+        // series colours via simple hash
+        function hueForKey(key) {
+          let h = 0;
+          for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
+          return h % 360;
+        }
+
+        // draw each series
+        let legendX = padL;
+        for (const [key, points] of seriesMap.entries()) {
+          const hue = hueForKey(key);
+          const stroke = `hsl(${hue}, 60%, 45%)`;
+          ctx.strokeStyle = stroke;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          points.forEach((p, idx) => {
+            const x = padL + ((p.t - minT) / tSpan) * w;
+            const y = padT + h - ((p.v - minV) / (maxV - minV || 1)) * h;
+            if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          });
+          ctx.stroke();
+
+          // dots
+          ctx.fillStyle = stroke;
+          for (const p of points) {
+            const x = padL + ((p.t - minT) / tSpan) * w;
+            const y = padT + h - ((p.v - minV) / (maxV - minV || 1)) * h;
+            ctx.beginPath();
+            ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+            ctx.fill();
+          }
+
+          // legend swatch
+          ctx.fillStyle = stroke;
+          ctx.fillRect(legendX, 2, 10, 10);
+          ctx.fillStyle = '#172033';
+          ctx.textAlign = 'left';
+          ctx.fillText(key, legendX + 14, 11);
+          legendX += 18 + ctx.measureText(key).width;
+        }
       }
 
       function renderEntriesTable(entries, body = viewerEntriesBody, container = viewerEntriesTable) {
@@ -3079,8 +3205,10 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           editViewerFiltersButton.setAttribute('aria-expanded', 'false');
 
           const isTraceViewer = viewer.signals.includes('traces');
-          if (chartType !== 'table' && viewerSupportsMetricCharts(viewer)) {
-            renderChart(chartType, viewer.entries, viewer.lookback_ms);
+          const usesChart = chartType === 'timeseries'
+            || (chartType !== 'table' && viewerSupportsMetricCharts(viewer));
+          if (usesChart) {
+            renderChart(chartType, viewer.entries, viewer.lookback_ms, viewer.aggregated_buckets);
           } else if (isTraceViewer && viewer.traces) {
             renderTraceList(viewer.traces);
           } else {
@@ -5347,13 +5475,16 @@ fn default_chart_type() -> String {
 fn is_valid_chart_type(chart_type: &str) -> bool {
     matches!(
         chart_type,
-        "table" | "stacked_bar" | "line" | "area" | "pie" | "donut" | "billboard"
+        "table" | "stacked_bar" | "line" | "area" | "pie" | "donut" | "billboard" | "timeseries"
     )
 }
 
 fn is_chart_type_supported_for_signal_mask(chart_type: &str, signal_mask: SignalMask) -> bool {
     match chart_type {
         "table" => true,
+        // Timeseries works for any signal because the aggregator can always
+        // produce count/rate from `observed_at`.
+        "timeseries" => !signal_mask.is_empty(),
         "stacked_bar" | "line" | "area" | "pie" | "donut" | "billboard" => {
             signal_mask == Signal::Metrics.into()
         }
@@ -5419,6 +5550,17 @@ struct ViewerFilterInput {
     value: String,
 }
 
+/// Raw aggregation input mirroring the `aggregation` block stored in
+/// definition_json. Forwarded as-is to the compiler which validates the shape.
+#[derive(Debug, Deserialize, Clone)]
+struct AggregationInput {
+    #[serde(rename = "fn")]
+    func: String,
+    bucket_ms: i64,
+    #[serde(default)]
+    group_by: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateViewerRequest {
     name: String,
@@ -5431,6 +5573,8 @@ struct CreateViewerRequest {
     filters: Option<Vec<ViewerFilterInput>>,
     #[serde(default)]
     filter_mode: Option<String>,
+    #[serde(default)]
+    aggregation: Option<AggregationInput>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5442,6 +5586,8 @@ struct PatchViewerRequest {
     filters: Option<Vec<ViewerFilterInput>>,
     #[serde(default)]
     filter_mode: Option<String>,
+    #[serde(default)]
+    aggregation: Option<AggregationInput>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5514,6 +5660,9 @@ struct ViewerSummary {
     filters: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     filter_mode: Option<String>,
+    /// Echoes the persisted aggregation block when one is configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aggregation: Option<serde_json::Value>,
     refresh_interval_ms: u32,
     lookback_ms: i64,
     entry_count: usize,
@@ -5521,6 +5670,10 @@ struct ViewerSummary {
     entries: Vec<ViewerEntryRow>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     traces: Vec<TraceSummary>,
+    /// Time-bucketed aggregations -- empty when the viewer has no
+    /// `aggregation` block.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    aggregated_buckets: Vec<crate::viewer_runtime::aggregator::Bucket>,
 }
 
 #[derive(Debug, Serialize)]
@@ -5704,6 +5857,7 @@ async fn get_viewer(
         &viewer_state.status,
         viewer.lookback_ms(),
         true,
+        &viewer_state.aggregated_buckets,
     )
     .map_err(|error| {
         tracing::error!("viewer {id}: {error}");
@@ -5772,6 +5926,7 @@ async fn list_viewers(
                 &viewer_state.status,
                 viewer.lookback_ms(),
                 false,
+                &viewer_state.aggregated_buckets,
             )
             .map_err(|error| {
                 tracing::error!("viewer {}: {error}", viewer.definition().id);
@@ -5823,6 +5978,20 @@ fn apply_filters_to_definition(
             definition_json["filter_mode"] = json!(trimmed);
         }
     }
+}
+
+/// Applies (or clears) the `aggregation` block on `definition_json`.
+/// `None` leaves any existing block untouched.
+fn apply_aggregation_to_definition(
+    definition_json: &mut serde_json::Value,
+    aggregation: Option<&AggregationInput>,
+) {
+    let Some(agg) = aggregation else { return };
+    definition_json["aggregation"] = json!({
+        "fn": agg.func,
+        "bucket_ms": agg.bucket_ms,
+        "group_by": agg.group_by,
+    });
 }
 
 fn default_viewer_layout() -> serde_json::Value {
@@ -5899,6 +6068,7 @@ async fn create_viewer(
         payload.filters.as_deref(),
         payload.filter_mode.as_deref(),
     );
+    apply_aggregation_to_definition(&mut definition_json, payload.aggregation.as_ref());
     let definition = ViewerDefinition {
         id,
         slug: viewer_slug(id),
@@ -5940,7 +6110,7 @@ async fn patch_viewer(
     }
 
     // Read current state under lock, then release before DB write
-    let (definition_json, layout_json, matcher_changed, signal_mask) = {
+    let (definition_json, layout_json, matcher_changed, aggregation_changed, signal_mask) = {
         let rt = runtime.lock().await;
         let (viewer, _) = rt
             .viewers()
@@ -5969,19 +6139,28 @@ async fn patch_viewer(
             payload.filters.as_deref(),
             payload.filter_mode.as_deref(),
         );
+        apply_aggregation_to_definition(&mut definition_json, payload.aggregation.as_ref());
         let query_changed = query_from_definition(&definition_json) != current_query;
         let filters_changed = definition_json.get("filters") != old_def_json.get("filters")
             || definition_json.get("filter_mode") != old_def_json.get("filter_mode");
+        let aggregation_changed =
+            definition_json.get("aggregation") != old_def_json.get("aggregation");
         let matcher_changed = query_changed || filters_changed;
-        if new_chart_type == current_kind && !matcher_changed {
+        if new_chart_type == current_kind && !matcher_changed && !aggregation_changed {
             return Ok(StatusCode::OK);
         }
         let layout_json = viewer.definition().layout_json.clone();
         let signal_mask = viewer.definition().signal_mask;
-        (definition_json, layout_json, matcher_changed, signal_mask)
+        (
+            definition_json,
+            layout_json,
+            matcher_changed,
+            aggregation_changed,
+            signal_mask,
+        )
     };
 
-    if matcher_changed {
+    if matcher_changed || aggregation_changed {
         let temp_def = ViewerDefinition {
             id,
             slug: String::new(),
@@ -6609,13 +6788,14 @@ async fn get_dashboard(
         for entry in panel_entries {
             let viewer = rt
                 .get_dashboard_viewer(&entry.viewer_id, lookback_override, now)
-                .map(|(viewer, entries, status, effective_lookback)| {
+                .map(|slice| {
                     let filtered: Vec<NormalizedEntry>;
                     let effective_entries: &[NormalizedEntry] =
                         if global_service_names.is_empty() && global_query.is_none() {
-                            entries
+                            slice.entries
                         } else {
-                            filtered = entries
+                            filtered = slice
+                                .entries
                                 .iter()
                                 .filter(|e| {
                                     matches_dashboard_global_filter(
@@ -6628,7 +6808,14 @@ async fn get_dashboard(
                                 .collect();
                             &filtered
                         };
-                    viewer_summary(viewer, effective_entries, status, effective_lookback, true)
+                    viewer_summary(
+                        slice.viewer,
+                        effective_entries,
+                        slice.status,
+                        slice.effective_lookback_ms,
+                        true,
+                        slice.aggregated_buckets,
+                    )
                 })
                 .transpose()
                 .map_err(|error| {
@@ -7496,6 +7683,7 @@ fn viewer_summary(
     status: &ViewerStatus,
     effective_lookback_ms: i64,
     include_entries: bool,
+    aggregated_buckets: &[crate::viewer_runtime::aggregator::Bucket],
 ) -> Result<ViewerSummary, &'static str> {
     let definition = viewer.definition();
     let chart_type = chart_type_from_definition(&definition.definition_json)?.to_string();
@@ -7510,6 +7698,7 @@ fn viewer_summary(
         .get("filter_mode")
         .and_then(|v| v.as_str())
         .map(str::to_string);
+    let aggregation = definition.definition_json.get("aggregation").cloned();
 
     let entries_for_response = if include_entries {
         map_entries_to_rows(entries.iter().rev().take(VIEWER_ENTRY_PREVIEW_LIMIT))
@@ -7526,6 +7715,7 @@ fn viewer_summary(
         query,
         filters,
         filter_mode,
+        aggregation,
         refresh_interval_ms: definition.refresh_interval_ms,
         lookback_ms: effective_lookback_ms,
         entry_count: entries.len(),
@@ -7536,6 +7726,7 @@ fn viewer_summary(
         } else {
             vec![]
         },
+        aggregated_buckets: aggregated_buckets.to_vec(),
     })
 }
 

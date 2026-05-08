@@ -1,3 +1,4 @@
+pub mod aggregator;
 pub mod compiler;
 pub mod reducer;
 pub mod runtime;
