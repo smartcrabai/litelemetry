@@ -1,3 +1,4 @@
+pub mod apm;
 pub mod domain;
 pub mod grpc;
 pub mod ingest;

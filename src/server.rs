@@ -1,3 +1,4 @@
+use crate::apm::waterfall::{TraceWaterfall, WaterfallError, build_waterfall};
 use crate::domain::dashboard::{
     DashboardDefinition, PanelInput, build_layout_json, panel_inputs_from_viewer_ids,
 };
@@ -1353,6 +1354,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       <div class="sidebar-brand">litelemetry</div>
       <nav class="sidebar-nav">
         <a id="nav-viewers" class="sidebar-item active" href="#viewers" data-page="viewers">Viewers</a>
+        <a id="nav-waterfall" class="sidebar-item" href="#waterfall" data-page="waterfall">Trace Waterfall</a>
         <div class="sidebar-section-label">Dashboards</div>
         <div id="dashboard-list"></div>
         <button id="new-dashboard-button" class="secondary sidebar-new-btn" type="button">+ New Dashboard</button>
@@ -1596,6 +1598,29 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         </div>
         <div id="dashboard-grid" class="dashboard-grid"></div>
       </div><!-- #page-dashboard -->
+
+      <div id="page-waterfall" hidden>
+        <section class="toolbar panel panel-strong">
+          <div class="toolbar-row">
+            <input id="waterfall-trace-id-input" data-testid="waterfall-trace-id-input"
+                   name="waterfall-trace-id" placeholder="Enter trace_id (hex)" maxlength="64"
+                   style="flex:1;min-width:280px;font-family:monospace;"
+                   aria-label="Trace ID" />
+            <button id="waterfall-load-button" data-testid="waterfall-load-button"
+                    class="primary" type="button">Load Waterfall</button>
+          </div>
+          <div id="waterfall-status" data-testid="waterfall-status" class="status-box"
+               data-state="idle">
+            Enter a trace_id and click Load Waterfall to view the span timeline.
+          </div>
+        </section>
+        <section class="panel panel-strong stack">
+          <div id="waterfall-summary" class="waterfall-summary"
+               style="font-size:12px;color:var(--muted);margin-bottom:6px;" hidden></div>
+          <div id="waterfall-svg-container" data-testid="waterfall-svg-container"
+               style="overflow-x:auto;width:100%;"></div>
+        </section>
+      </div><!-- #page-waterfall -->
     </main>
 
     <script>
@@ -3219,8 +3244,12 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
         pageViewers.hidden = page !== 'viewers';
         pageDashboard.hidden = page !== 'dashboard';
+        const pageWaterfallEl = document.getElementById('page-waterfall');
+        if (pageWaterfallEl) pageWaterfallEl.hidden = page !== 'waterfall';
 
         navViewers.classList.toggle('active', page === 'viewers');
+        const navWaterfallEl = document.getElementById('nav-waterfall');
+        if (navWaterfallEl) navWaterfallEl.classList.toggle('active', page === 'waterfall');
 
         document.querySelectorAll('.sidebar-dashboard-item').forEach(el => {
           el.classList.toggle('active', el.dataset.id === dashboardId);
@@ -3310,6 +3339,201 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         e.preventDefault();
         navigateTo('viewers');
       });
+
+      // --- Trace Waterfall page wiring ----------------------------------
+      const navWaterfall = document.getElementById('nav-waterfall');
+      const waterfallTraceIdInput = document.getElementById('waterfall-trace-id-input');
+      const waterfallLoadButton = document.getElementById('waterfall-load-button');
+      const waterfallStatus = document.getElementById('waterfall-status');
+      const waterfallSummary = document.getElementById('waterfall-summary');
+      const waterfallSvgContainer = document.getElementById('waterfall-svg-container');
+
+      function setWaterfallStatus(state, message) {
+        waterfallStatus.dataset.state = state;
+        waterfallStatus.textContent = message;
+      }
+
+      function escapeXml(s) {
+        return String(s)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&apos;');
+      }
+
+      function formatDurationMs(ms) {
+        const v = Number(ms) || 0;
+        if (v < 1) return v.toFixed(3) + 'ms';
+        if (v < 1000) return v.toFixed(2) + 'ms';
+        return (v / 1000).toFixed(2) + 's';
+      }
+
+      function renderWaterfallSvg(data) {
+        waterfallSvgContainer.replaceChildren();
+        const spans = data.spans || [];
+        if (spans.length === 0) {
+          const empty = document.createElement('p');
+          empty.style.color = 'var(--muted)';
+          empty.textContent = 'No spans for this trace.';
+          waterfallSvgContainer.appendChild(empty);
+          return;
+        }
+
+        const totalDurationMs = Math.max(
+          ...spans.map(s => (Number(s.start_ms) || 0) + (Number(s.duration_ms) || 0))
+        ) || 1;
+
+        const labelWidth = 280;
+        const barAreaWidth = 720;
+        const rowHeight = 22;
+        const headerHeight = 24;
+        const padding = 8;
+        const width = labelWidth + barAreaWidth + padding * 2;
+        const height = headerHeight + spans.length * rowHeight + padding * 2;
+
+        const svgNS = 'http://www.w3.org/2000/svg';
+        const svg = document.createElementNS(svgNS, 'svg');
+        svg.setAttribute('width', String(width));
+        svg.setAttribute('height', String(height));
+        svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+        svg.setAttribute('data-testid', 'waterfall-svg');
+        svg.style.background = 'transparent';
+        svg.style.fontFamily = 'system-ui, sans-serif';
+
+        // Header / axis ticks
+        const axisSteps = 5;
+        for (let i = 0; i <= axisSteps; i++) {
+          const x = padding + labelWidth + (barAreaWidth / axisSteps) * i;
+          const tickLabel = document.createElementNS(svgNS, 'text');
+          tickLabel.setAttribute('x', String(x));
+          tickLabel.setAttribute('y', String(padding + 12));
+          tickLabel.setAttribute('font-size', '10');
+          tickLabel.setAttribute('fill', 'currentColor');
+          tickLabel.setAttribute('text-anchor', i === 0 ? 'start' : (i === axisSteps ? 'end' : 'middle'));
+          tickLabel.textContent = formatDurationMs((totalDurationMs / axisSteps) * i);
+          svg.appendChild(tickLabel);
+
+          const gridLine = document.createElementNS(svgNS, 'line');
+          gridLine.setAttribute('x1', String(x));
+          gridLine.setAttribute('x2', String(x));
+          gridLine.setAttribute('y1', String(padding + headerHeight));
+          gridLine.setAttribute('y2', String(height - padding));
+          gridLine.setAttribute('stroke', 'currentColor');
+          gridLine.setAttribute('stroke-opacity', '0.1');
+          svg.appendChild(gridLine);
+        }
+
+        spans.forEach((span, idx) => {
+          const yTop = padding + headerHeight + idx * rowHeight;
+          const yMid = yTop + rowHeight / 2;
+
+          // Row background
+          if (idx % 2 === 0) {
+            const bg = document.createElementNS(svgNS, 'rect');
+            bg.setAttribute('x', String(padding));
+            bg.setAttribute('y', String(yTop));
+            bg.setAttribute('width', String(width - padding * 2));
+            bg.setAttribute('height', String(rowHeight));
+            bg.setAttribute('fill', 'currentColor');
+            bg.setAttribute('fill-opacity', '0.04');
+            svg.appendChild(bg);
+          }
+
+          // Label: name + service_name
+          const label = document.createElementNS(svgNS, 'text');
+          label.setAttribute('x', String(padding + 4));
+          label.setAttribute('y', String(yMid + 4));
+          label.setAttribute('font-size', '12');
+          label.setAttribute('fill', 'currentColor');
+          const svc = span.service_name || 'unknown';
+          const name = span.name || '(anonymous)';
+          const labelText = `${name}  -  ${svc}`;
+          label.textContent = labelText.length > 44 ? labelText.slice(0, 41) + '...' : labelText;
+          const titleEl = document.createElementNS(svgNS, 'title');
+          titleEl.textContent = `${name} (${svc})\nspan_id: ${span.id}\nparent: ${span.parent_id || '(root)'}\nstart: ${formatDurationMs(span.start_ms)}\nduration: ${formatDurationMs(span.duration_ms)}\nstatus: ${span.status}`;
+          label.appendChild(titleEl);
+          svg.appendChild(label);
+
+          // Bar
+          const startMs = Number(span.start_ms) || 0;
+          const durMs = Number(span.duration_ms) || 0;
+          const xBar = padding + labelWidth + (startMs / totalDurationMs) * barAreaWidth;
+          const wBar = Math.max((durMs / totalDurationMs) * barAreaWidth, 2);
+          const bar = document.createElementNS(svgNS, 'rect');
+          bar.setAttribute('x', String(xBar));
+          bar.setAttribute('y', String(yTop + 4));
+          bar.setAttribute('width', String(wBar));
+          bar.setAttribute('height', String(rowHeight - 8));
+          const isError = Number(span.status) === 2;
+          bar.setAttribute('fill', isError ? '#c0392b' : serviceColor(svc));
+          bar.setAttribute('rx', '2');
+          bar.setAttribute('data-testid', 'waterfall-span-bar');
+          const barTitle = document.createElementNS(svgNS, 'title');
+          barTitle.textContent = `${name} (${formatDurationMs(durMs)})`;
+          bar.appendChild(barTitle);
+          svg.appendChild(bar);
+
+          // Duration label after bar
+          const durText = document.createElementNS(svgNS, 'text');
+          durText.setAttribute('x', String(xBar + wBar + 4));
+          durText.setAttribute('y', String(yMid + 4));
+          durText.setAttribute('font-size', '10');
+          durText.setAttribute('fill', 'currentColor');
+          durText.setAttribute('fill-opacity', '0.7');
+          durText.textContent = formatDurationMs(durMs);
+          svg.appendChild(durText);
+        });
+
+        waterfallSvgContainer.appendChild(svg);
+      }
+
+      async function loadWaterfall() {
+        const traceId = (waterfallTraceIdInput.value || '').trim();
+        if (!traceId) {
+          setWaterfallStatus('error', 'Please enter a trace_id.');
+          return;
+        }
+        setWaterfallStatus('working', `Loading waterfall for ${traceId}...`);
+        waterfallSummary.hidden = true;
+        waterfallSvgContainer.replaceChildren();
+        try {
+          const resp = await fetch(`/api/traces/${encodeURIComponent(traceId)}/waterfall`, {
+            headers: { accept: 'application/json' },
+          });
+          if (resp.status === 404) {
+            setWaterfallStatus('error', `Trace ${traceId} not found.`);
+            return;
+          }
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const data = await resp.json();
+          const total = (data.spans || []).length;
+          waterfallSummary.textContent = `${total} span${total === 1 ? '' : 's'} in trace ${data.trace_id}`;
+          waterfallSummary.hidden = false;
+          renderWaterfallSvg(data);
+          setWaterfallStatus('ok', `Loaded ${total} span${total === 1 ? '' : 's'}.`);
+        } catch (err) {
+          setWaterfallStatus('error', `Failed to load waterfall: ${err.message}`);
+        }
+      }
+
+      if (navWaterfall) {
+        navWaterfall.addEventListener('click', (e) => {
+          e.preventDefault();
+          navigateTo('waterfall');
+        });
+      }
+      if (waterfallLoadButton) {
+        waterfallLoadButton.addEventListener('click', loadWaterfall);
+      }
+      if (waterfallTraceIdInput) {
+        waterfallTraceIdInput.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            loadWaterfall();
+          }
+        });
+      }
 
       dashboardRefreshToggleButton.addEventListener('click', () => {
         if (dashboardRefreshIntervalMs === null) {
@@ -4299,6 +4523,7 @@ pub fn build_app_with_services(
                 .delete(delete_dashboard),
         )
         .route("/api/dashboards/{id}/export", get(export_dashboard))
+        .route("/api/traces/{trace_id}/waterfall", get(get_trace_waterfall))
         .route("/v1/traces", post(ingest_traces))
         .route("/v1/metrics", post(ingest_metrics))
         .route("/v1/logs", post(ingest_logs))
@@ -5598,6 +5823,37 @@ async fn import_dashboard(
         StatusCode::CREATED,
         Json(DashboardImportResponse { dashboard_id }),
     ))
+}
+
+// --- APM: Trace Waterfall ---------------------------------------------------
+
+/// Builds a trace waterfall by reading recent trace entries directly from the
+/// stream store. Independent of the viewer runtime so it works even when no
+/// trace viewer has been created.
+async fn get_trace_waterfall(
+    State(mut state): State<AppState>,
+    Path(trace_id): Path<String>,
+) -> Result<Json<TraceWaterfall>, StatusCode> {
+    let trace_id = trace_id.trim();
+    if trace_id.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let entries = state
+        .stream_store
+        .read_entries_since(Signal::Traces, None, 100_000)
+        .await
+        .map_err(|error| {
+            tracing::error!("get_trace_waterfall: read_entries_since failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let entries: Vec<NormalizedEntry> = entries.into_iter().map(|(_, entry)| entry).collect();
+
+    match build_waterfall(&entries, trace_id) {
+        Ok(waterfall) => Ok(Json(waterfall)),
+        Err(WaterfallError::TraceNotFound(_)) => Err(StatusCode::NOT_FOUND),
+    }
 }
 
 // --- Ingest -----------------------------------------------------------------
