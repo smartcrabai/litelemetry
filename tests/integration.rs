@@ -7050,3 +7050,193 @@ async fn test_dashboard_export_not_found_returns_404_memory() {
     // Then: 404 Not Found
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+// --- APM trace waterfall ----------------------------------------------------
+
+fn make_hierarchical_trace_payload(trace_id: &str, service: &str) -> Bytes {
+    Bytes::from(
+        json!({
+            "resourceSpans": [
+                {
+                    "resource": {
+                        "attributes": [
+                            { "key": "service.name", "value": { "stringValue": service } }
+                        ]
+                    },
+                    "scopeSpans": [
+                        {
+                            "scope": { "name": "integration-test" },
+                            "spans": [
+                                {
+                                    "traceId": trace_id,
+                                    "spanId": "1111111111111111",
+                                    "parentSpanId": "",
+                                    "name": "root-op",
+                                    "startTimeUnixNano": "1000000000",
+                                    "endTimeUnixNano": "1000005000",
+                                    "kind": 1,
+                                    "status": { "code": 0 }
+                                },
+                                {
+                                    "traceId": trace_id,
+                                    "spanId": "2222222222222222",
+                                    "parentSpanId": "1111111111111111",
+                                    "name": "child-a",
+                                    "startTimeUnixNano": "1000001000",
+                                    "endTimeUnixNano": "1000003000",
+                                    "kind": 1,
+                                    "status": { "code": 0 }
+                                },
+                                {
+                                    "traceId": trace_id,
+                                    "spanId": "3333333333333333",
+                                    "parentSpanId": "2222222222222222",
+                                    "name": "grandchild",
+                                    "startTimeUnixNano": "1000001500",
+                                    "endTimeUnixNano": "1000002500",
+                                    "kind": 1,
+                                    "status": { "code": 2 }
+                                },
+                                {
+                                    "traceId": trace_id,
+                                    "spanId": "4444444444444444",
+                                    "parentSpanId": "1111111111111111",
+                                    "name": "child-b",
+                                    "startTimeUnixNano": "1000003000",
+                                    "endTimeUnixNano": "1000004500",
+                                    "kind": 1,
+                                    "status": { "code": 0 }
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        })
+        .to_string(),
+    )
+}
+
+/// Memory-backed: ingest a hierarchical trace and verify the waterfall API
+/// returns the spans in DFS order with normalized start_ms / duration_ms.
+#[tokio::test]
+async fn test_trace_waterfall_returns_spans_for_ingested_trace_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+    let trace_id = "11112222333344445555666677778888";
+
+    // Ingest a hierarchical trace
+    let ingest_req = Request::builder()
+        .method("POST")
+        .uri("/v1/traces")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(make_hierarchical_trace_payload(
+            trace_id, "checkout",
+        )))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(ingest_req).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    // Fetch waterfall
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/traces/{trace_id}/waterfall"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["trace_id"], trace_id);
+
+    let spans = payload["spans"].as_array().expect("spans array");
+    assert_eq!(spans.len(), 4);
+
+    // DFS pre-order: root, child-a, grandchild, child-b
+    let names: Vec<&str> = spans.iter().map(|s| s["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["root-op", "child-a", "grandchild", "child-b"]);
+
+    // Earliest start is normalized to 0
+    assert!((spans[0]["start_ms"].as_f64().unwrap() - 0.0).abs() < 1e-9);
+    // root duration = 5_000ns => 0.005ms
+    assert!((spans[0]["duration_ms"].as_f64().unwrap() - 0.005).abs() < 1e-9);
+
+    // Service name flows from resource attributes
+    assert_eq!(spans[0]["service_name"], "checkout");
+
+    // grandchild has error status
+    assert_eq!(spans[2]["name"], "grandchild");
+    assert_eq!(spans[2]["status"], 2);
+}
+
+/// Memory-backed: a non-existent trace returns 404.
+#[tokio::test]
+async fn test_trace_waterfall_returns_404_for_missing_trace_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/traces/deadbeef/waterfall")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// Docker-backed: ingest into Redis-backed setup and verify waterfall.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_trace_waterfall_returns_spans_for_ingested_trace() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+    let trace_id = "abcdef00112233445566778899aabbcc";
+
+    let ingest_req = Request::builder()
+        .method("POST")
+        .uri("/v1/traces")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(make_hierarchical_trace_payload(
+            trace_id, "payments",
+        )))
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(ingest_req).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/traces/{trace_id}/waterfall"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["trace_id"], trace_id);
+
+    let spans = payload["spans"].as_array().expect("spans array");
+    assert_eq!(spans.len(), 4);
+    let names: Vec<&str> = spans.iter().map(|s| s["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["root-op", "child-a", "grandchild", "child-b"]);
+    assert_eq!(spans[0]["service_name"], "payments");
+}
