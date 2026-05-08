@@ -4608,9 +4608,41 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         if (!services) return;
         cachedServiceNames = services;
         populateViewerNameDatalist();
+        const attrValues = await fetchAttributeValuesForAutocomplete();
+        const queryOptions = mergeUniqueSorted(cachedServiceNames, attrValues);
         for (const id of ['viewer-query-datalist', 'detail-query-datalist', 'viewer-detail-query-datalist']) {
-          fillDatalist(document.getElementById(id), cachedServiceNames);
+          fillDatalist(document.getElementById(id), queryOptions);
         }
+      }
+
+      // Fetch a small slice of indexed attribute values to feed the query
+      // autocomplete datalists. Returns [] when the attribute index is not
+      // available (standalone mode -> /api/attributes returns 503).
+      async function fetchAttributeValuesForAutocomplete() {
+        try {
+          const keysResp = await fetch('/api/attributes', { headers: { accept: 'application/json' } });
+          if (!keysResp.ok) return [];
+          const { keys } = await keysResp.json();
+          if (!Array.isArray(keys) || keys.length === 0) return [];
+          // Cap fan-out to keep page load snappy on large indices.
+          const sliced = keys.slice(0, 10);
+          const valueLists = await Promise.all(sliced.map(async (k) => {
+            try {
+              const r = await fetch(`/api/attributes/${encodeURIComponent(k)}/values`,
+                { headers: { accept: 'application/json' } });
+              if (!r.ok) return [];
+              const { values } = await r.json();
+              return Array.isArray(values) ? values : [];
+            } catch (_) { return []; }
+          }));
+          return valueLists.flat();
+        } catch (_) { return []; }
+      }
+
+      function mergeUniqueSorted(...lists) {
+        const set = new Set();
+        for (const l of lists) for (const v of l) if (v) set.add(v);
+        return [...set].sort();
       }
 
       function fillDatalist(dl, values) {
@@ -4994,6 +5026,9 @@ pub struct AppState {
     pub viewer_runtime: Option<SharedViewerRuntime>,
     pub rollup_store: Option<RollupStore>,
     pub alert_store: Option<crate::storage::alert_store::AlertStore>,
+    /// Optional Postgres-backed inverted index for attributes.
+    /// `None` in standalone (in-memory) mode -- index writes / lookups become no-ops.
+    pub attr_index: Option<crate::storage::attr_index::AttrIndexStore>,
 }
 
 pub type SharedViewerRuntime = Arc<Mutex<ViewerRuntime>>;
@@ -5013,6 +5048,14 @@ impl AppState {
 
     fn require_alert_store(&self) -> Result<&crate::storage::alert_store::AlertStore, StatusCode> {
         self.alert_store
+            .as_ref()
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)
+    }
+
+    fn require_attr_index(
+        &self,
+    ) -> Result<&crate::storage::attr_index::AttrIndexStore, StatusCode> {
+        self.attr_index
             .as_ref()
             .ok_or(StatusCode::SERVICE_UNAVAILABLE)
     }
@@ -5154,6 +5197,22 @@ struct ServicesResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct AttributeKeysResponse {
+    keys: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AttributeValuesResponse {
+    key: String,
+    values: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AttributeValuesQuery {
+    prefix: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 struct CreateViewerResponse {
     id: Uuid,
 }
@@ -5252,12 +5311,35 @@ pub fn build_app_with_full_services(
     rollup_store: Option<RollupStore>,
     alert_store: Option<crate::storage::alert_store::AlertStore>,
 ) -> Router {
+    build_app_with_services_full(
+        stream_store,
+        viewer_store,
+        viewer_runtime,
+        rollup_store,
+        alert_store,
+        None,
+    )
+}
+
+/// Full builder that also accepts an optional attribute inverted index.
+///
+/// `attr_index` is `None` in standalone (in-memory) mode; the `/api/attributes`
+/// endpoints then return 503 and ingest skips index writes.
+pub fn build_app_with_services_full(
+    stream_store: StreamStore,
+    viewer_store: Option<ViewerStore>,
+    viewer_runtime: Option<SharedViewerRuntime>,
+    rollup_store: Option<RollupStore>,
+    alert_store: Option<crate::storage::alert_store::AlertStore>,
+    attr_index: Option<crate::storage::attr_index::AttrIndexStore>,
+) -> Router {
     let state = AppState {
         stream_store,
         viewer_store,
         viewer_runtime,
         rollup_store,
         alert_store,
+        attr_index,
     };
     let connect = crate::grpc::build_connect_router(state.clone());
 
@@ -5271,6 +5353,8 @@ pub fn build_app_with_full_services(
             get(get_viewer).patch(patch_viewer).delete(delete_viewer),
         )
         .route("/api/services", get(list_services))
+        .route("/api/attributes", get(list_attribute_keys))
+        .route("/api/attributes/{key}/values", get(list_attribute_values))
         .route(
             "/api/dashboards",
             get(list_dashboards).post(create_dashboard),
@@ -5345,6 +5429,38 @@ async fn list_services(
     let runtime = state.require_viewer_runtime()?.lock().await;
     let services = runtime.collect_service_names();
     Ok(Json(ServicesResponse { services }))
+}
+
+async fn list_attribute_keys(
+    State(state): State<AppState>,
+) -> Result<Json<AttributeKeysResponse>, StatusCode> {
+    let store = state.require_attr_index()?;
+    match store.list_keys().await {
+        Ok(keys) => Ok(Json(AttributeKeysResponse { keys })),
+        Err(error) => {
+            tracing::error!("attr_index list_keys failed: {error}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+async fn list_attribute_values(
+    State(state): State<AppState>,
+    Path(key): Path<String>,
+    Query(params): Query<AttributeValuesQuery>,
+) -> Result<Json<AttributeValuesResponse>, StatusCode> {
+    if key.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let store = state.require_attr_index()?;
+    let prefix = params.prefix.as_deref();
+    match store.list_values(&key, prefix).await {
+        Ok(values) => Ok(Json(AttributeValuesResponse { key, values })),
+        Err(error) => {
+            tracing::error!("attr_index list_values failed: {error}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
 }
 
 async fn list_viewers(
@@ -6904,16 +7020,28 @@ async fn handle_ingest(
         }
     };
 
-    match parse_ingest_request(signal, content_type, body) {
+    match parse_ingest_request(signal, content_type, body.clone()) {
         Ok(entry) => {
+            let attr_index = state.attr_index.clone();
             let mut stream_store = state.stream_store;
             match stream_store.append_entry(&entry).await {
-                Ok(_) => {
+                Ok(stream_id) => {
                     if let Some(rollup) = state.rollup_store.as_ref()
                         && let Err(error) = rollup.record_entry(&entry).await
                     {
                         // Rollups are best-effort; ingest must not fail because of them.
                         tracing::warn!("rollup record_entry failed: {error}");
+                    }
+                    if let Some(attr_index) = attr_index {
+                        index_entry_attributes(
+                            &attr_index,
+                            signal,
+                            content_type,
+                            &body,
+                            &stream_id,
+                            entry.observed_at,
+                        )
+                        .await;
                     }
                     StatusCode::OK
                 }
@@ -7005,6 +7133,34 @@ async fn get_rollups(
         to_ms: params.to,
         buckets,
     }))
+}
+
+/// Decode the OTLP payload again and write its (key, value) attribute pairs
+/// to the inverted index. Failures here are logged but do not fail the
+/// ingest, since the entry is already durably stored.
+async fn index_entry_attributes(
+    attr_index: &crate::storage::attr_index::AttrIndexStore,
+    signal: Signal,
+    content_type: Option<&str>,
+    body: &Bytes,
+    stream_id: &str,
+    observed_at: chrono::DateTime<chrono::Utc>,
+) {
+    use crate::ingest::otlp_http::{decode_payload_value, extract_indexable_attributes_from_value};
+
+    let Some(value) = decode_payload_value(signal, content_type, body) else {
+        return;
+    };
+    let pairs = extract_indexable_attributes_from_value(signal, &value);
+    if pairs.is_empty() {
+        return;
+    }
+    if let Err(error) = attr_index
+        .record_attributes(signal, stream_id, observed_at, pairs)
+        .await
+    {
+        tracing::warn!("attr_index record_attributes failed: {error}");
+    }
 }
 
 fn map_entries_to_rows<'a>(

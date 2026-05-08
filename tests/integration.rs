@@ -13,7 +13,10 @@ use chrono::{Duration, Utc};
 use litelemetry::domain::dashboard::DashboardDefinition;
 use litelemetry::domain::telemetry::{NormalizedEntry, Signal, SignalMask};
 use litelemetry::domain::viewer::ViewerDefinition;
-use litelemetry::server::{build_app, build_app_with_full_services, build_app_with_services};
+use litelemetry::server::{
+    build_app, build_app_with_full_services, build_app_with_services, build_app_with_services_full,
+};
+use litelemetry::storage::attr_index::AttrIndexStore;
 use litelemetry::storage::memory::{MemoryStreamStore, MemoryViewerStore};
 use litelemetry::storage::postgres::{PostgresStore, ViewerSnapshotRow};
 use litelemetry::storage::redis::RedisStore;
@@ -7750,4 +7753,245 @@ async fn test_alert_api_crud_round_trip() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+// --- Attribute inverted index (Postgres) ------------------------------------
+
+/// JSON OTLP traces payload with custom span attributes for indexing.
+fn make_trace_payload_with_attributes(
+    service_name: &str,
+    span_attributes: &[(&str, &str)],
+) -> Bytes {
+    let attrs: Vec<serde_json::Value> = span_attributes
+        .iter()
+        .map(|(k, v)| {
+            json!({
+                "key": k,
+                "value": { "stringValue": v }
+            })
+        })
+        .collect();
+
+    Bytes::from(
+        json!({
+            "resourceSpans": [
+                {
+                    "resource": {
+                        "attributes": [
+                            { "key": "service.name", "value": { "stringValue": service_name } }
+                        ]
+                    },
+                    "scopeSpans": [
+                        {
+                            "scope": { "name": "integration-test" },
+                            "spans": [
+                                {
+                                    "traceId": "00000000000000000000000000000010",
+                                    "spanId": "0000000000000010",
+                                    "name": "indexed-span",
+                                    "kind": 1,
+                                    "attributes": attrs
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        })
+        .to_string(),
+    )
+}
+
+/// Postgres-backed integration test: ingest OTLP traces with attributes,
+/// then verify `/api/attributes` and `/api/attributes/{key}/values` reflect
+/// the indexed attribute keys and values.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_attribute_index_records_and_serves_attributes() {
+    let (redis_container, pg_container) =
+        tokio::join!(Redis::default().start(), Postgres::default().start());
+    let redis_container = redis_container.unwrap();
+    let pg_container = pg_container.unwrap();
+    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
+    let pg_port = pg_container.get_host_port_ipv4(5432).await.unwrap();
+
+    let pg = make_postgres_store(pg_port).await;
+    pg.create_schema().await.unwrap();
+
+    let redis = make_redis_store(redis_port).await;
+    let attr_index = AttrIndexStore::new(pg.pool());
+
+    // Build app with attribute index wired in (no viewer runtime needed for
+    // this test path).
+    let app = build_app_with_services_full(
+        StreamStore::Redis(redis),
+        Some(ViewerStore::Postgres(pg)),
+        None,
+        None,
+        None,
+        Some(attr_index),
+    );
+
+    // Ingest a JSON trace payload carrying http.route and http.method.
+    let payload = make_trace_payload_with_attributes(
+        "checkout-ui",
+        &[("http.route", "/api/checkout"), ("http.method", "POST")],
+    );
+    let trace_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/traces")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(payload))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(trace_resp.status(), StatusCode::OK);
+
+    // GET /api/attributes -> includes http.route and http.method.
+    let keys_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/attributes")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(keys_resp.status(), StatusCode::OK);
+    let keys_body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(keys_resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let keys = keys_body
+        .get("keys")
+        .and_then(|v| v.as_array())
+        .expect("keys array");
+    let keys: Vec<&str> = keys.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        keys.contains(&"http.route"),
+        "http.route should be indexed (got {keys:?})"
+    );
+    assert!(
+        keys.contains(&"http.method"),
+        "http.method should be indexed (got {keys:?})"
+    );
+    assert!(
+        !keys.contains(&"service.name"),
+        "service.name must not pollute the inverted index"
+    );
+
+    // GET /api/attributes/http.route/values -> contains /api/checkout.
+    let values_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/attributes/http.route/values")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(values_resp.status(), StatusCode::OK);
+    let values_body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(values_resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        values_body.get("key").and_then(|v| v.as_str()),
+        Some("http.route")
+    );
+    let values: Vec<&str> = values_body
+        .get("values")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    assert!(
+        values.contains(&"/api/checkout"),
+        "http.route values should include /api/checkout (got {values:?})"
+    );
+
+    // Prefix filter: /values?prefix=/api -> still matches /api/checkout.
+    let prefix_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/attributes/http.route/values?prefix=%2Fapi")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(prefix_resp.status(), StatusCode::OK);
+    let prefix_body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(prefix_resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let prefix_values: Vec<&str> = prefix_body
+        .get("values")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    assert!(prefix_values.contains(&"/api/checkout"));
+
+    // Non-matching prefix returns empty.
+    let empty_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/attributes/http.route/values?prefix=zzz")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(empty_resp.status(), StatusCode::OK);
+    let empty_body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(empty_resp.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let empty_values: Vec<&str> = empty_body
+        .get("values")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    assert!(
+        empty_values.is_empty(),
+        "expected no matches, got {empty_values:?}"
+    );
+}
+
+/// Standalone (in-memory) mode: `/api/attributes` returns 503 because no
+/// AttrIndexStore is wired in.
+#[tokio::test]
+async fn test_attribute_index_returns_503_in_standalone_mode_memory() {
+    let env = setup_memory_viewer_app().await;
+    let resp = env
+        .app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/attributes")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }

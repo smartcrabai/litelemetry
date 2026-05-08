@@ -81,6 +81,15 @@ impl PostgresStore {
         sqlx::query(crate::storage::alert_store::CREATE_ALERT_DEFINITIONS_SQL)
             .execute(&self.pool)
             .await?;
+        sqlx::query(crate::storage::attr_index::CREATE_ATTRIBUTE_INDEX_SQL)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(crate::storage::attr_index::CREATE_ATTRIBUTE_INDEX_OBSERVED_AT_IDX_SQL)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(crate::storage::attr_index::CREATE_ATTRIBUTE_INDEX_KEY_IDX_SQL)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 

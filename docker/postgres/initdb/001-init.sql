@@ -41,6 +41,18 @@ CREATE TABLE IF NOT EXISTS alert_definitions (
     revision BIGINT NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS attribute_index (
+    attribute_key TEXT NOT NULL,
+    attribute_value TEXT NOT NULL,
+    signal SMALLINT NOT NULL,
+    stream_id TEXT NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (attribute_key, attribute_value, stream_id)
+);
+CREATE INDEX IF NOT EXISTS attribute_index_observed_at_idx ON attribute_index (observed_at);
+CREATE INDEX IF NOT EXISTS attribute_index_key_idx ON attribute_index (attribute_key);
+
+
 INSERT INTO viewer_definitions (
     id,
     slug,

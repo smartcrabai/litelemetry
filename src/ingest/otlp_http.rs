@@ -84,6 +84,170 @@ pub fn attribute_string_value(attributes: &[serde_json::Value], key: &str) -> Op
     None
 }
 
+/// Decodes an OTLP/HTTP payload (JSON or protobuf) into its canonical JSON
+/// representation for further inspection (e.g. attribute extraction).
+///
+/// Returns `None` when the content type is unsupported or decoding fails.
+pub fn decode_payload_value(
+    signal: Signal,
+    content_type_header: Option<&str>,
+    body: &Bytes,
+) -> Option<serde_json::Value> {
+    let ct = content_type_header.unwrap_or("");
+    let content_type = parse_content_type(ct).ok()?;
+    match content_type {
+        ContentType::Json => serde_json::from_slice(body).ok(),
+        ContentType::Protobuf => payload_to_json_value(signal, body),
+    }
+}
+
+/// `(attribute_key, attribute_value)` pair to be written to the attribute
+/// inverted index.
+pub type IndexableAttribute = (String, String);
+
+/// Extracts all indexable attribute (key, value) pairs from a decoded OTLP
+/// payload (the JSON representation produced by [`decode_payload_value`]).
+///
+/// Walks resource attributes plus signal-specific attributes:
+///   - Traces  : resource attributes + span attributes (e.g. `http.route`)
+///   - Metrics : resource attributes + per-data-point attributes
+///   - Logs    : resource attributes + log record attributes
+///
+/// Duplicates and `service.name` are filtered out (`service.name` already has
+/// a dedicated index path on `NormalizedEntry::service_name`). Only
+/// `stringValue`-typed attributes are indexed; numeric / array values are
+/// dropped to keep the index focused on autocomplete-friendly text.
+pub fn extract_indexable_attributes_from_value(
+    signal: Signal,
+    value: &serde_json::Value,
+) -> Vec<IndexableAttribute> {
+    use std::collections::HashSet;
+
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+    let mut out: Vec<IndexableAttribute> = Vec::new();
+
+    let Some(blocks) = resource_blocks_for_signal(signal, value) else {
+        return out;
+    };
+
+    for block in blocks {
+        if let Some(resource_attrs) = block.get("resource").and_then(|r| r.get("attributes")) {
+            push_string_attrs(resource_attrs, &mut seen, &mut out);
+        }
+
+        match signal {
+            Signal::Traces => walk_signal_attrs(block, "scopeSpans", "spans", &mut seen, &mut out),
+            Signal::Logs => {
+                walk_signal_attrs(block, "scopeLogs", "logRecords", &mut seen, &mut out)
+            }
+            Signal::Metrics => {
+                let Some(scopes) = block
+                    .get("scopeMetrics")
+                    .and_then(serde_json::Value::as_array)
+                else {
+                    continue;
+                };
+                for scope in scopes {
+                    let Some(metrics) = scope.get("metrics").and_then(serde_json::Value::as_array)
+                    else {
+                        continue;
+                    };
+                    for metric in metrics {
+                        push_metric_data_point_attrs(metric, &mut seen, &mut out);
+                    }
+                }
+            }
+        }
+    }
+
+    out
+}
+
+fn walk_signal_attrs(
+    block: &serde_json::Value,
+    scopes_key: &str,
+    items_key: &str,
+    seen: &mut std::collections::HashSet<(String, String)>,
+    out: &mut Vec<IndexableAttribute>,
+) {
+    let Some(scopes) = block.get(scopes_key).and_then(serde_json::Value::as_array) else {
+        return;
+    };
+    for scope in scopes {
+        let Some(items) = scope.get(items_key).and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        for item in items {
+            if let Some(attrs) = item.get("attributes") {
+                push_string_attrs(attrs, seen, out);
+            }
+        }
+    }
+}
+
+fn push_string_attrs(
+    attrs: &serde_json::Value,
+    seen: &mut std::collections::HashSet<(String, String)>,
+    out: &mut Vec<IndexableAttribute>,
+) {
+    let Some(arr) = attrs.as_array() else {
+        return;
+    };
+    for attr in arr {
+        let Some(key) = attr.get("key").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        // service.name is already indexed by service_name extraction; skip to
+        // avoid duplication and bloat in the inverted index.
+        if key == SERVICE_NAME_ATTRIBUTE {
+            continue;
+        }
+        let Some(value) = attr
+            .get("value")
+            .and_then(|v| v.get("stringValue"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        if value.is_empty() {
+            continue;
+        }
+        let entry = (key.to_string(), value.to_string());
+        if seen.insert(entry.clone()) {
+            out.push(entry);
+        }
+    }
+}
+
+fn push_metric_data_point_attrs(
+    metric: &serde_json::Value,
+    seen: &mut std::collections::HashSet<(String, String)>,
+    out: &mut Vec<IndexableAttribute>,
+) {
+    // Metric body shape varies (gauge / sum / histogram / summary /
+    // exponentialHistogram) but each carries a `dataPoints` array whose
+    // entries have `attributes`.
+    for kind in [
+        "gauge",
+        "sum",
+        "histogram",
+        "summary",
+        "exponentialHistogram",
+    ] {
+        let Some(body) = metric.get(kind) else {
+            continue;
+        };
+        let Some(points) = body.get("dataPoints").and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        for point in points {
+            if let Some(attrs) = point.get("attributes") {
+                push_string_attrs(attrs, seen, out);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,5 +625,133 @@ mod tests {
         let entry = parse_ingest_request(Signal::Logs, Some("application/json"), body).unwrap();
 
         assert_eq!(entry.service_name.as_deref(), Some("worker-billing"));
+    }
+
+    // --- extract_indexable_attributes_from_value ---------------------------
+
+    #[test]
+    fn test_extract_indexable_attributes_walks_resource_and_span_attributes() {
+        let value: serde_json::Value = serde_json::from_str(
+            r#"{
+                "resourceSpans": [
+                    {
+                        "resource": {
+                            "attributes": [
+                                { "key": "service.name", "value": { "stringValue": "checkout" } },
+                                { "key": "k8s.pod.name", "value": { "stringValue": "checkout-7" } }
+                            ]
+                        },
+                        "scopeSpans": [
+                            {
+                                "spans": [
+                                    {
+                                        "attributes": [
+                                            { "key": "http.route", "value": { "stringValue": "/api/x" } },
+                                            { "key": "http.method", "value": { "stringValue": "GET" } }
+                                        ]
+                                    },
+                                    {
+                                        "attributes": [
+                                            { "key": "http.route", "value": { "stringValue": "/api/x" } }
+                                        ]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let attrs = extract_indexable_attributes_from_value(Signal::Traces, &value);
+        // service.name is intentionally filtered out
+        assert!(attrs.iter().all(|(k, _)| k != "service.name"));
+        assert!(attrs.contains(&("k8s.pod.name".to_string(), "checkout-7".to_string())));
+        assert!(attrs.contains(&("http.route".to_string(), "/api/x".to_string())));
+        assert!(attrs.contains(&("http.method".to_string(), "GET".to_string())));
+        // duplicates collapsed
+        let route_count = attrs.iter().filter(|(k, _)| k == "http.route").count();
+        assert_eq!(route_count, 1);
+    }
+
+    #[test]
+    fn test_extract_indexable_attributes_walks_log_records() {
+        let value: serde_json::Value = serde_json::from_str(
+            r#"{
+                "resourceLogs": [{
+                    "resource": {"attributes": [{"key":"k8s.namespace","value":{"stringValue":"prod"}}]},
+                    "scopeLogs": [{
+                        "logRecords": [{
+                            "attributes": [{"key":"log.level","value":{"stringValue":"ERROR"}}]
+                        }]
+                    }]
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let attrs = extract_indexable_attributes_from_value(Signal::Logs, &value);
+        assert!(attrs.contains(&("k8s.namespace".to_string(), "prod".to_string())));
+        assert!(attrs.contains(&("log.level".to_string(), "ERROR".to_string())));
+    }
+
+    #[test]
+    fn test_extract_indexable_attributes_walks_metric_data_points() {
+        let value: serde_json::Value = serde_json::from_str(
+            r#"{
+                "resourceMetrics": [{
+                    "resource": {"attributes": []},
+                    "scopeMetrics": [{
+                        "metrics": [{
+                            "name": "http.requests",
+                            "sum": {
+                                "dataPoints": [
+                                    {"attributes":[{"key":"http.status","value":{"stringValue":"200"}}]},
+                                    {"attributes":[{"key":"http.status","value":{"stringValue":"500"}}]}
+                                ]
+                            }
+                        }]
+                    }]
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let attrs = extract_indexable_attributes_from_value(Signal::Metrics, &value);
+        assert!(attrs.contains(&("http.status".to_string(), "200".to_string())));
+        assert!(attrs.contains(&("http.status".to_string(), "500".to_string())));
+    }
+
+    #[test]
+    fn test_extract_indexable_attributes_skips_non_string_values() {
+        let value: serde_json::Value = serde_json::from_str(
+            r#"{
+                "resourceSpans": [{
+                    "resource": {"attributes": [
+                        {"key":"int.attr","value":{"intValue":"42"}},
+                        {"key":"text.attr","value":{"stringValue":"yes"}}
+                    ]}
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let attrs = extract_indexable_attributes_from_value(Signal::Traces, &value);
+        assert!(attrs.iter().all(|(k, _)| k != "int.attr"));
+        assert!(attrs.contains(&("text.attr".to_string(), "yes".to_string())));
+    }
+
+    #[test]
+    fn test_decode_payload_value_decodes_json_payload() {
+        let body = Bytes::from_static(br#"{"resourceSpans":[]}"#);
+        let value = decode_payload_value(Signal::Traces, Some("application/json"), &body).unwrap();
+        assert!(value.get("resourceSpans").is_some());
+    }
+
+    #[test]
+    fn test_decode_payload_value_returns_none_for_unsupported_content_type() {
+        let body = Bytes::from_static(b"{}");
+        assert!(decode_payload_value(Signal::Traces, Some("text/plain"), &body).is_none());
     }
 }

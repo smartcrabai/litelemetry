@@ -1,6 +1,7 @@
 use litelemetry::alerts::AlertRuntime;
-use litelemetry::server::{SharedViewerRuntime, build_app_with_full_services};
+use litelemetry::server::{SharedViewerRuntime, build_app_with_services_full};
 use litelemetry::storage::alert_store::{AlertStore, MemoryAlertStore, PostgresAlertStore};
+use litelemetry::storage::attr_index::AttrIndexStore;
 use litelemetry::storage::memory::{
     MemoryStreamStore, MemoryViewerStore, default_dashboard_definitions, default_viewer_definitions,
 };
@@ -49,129 +50,137 @@ async fn main() {
     ));
     let standalone = exit_on_config_error(read_standalone(standalone_raw.as_deref()));
 
-    let (stream_store, viewer_store, viewer_runtime, rollup_store, alert_store) = if standalone {
-        tracing::warn!(
-            "starting in standalone (in-memory) mode; set STANDALONE=false to use persistent storage"
-        );
+    let (stream_store, viewer_store, viewer_runtime, rollup_store, alert_store, attr_index) =
+        if standalone {
+            tracing::warn!(
+                "starting in standalone (in-memory) mode; set STANDALONE=false to use persistent storage"
+            );
 
-        let memory_stream_max_entries_raw = std::env::var("MEMORY_STREAM_MAX_ENTRIES").ok();
-        let max_entries = exit_on_config_error(read_memory_stream_max_entries(
-            memory_stream_max_entries_raw.as_deref(),
-        ));
+            let memory_stream_max_entries_raw = std::env::var("MEMORY_STREAM_MAX_ENTRIES").ok();
+            let max_entries = exit_on_config_error(read_memory_stream_max_entries(
+                memory_stream_max_entries_raw.as_deref(),
+            ));
 
-        let memory_viewer_store = MemoryViewerStore::new();
-        let viewer_defs = default_viewer_definitions();
-        let viewer_ids: Vec<uuid::Uuid> = viewer_defs.iter().map(|d| d.id).collect();
-        for def in &viewer_defs {
-            memory_viewer_store
-                .insert_viewer_definition(def)
-                .await
-                .expect("failed to insert default viewer definition");
-        }
-        for dash in default_dashboard_definitions(&viewer_ids) {
-            memory_viewer_store
-                .insert_dashboard(&dash)
-                .await
-                .expect("failed to insert default dashboard");
-        }
+            let memory_viewer_store = MemoryViewerStore::new();
+            let viewer_defs = default_viewer_definitions();
+            let viewer_ids: Vec<uuid::Uuid> = viewer_defs.iter().map(|d| d.id).collect();
+            for def in &viewer_defs {
+                memory_viewer_store
+                    .insert_viewer_definition(def)
+                    .await
+                    .expect("failed to insert default viewer definition");
+            }
+            for dash in default_dashboard_definitions(&viewer_ids) {
+                memory_viewer_store
+                    .insert_dashboard(&dash)
+                    .await
+                    .expect("failed to insert default dashboard");
+            }
 
-        let stream_store = StreamStore::Memory(MemoryStreamStore::new(max_entries));
-        let viewer_store = ViewerStore::Memory(memory_viewer_store);
+            let stream_store = StreamStore::Memory(MemoryStreamStore::new(max_entries));
+            let viewer_store = ViewerStore::Memory(memory_viewer_store);
 
-        let runtime = build_and_spawn_viewer_runtime(
-            viewer_store.clone(),
-            stream_store.clone(),
-            viewer_runtime_poll_ms,
-        )
-        .await;
-
-        let rollup_store = RollupStore::Memory(MemoryRollupStore::new());
-
-        let alert_store = AlertStore::Memory(MemoryAlertStore::new());
-        AlertRuntime::new(alert_store.clone(), runtime.clone())
-            .spawn(DEFAULT_ALERT_RUNTIME_TICK_MS);
-        tracing::info!("alert runtime started (standalone)");
-
-        (
-            stream_store,
-            Some(viewer_store),
-            Some(runtime),
-            Some(rollup_store),
-            Some(alert_store),
-        )
-    } else {
-        let redis_url =
-            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
-        let database_url = std::env::var("DATABASE_URL").ok();
-
-        let redis_stream_max_entries_raw = std::env::var("REDIS_STREAM_MAX_ENTRIES").ok();
-        let redis_stream_max_entries = exit_on_config_error(read_redis_stream_max_entries(
-            redis_stream_max_entries_raw.as_deref(),
-        ));
-
-        tracing::info!(
-            "connecting to Redis: {}",
-            redact_redis_url_for_log(&redis_url)
-        );
-        let redis = RedisStore::new(&redis_url, redis_stream_max_entries)
-            .await
-            .expect("failed to connect to Redis");
-        let stream_store = StreamStore::Redis(redis);
-
-        let rollup_redis = RedisRollupStore::new(&redis_url)
-            .await
-            .expect("failed to connect to Redis for rollups");
-        let rollup_store = Some(RollupStore::Redis(rollup_redis));
-
-        let mut viewer_store = None;
-        let mut viewer_runtime: Option<SharedViewerRuntime> = None;
-        let mut alert_store: Option<AlertStore> = None;
-
-        if let Some(database_url) = database_url.as_deref() {
-            tracing::info!("connecting to PostgreSQL");
-            let postgres_store = PostgresStore::new(database_url)
-                .await
-                .expect("failed to connect to PostgreSQL");
-            postgres_store
-                .create_schema()
-                .await
-                .expect("failed to create PostgreSQL schema");
-
-            let pg_alert_store = PostgresAlertStore::new(postgres_store.pool());
-            let vs = ViewerStore::Postgres(postgres_store);
             let runtime = build_and_spawn_viewer_runtime(
-                vs.clone(),
+                viewer_store.clone(),
                 stream_store.clone(),
                 viewer_runtime_poll_ms,
             )
             .await;
 
-            let alerts = AlertStore::Postgres(pg_alert_store);
-            AlertRuntime::new(alerts.clone(), runtime.clone()).spawn(DEFAULT_ALERT_RUNTIME_TICK_MS);
-            tracing::info!("alert runtime started (postgres)");
+            let rollup_store = RollupStore::Memory(MemoryRollupStore::new());
 
-            viewer_store = Some(vs);
-            viewer_runtime = Some(runtime);
-            alert_store = Some(alerts);
+            let alert_store = AlertStore::Memory(MemoryAlertStore::new());
+            AlertRuntime::new(alert_store.clone(), runtime.clone())
+                .spawn(DEFAULT_ALERT_RUNTIME_TICK_MS);
+            tracing::info!("alert runtime started (standalone)");
+
+            // Standalone mode has no Postgres -- attribute inverted index disabled.
+            (
+                stream_store,
+                Some(viewer_store),
+                Some(runtime),
+                Some(rollup_store),
+                Some(alert_store),
+                None,
+            )
         } else {
-            tracing::info!("DATABASE_URL is not set; starting in ingest-only mode");
-        }
+            let redis_url =
+                std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+            let database_url = std::env::var("DATABASE_URL").ok();
 
-        (
-            stream_store,
-            viewer_store,
-            viewer_runtime,
-            rollup_store,
-            alert_store,
-        )
-    };
+            let redis_stream_max_entries_raw = std::env::var("REDIS_STREAM_MAX_ENTRIES").ok();
+            let redis_stream_max_entries = exit_on_config_error(read_redis_stream_max_entries(
+                redis_stream_max_entries_raw.as_deref(),
+            ));
 
-    let app = build_app_with_full_services(
+            tracing::info!(
+                "connecting to Redis: {}",
+                redact_redis_url_for_log(&redis_url)
+            );
+            let redis = RedisStore::new(&redis_url, redis_stream_max_entries)
+                .await
+                .expect("failed to connect to Redis");
+            let stream_store = StreamStore::Redis(redis);
+
+            let rollup_redis = RedisRollupStore::new(&redis_url)
+                .await
+                .expect("failed to connect to Redis for rollups");
+            let rollup_store = Some(RollupStore::Redis(rollup_redis));
+
+            let mut viewer_store = None;
+            let mut viewer_runtime: Option<SharedViewerRuntime> = None;
+            let mut alert_store: Option<AlertStore> = None;
+            let mut attr_index: Option<AttrIndexStore> = None;
+
+            if let Some(database_url) = database_url.as_deref() {
+                tracing::info!("connecting to PostgreSQL");
+                let postgres_store = PostgresStore::new(database_url)
+                    .await
+                    .expect("failed to connect to PostgreSQL");
+                postgres_store
+                    .create_schema()
+                    .await
+                    .expect("failed to create PostgreSQL schema");
+
+                let pg_alert_store = PostgresAlertStore::new(postgres_store.pool());
+                attr_index = Some(AttrIndexStore::new(postgres_store.pool()));
+                let vs = ViewerStore::Postgres(postgres_store);
+                let runtime = build_and_spawn_viewer_runtime(
+                    vs.clone(),
+                    stream_store.clone(),
+                    viewer_runtime_poll_ms,
+                )
+                .await;
+
+                let alerts = AlertStore::Postgres(pg_alert_store);
+                AlertRuntime::new(alerts.clone(), runtime.clone())
+                    .spawn(DEFAULT_ALERT_RUNTIME_TICK_MS);
+                tracing::info!("alert runtime started (postgres)");
+
+                viewer_store = Some(vs);
+                viewer_runtime = Some(runtime);
+                alert_store = Some(alerts);
+            } else {
+                tracing::info!("DATABASE_URL is not set; starting in ingest-only mode");
+            }
+
+            (
+                stream_store,
+                viewer_store,
+                viewer_runtime,
+                rollup_store,
+                alert_store,
+                attr_index,
+            )
+        };
+
+    let app = build_app_with_services_full(
         stream_store,
         viewer_store,
         viewer_runtime,
         rollup_store,
         alert_store,
+        attr_index,
     );
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await
