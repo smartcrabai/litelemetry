@@ -125,6 +125,9 @@ impl PostgresStore {
         sqlx::query(CREATE_NOTIFICATION_CHANNELS_SQL)
             .execute(&self.pool)
             .await?;
+        sqlx::query(crate::storage::slo_store::CREATE_SLO_DEFINITIONS_SQL)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
