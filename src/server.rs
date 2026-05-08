@@ -1356,6 +1356,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       <nav class="sidebar-nav">
         <a id="nav-viewers" class="sidebar-item active" href="#viewers" data-page="viewers">Viewers</a>
         <a id="nav-waterfall" class="sidebar-item" href="#waterfall" data-page="waterfall">Trace Waterfall</a>
+        <a id="nav-traces" class="sidebar-item" href="#traces" data-page="traces">Traces</a>
         <div class="sidebar-section-label">Dashboards</div>
         <div id="dashboard-list"></div>
         <button id="new-dashboard-button" class="secondary sidebar-new-btn" type="button">+ New Dashboard</button>
@@ -1622,6 +1623,77 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
                style="overflow-x:auto;width:100%;"></div>
         </section>
       </div><!-- #page-waterfall -->
+
+      <div id="page-traces" hidden>
+        <section class="toolbar panel panel-strong">
+          <div class="toolbar-row">
+            <input id="trace-search-trace-id" type="search" placeholder="Trace ID (exact match)" maxlength="128"
+                   aria-label="Trace ID lookup" style="flex:1;min-width:200px;" />
+            <button id="trace-lookup-button" class="primary" type="button">Lookup</button>
+          </div>
+          <div class="toolbar-row">
+            <input id="trace-search-service" type="search" placeholder="service.name (e.g. frontend)"
+                   aria-label="Service name filter" maxlength="120" style="flex:1;min-width:160px;" />
+            <input id="trace-search-min-duration" type="number" min="0" step="1" inputmode="numeric"
+                   placeholder="min duration (ms)" aria-label="Minimum trace duration in ms"
+                   style="max-width:170px;" />
+            <button id="trace-search-button" class="secondary" type="button">Search</button>
+            <button id="trace-search-refresh-button" class="secondary" type="button">Refresh</button>
+          </div>
+          <div id="trace-search-status" class="status-box" data-state="idle" role="status" aria-live="polite">
+            Enter a trace ID for an exact lookup, or filter the list below.
+          </div>
+        </section>
+
+        <section id="trace-search-list-section" class="panel panel-strong stack table-wrap">
+          <div id="trace-search-list-scroll" class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Trace ID</th>
+                  <th>Root Span</th>
+                  <th>Services</th>
+                  <th>Spans</th>
+                  <th>Duration</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="trace-search-list-body"></tbody>
+            </table>
+          </div>
+          <div id="trace-search-empty" class="empty" hidden>
+            <div class="stack">
+              <strong>No traces yet</strong>
+              <p>POST OTLP traces to <code>/v1/traces</code> and refresh.</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="trace-search-detail-section" class="panel panel-strong" hidden>
+          <div class="toolbar-row" style="align-items:center;">
+            <button id="trace-search-back-button" class="secondary" type="button">&larr; Back</button>
+            <h3 id="trace-search-detail-title" style="margin:0;"></h3>
+          </div>
+          <div id="trace-search-detail-meta" class="trace-detail-meta" style="margin:8px 0; color: var(--muted); font-size: 13px;"></div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Service</th>
+                  <th>Span</th>
+                  <th>Kind</th>
+                  <th>Span ID</th>
+                  <th>Parent</th>
+                  <th>Duration</th>
+                  <th>Status</th>
+                  <th>Span attributes</th>
+                </tr>
+              </thead>
+              <tbody id="trace-search-detail-body"></tbody>
+            </table>
+          </div>
+        </section>
+      </div><!-- #page-traces -->
     </main>
 
     <script>
@@ -3063,6 +3135,8 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const sidebarToggle = document.getElementById('sidebar-toggle');
       const sidebar = document.getElementById('sidebar');
       const navViewers = document.getElementById('nav-viewers');
+      const navTraces = document.getElementById('nav-traces');
+      const pageTraces = document.getElementById('page-traces');
       const newDashboardButton = document.getElementById('new-dashboard-button');
       const dashboardListEl = document.getElementById('dashboard-list');
       const pageViewers = document.getElementById('page-viewers');
@@ -3247,10 +3321,12 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         pageDashboard.hidden = page !== 'dashboard';
         const pageWaterfallEl = document.getElementById('page-waterfall');
         if (pageWaterfallEl) pageWaterfallEl.hidden = page !== 'waterfall';
+        pageTraces.hidden = page !== 'traces';
 
         navViewers.classList.toggle('active', page === 'viewers');
         const navWaterfallEl = document.getElementById('nav-waterfall');
         if (navWaterfallEl) navWaterfallEl.classList.toggle('active', page === 'waterfall');
+        navTraces.classList.toggle('active', page === 'traces');
 
         document.querySelectorAll('.sidebar-dashboard-item').forEach(el => {
           el.classList.toggle('active', el.dataset.id === dashboardId);
@@ -3281,6 +3357,9 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
         if (page === 'viewers') {
           previewViewer(true);
+        }
+        if (page === 'traces') {
+          loadTraceSearch();
         }
         sidebar.classList.remove('open');
 
@@ -3535,6 +3614,289 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           }
         });
       }
+
+      navTraces.addEventListener('click', (e) => {
+        e.preventDefault();
+        navigateTo('traces');
+      });
+
+      // --- Trace search page ----------------------------------------------
+      const traceSearchTraceIdInput = document.getElementById('trace-search-trace-id');
+      const traceSearchServiceInput = document.getElementById('trace-search-service');
+      const traceSearchMinDurationInput = document.getElementById('trace-search-min-duration');
+      const traceLookupButton = document.getElementById('trace-lookup-button');
+      const traceSearchButton = document.getElementById('trace-search-button');
+      const traceSearchRefreshButton = document.getElementById('trace-search-refresh-button');
+      const traceSearchStatus = document.getElementById('trace-search-status');
+      const traceSearchListSection = document.getElementById('trace-search-list-section');
+      const traceSearchListBody = document.getElementById('trace-search-list-body');
+      const traceSearchListScroll = document.getElementById('trace-search-list-scroll');
+      const traceSearchEmpty = document.getElementById('trace-search-empty');
+      const traceSearchDetailSection = document.getElementById('trace-search-detail-section');
+      const traceSearchDetailTitle = document.getElementById('trace-search-detail-title');
+      const traceSearchDetailMeta = document.getElementById('trace-search-detail-meta');
+      const traceSearchDetailBody = document.getElementById('trace-search-detail-body');
+      const traceSearchBackButton = document.getElementById('trace-search-back-button');
+
+      const SPAN_KIND_LABELS = {
+        0: 'UNSPECIFIED',
+        1: 'INTERNAL',
+        2: 'SERVER',
+        3: 'CLIENT',
+        4: 'PRODUCER',
+        5: 'CONSUMER',
+      };
+
+      function spanKindLabel(k) {
+        return SPAN_KIND_LABELS[k] || String(k);
+      }
+
+      function statusLabel(code) {
+        if (code === 2) return 'ERROR';
+        if (code === 1) return 'OK';
+        return 'UNSET';
+      }
+
+      function formatDurationMs(durationNs) {
+        const ms = Number(durationNs) / 1_000_000;
+        if (ms >= 1000) return (ms / 1000).toFixed(2) + ' s';
+        if (ms >= 10) return ms.toFixed(0) + ' ms';
+        return ms.toFixed(2) + ' ms';
+      }
+
+      function setTraceSearchStatus(state, message) {
+        traceSearchStatus.dataset.state = state;
+        traceSearchStatus.textContent = message;
+      }
+
+      function showTraceList() {
+        traceSearchListSection.hidden = false;
+        traceSearchDetailSection.hidden = true;
+      }
+
+      function showTraceDetail() {
+        traceSearchListSection.hidden = true;
+        traceSearchDetailSection.hidden = false;
+      }
+
+      function attributeValueToString(value) {
+        if (value == null || typeof value !== 'object') return String(value ?? '');
+        if ('stringValue' in value) return String(value.stringValue);
+        if ('intValue' in value) return String(value.intValue);
+        if ('doubleValue' in value) return String(value.doubleValue);
+        if ('boolValue' in value) return String(value.boolValue);
+        if ('arrayValue' in value) {
+          const arr = value.arrayValue && Array.isArray(value.arrayValue.values)
+            ? value.arrayValue.values
+            : [];
+          return '[' + arr.map(attributeValueToString).join(', ') + ']';
+        }
+        return JSON.stringify(value);
+      }
+
+      function renderAttributesInline(attributes) {
+        if (!Array.isArray(attributes) || attributes.length === 0) return '';
+        return attributes
+          .map((attr) => {
+            const k = attr && attr.key ? String(attr.key) : '';
+            const v = attr && attr.value ? attributeValueToString(attr.value) : '';
+            return k + '=' + v;
+          })
+          .join(', ');
+      }
+
+      async function loadTraceSearch() {
+        showTraceList();
+        setTraceSearchStatus('working', 'Loading traces...');
+        const params = new URLSearchParams();
+        const service = traceSearchServiceInput.value.trim();
+        if (service) params.set('service', service);
+        const minDurationRaw = traceSearchMinDurationInput.value.trim();
+        if (minDurationRaw) {
+          const n = Number.parseInt(minDurationRaw, 10);
+          if (Number.isFinite(n) && n >= 0) params.set('min_duration_ms', String(n));
+        }
+        const url = '/api/traces/search' + (params.toString() ? '?' + params.toString() : '');
+        try {
+          const resp = await fetch(url, { headers: { accept: 'application/json' } });
+          if (!resp.ok) {
+            setTraceSearchStatus('error', 'Search failed: HTTP ' + resp.status);
+            renderTraceSearchList([]);
+            return;
+          }
+          const data = await resp.json();
+          renderTraceSearchList(data.traces || []);
+          setTraceSearchStatus('ok', (data.traces || []).length + ' trace(s) found.');
+        } catch (err) {
+          setTraceSearchStatus('error', 'Search failed: ' + (err && err.message ? err.message : err));
+          renderTraceSearchList([]);
+        }
+      }
+
+      function renderTraceSearchList(traces) {
+        traceSearchListBody.replaceChildren();
+        if (!traces.length) {
+          traceSearchListScroll.hidden = true;
+          traceSearchEmpty.hidden = false;
+          return;
+        }
+        traceSearchListScroll.hidden = false;
+        traceSearchEmpty.hidden = true;
+        for (const t of traces) {
+          const tr = document.createElement('tr');
+
+          const tdId = document.createElement('td');
+          const link = document.createElement('a');
+          link.href = '#';
+          link.textContent = t.trace_id;
+          link.style.color = 'var(--accent)';
+          link.style.cursor = 'pointer';
+          link.dataset.traceId = t.trace_id;
+          link.addEventListener('click', (e) => {
+            e.preventDefault();
+            lookupTrace(t.trace_id);
+          });
+          tdId.appendChild(link);
+          tr.appendChild(tdId);
+
+          const tdRoot = document.createElement('td');
+          tdRoot.textContent = t.root_span_name || '(no root span)';
+          tr.appendChild(tdRoot);
+
+          const tdServices = document.createElement('td');
+          tdServices.textContent = (t.service_names || []).join(', ');
+          tr.appendChild(tdServices);
+
+          const tdSpans = document.createElement('td');
+          tdSpans.textContent = String(t.span_count);
+          tr.appendChild(tdSpans);
+
+          const tdDuration = document.createElement('td');
+          tdDuration.textContent = formatDurationMs(t.duration_ns || 0);
+          tr.appendChild(tdDuration);
+
+          const tdStatus = document.createElement('td');
+          tdStatus.textContent = t.has_error ? 'ERROR' : 'OK';
+          if (t.has_error) tdStatus.style.color = 'var(--accent-strong)';
+          tr.appendChild(tdStatus);
+
+          traceSearchListBody.appendChild(tr);
+        }
+      }
+
+      async function lookupTrace(traceIdRaw) {
+        const traceId = (traceIdRaw || '').trim();
+        if (!traceId) {
+          setTraceSearchStatus('error', 'Enter a trace ID to look up.');
+          return;
+        }
+        setTraceSearchStatus('working', 'Loading trace ' + traceId + '...');
+        try {
+          const resp = await fetch('/api/traces?trace_id=' + encodeURIComponent(traceId), {
+            headers: { accept: 'application/json' },
+          });
+          if (resp.status === 404) {
+            setTraceSearchStatus('error', 'Trace not found: ' + traceId);
+            return;
+          }
+          if (!resp.ok) {
+            setTraceSearchStatus('error', 'Lookup failed: HTTP ' + resp.status);
+            return;
+          }
+          const detail = await resp.json();
+          renderTraceDetail(detail);
+          showTraceDetail();
+          setTraceSearchStatus('ok', 'Loaded trace ' + traceId);
+        } catch (err) {
+          setTraceSearchStatus('error', 'Lookup failed: ' + (err && err.message ? err.message : err));
+        }
+      }
+
+      function renderTraceDetail(detail) {
+        traceSearchDetailTitle.textContent = 'Trace ' + detail.trace_id;
+        const services = (detail.service_names || []).join(', ') || '(none)';
+        traceSearchDetailMeta.textContent =
+          'Spans: ' + detail.span_count +
+          '   |   Duration: ' + formatDurationMs(detail.duration_ns || 0) +
+          '   |   Services: ' + services +
+          '   |   Status: ' + (detail.has_error ? 'ERROR' : 'OK') +
+          (detail.root_span_name ? '   |   Root: ' + detail.root_span_name : '');
+
+        traceSearchDetailBody.replaceChildren();
+        for (const span of detail.spans || []) {
+          const tr = document.createElement('tr');
+
+          const tdService = document.createElement('td');
+          tdService.textContent = span.service_name || '(unknown)';
+          tr.appendChild(tdService);
+
+          const tdName = document.createElement('td');
+          tdName.textContent = span.name || '';
+          tr.appendChild(tdName);
+
+          const tdKind = document.createElement('td');
+          tdKind.textContent = spanKindLabel(span.kind);
+          tr.appendChild(tdKind);
+
+          const tdSpanId = document.createElement('td');
+          tdSpanId.textContent = span.span_id || '';
+          tdSpanId.style.fontFamily = 'monospace';
+          tdSpanId.style.fontSize = '12px';
+          tr.appendChild(tdSpanId);
+
+          const tdParent = document.createElement('td');
+          tdParent.textContent = span.parent_span_id || '(root)';
+          tdParent.style.fontFamily = 'monospace';
+          tdParent.style.fontSize = '12px';
+          tr.appendChild(tdParent);
+
+          const tdDur = document.createElement('td');
+          tdDur.textContent = formatDurationMs(span.duration_ns || 0);
+          tr.appendChild(tdDur);
+
+          const tdStatus = document.createElement('td');
+          tdStatus.textContent = statusLabel(span.status_code);
+          if (span.status_code === 2) tdStatus.style.color = 'var(--accent-strong)';
+          tr.appendChild(tdStatus);
+
+          const tdAttrs = document.createElement('td');
+          const attrs = renderAttributesInline(span.span_attributes);
+          tdAttrs.textContent = attrs || '-';
+          tdAttrs.style.fontSize = '12px';
+          tdAttrs.style.color = 'var(--muted)';
+          tr.appendChild(tdAttrs);
+
+          traceSearchDetailBody.appendChild(tr);
+        }
+      }
+
+      traceLookupButton.addEventListener('click', () => {
+        lookupTrace(traceSearchTraceIdInput.value);
+      });
+      traceSearchButton.addEventListener('click', () => loadTraceSearch());
+      traceSearchRefreshButton.addEventListener('click', () => loadTraceSearch());
+      traceSearchBackButton.addEventListener('click', () => {
+        showTraceList();
+        setTraceSearchStatus('idle', 'Ready.');
+      });
+      traceSearchTraceIdInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          lookupTrace(traceSearchTraceIdInput.value);
+        }
+      });
+      traceSearchServiceInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          loadTraceSearch();
+        }
+      });
+      traceSearchMinDurationInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          loadTraceSearch();
+        }
+      });
 
       dashboardRefreshToggleButton.addEventListener('click', () => {
         if (dashboardRefreshIntervalMs === null) {
@@ -4224,6 +4586,10 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           navigateTo('dashboard', hashData.id);
           return;
         }
+        if (window.location.hash === '#traces') {
+          navigateTo('traces');
+          return;
+        }
         if (
           window.location.hash === '#viewers' ||
           window.location.hash === ''
@@ -4540,6 +4906,8 @@ pub fn build_app_with_full_services(
         .route("/api/dashboards/{id}/export", get(export_dashboard))
         .route("/api/traces/{trace_id}/waterfall", get(get_trace_waterfall))
         .route("/api/rollups", get(get_rollups))
+        .route("/api/traces", get(get_trace_by_id))
+        .route("/api/traces/search", get(search_traces_handler))
         .route("/v1/traces", post(ingest_traces))
         .route("/v1/metrics", post(ingest_metrics))
         .route("/v1/logs", post(ingest_logs))
@@ -6431,6 +6799,75 @@ fn structured_trace_preview(payload: &Bytes) -> Option<String> {
         (None, Some(span_name)) => Some(format!("span={span_name} | otlp_json")),
         (None, None) => None,
     }
+}
+
+// --- APM trace search / lookup ---------------------------------------------
+
+const TRACE_SEARCH_READ_LIMIT: usize = 100_000;
+
+#[derive(Debug, Deserialize, Default)]
+struct TraceLookupQuery {
+    trace_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct TraceSearchQuery {
+    service: Option<String>,
+    min_duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct TraceSearchResponse {
+    traces: Vec<crate::apm::trace_search::TraceListItem>,
+}
+
+async fn read_all_trace_entries(state: &AppState) -> Result<Vec<NormalizedEntry>, StatusCode> {
+    let mut stream_store = state.stream_store.clone();
+    let entries = stream_store
+        .read_entries_since(Signal::Traces, None, TRACE_SEARCH_READ_LIMIT)
+        .await
+        .map_err(|error| {
+            tracing::error!("trace search: read_entries_since failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    Ok(entries.into_iter().map(|(_, entry)| entry).collect())
+}
+
+async fn get_trace_by_id(
+    State(state): State<AppState>,
+    Query(params): Query<TraceLookupQuery>,
+) -> Result<Json<crate::apm::trace_search::TraceDetail>, StatusCode> {
+    let trace_id = params
+        .trace_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or(StatusCode::BAD_REQUEST)?
+        .to_string();
+
+    let entries = read_all_trace_entries(&state).await?;
+    let detail =
+        crate::apm::trace_search::lookup_trace(&entries, &trace_id).ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(detail))
+}
+
+async fn search_traces_handler(
+    State(state): State<AppState>,
+    Query(params): Query<TraceSearchQuery>,
+) -> Result<Json<TraceSearchResponse>, StatusCode> {
+    let filter = crate::apm::trace_search::TraceSearchFilter {
+        service: params
+            .service
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        min_duration_ms: params.min_duration_ms,
+    };
+
+    let entries = read_all_trace_entries(&state).await?;
+    let traces = crate::apm::trace_search::search_traces(&entries, &filter);
+    Ok(Json(TraceSearchResponse { traces }))
 }
 
 fn extract_traces_from_entries(
