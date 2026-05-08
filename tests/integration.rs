@@ -81,6 +81,7 @@ async fn setup_viewer_app() -> ViewerTestEnv {
         StreamStore::Redis(redis),
         Some(ViewerStore::Postgres(pg)),
         Some(runtime),
+        None,
     );
 
     ViewerTestEnv {
@@ -1774,6 +1775,7 @@ async fn setup_memory_viewer_app() -> MemoryViewerTestEnv {
         StreamStore::Memory(stream_store.clone()),
         Some(ViewerStore::Memory(viewer_store.clone())),
         Some(runtime),
+        None,
     );
 
     MemoryViewerTestEnv { app }
@@ -2459,6 +2461,7 @@ async fn test_get_viewer_by_id_defaults_missing_chart_type_to_table_memory() {
         StreamStore::Memory(stream_store),
         Some(ViewerStore::Memory(viewer_store)),
         Some(runtime),
+        None,
     );
 
     let resp = app
@@ -3000,6 +3003,7 @@ async fn test_get_dashboard_defaults_missing_columns_to_two_memory() {
         StreamStore::Memory(stream_store),
         Some(ViewerStore::Memory(viewer_store)),
         Some(runtime),
+        None,
     );
 
     let resp = app
@@ -3220,6 +3224,7 @@ async fn test_get_dashboard_with_lookback_ms_filters_entries_memory() {
         StreamStore::Memory(stream_store),
         Some(ViewerStore::Memory(viewer_store)),
         Some(runtime),
+        None,
     );
 
     let resp = app
@@ -3273,6 +3278,7 @@ async fn test_get_dashboard_with_invalid_lookback_ms_returns_400_memory() {
         StreamStore::Memory(stream_store),
         Some(ViewerStore::Memory(viewer_store)),
         Some(runtime),
+        None,
     );
 
     let resp = app
@@ -3339,6 +3345,7 @@ async fn test_get_dashboard_rejects_lookback_ms_above_dashboard_limit_memory() {
         StreamStore::Memory(stream_store),
         Some(ViewerStore::Memory(viewer_store)),
         Some(runtime),
+        None,
     );
 
     let resp = app
@@ -3407,6 +3414,7 @@ async fn test_get_dashboard_without_lookback_ms_uses_viewer_default_memory() {
         StreamStore::Memory(stream_store),
         Some(ViewerStore::Memory(viewer_store)),
         Some(runtime),
+        None,
     );
 
     let resp = app
@@ -4276,6 +4284,7 @@ async fn test_get_dashboard_legacy_layout_without_spans_defaults_to_one_memory()
         StreamStore::Memory(stream_store),
         Some(ViewerStore::Memory(viewer_store)),
         Some(runtime),
+        None,
     );
 
     let resp = app
@@ -6051,6 +6060,7 @@ async fn test_list_services_returns_unique_service_names_memory() {
         StreamStore::Memory(stream_store),
         Some(ViewerStore::Memory(viewer_store)),
         Some(runtime),
+        None,
     );
 
     // When: GET /api/services
@@ -6130,6 +6140,7 @@ async fn test_get_dashboard_with_service_name_filter_memory() {
         StreamStore::Memory(stream_store),
         Some(ViewerStore::Memory(viewer_store)),
         Some(runtime),
+        None,
     );
 
     // When: GET /api/dashboards/{id}?service_name=svc-a
@@ -6199,6 +6210,7 @@ async fn test_get_dashboard_with_query_filter_matches_service_name_memory() {
         StreamStore::Memory(stream_store),
         Some(ViewerStore::Memory(viewer_store)),
         Some(runtime),
+        None,
     );
 
     // When: GET /api/dashboards/{id}?query=alpha  (partial match on service name)
@@ -6280,6 +6292,7 @@ async fn test_get_dashboard_with_query_filter_matches_payload_text_memory() {
         StreamStore::Memory(stream_store),
         Some(ViewerStore::Memory(viewer_store)),
         Some(runtime),
+        None,
     );
 
     // When: GET /api/dashboards/{id}?query=grpc.order  (partial match on span name)
@@ -7255,7 +7268,7 @@ async fn test_ingest_traces_populates_rollups() {
     let stream_store = StreamStore::Redis(make_redis_store(redis_port).await);
     let rollup_store = RollupStore::Redis(RedisRollupStore::new(&redis_url).await.unwrap());
 
-    let app = build_app_with_full_services(stream_store, None, None, Some(rollup_store));
+    let app = build_app_with_full_services(stream_store, None, None, Some(rollup_store), None);
 
     let before = chrono::Utc::now();
     let trace_request = Request::builder()
@@ -7317,7 +7330,7 @@ async fn test_rollups_endpoint_validates_inputs() {
 
     let stream_store = StreamStore::Redis(make_redis_store(redis_port).await);
     let rollup_store = RollupStore::Redis(RedisRollupStore::new(&redis_url).await.unwrap());
-    let app = build_app_with_full_services(stream_store, None, None, Some(rollup_store));
+    let app = build_app_with_full_services(stream_store, None, None, Some(rollup_store), None);
 
     for uri in [
         "/api/rollups?signal=invalid&resolution=1m&from=0&to=0",
@@ -7347,7 +7360,7 @@ async fn test_rollups_endpoint_validates_inputs() {
 #[tokio::test]
 async fn test_rollups_endpoint_returns_503_without_store() {
     let stream_store = StreamStore::Memory(MemoryStreamStore::new(100));
-    let app = build_app_with_services(stream_store, None, None);
+    let app = build_app_with_services(stream_store, None, None, None);
 
     let response = app
         .oneshot(
@@ -7522,4 +7535,219 @@ async fn test_trace_search_and_trace_id_lookup_via_api() {
     // 6. Lookup without trace_id -> 400
     let bad = send_get_request(&app, "/api/traces").await;
     assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+}
+
+// --- Alert tests --------------------------------------------------------------
+
+/// End-to-end test for alert evaluation.
+///
+/// Scenario:
+///   1. Insert a viewer that targets the traces signal.
+///   2. Insert an alert with `count > 0` against that viewer.
+///   3. Start the viewer runtime + alert runtime.
+///   4. Push a few telemetry entries through ingest.
+///   5. Manually run `tick()` and assert the alert is in `Breach`.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_alert_runtime_breach_when_threshold_exceeded() {
+    use litelemetry::alerts::{AlertRuntime, EvaluationOutcome};
+    use litelemetry::domain::alert::{
+        AlertCondition, AlertDefinition, AlertMetric, AlertSeverity, ThresholdOp,
+    };
+    use litelemetry::storage::alert_store::{AlertStore, PostgresAlertStore};
+
+    // 1. Start containers and wire stores.
+    let (redis_container, pg_container) =
+        tokio::join!(Redis::default().start(), Postgres::default().start(),);
+    let redis_container = redis_container.unwrap();
+    let pg_container = pg_container.unwrap();
+    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
+    let pg_port = pg_container.get_host_port_ipv4(5432).await.unwrap();
+
+    let pg = make_postgres_store(pg_port).await;
+    pg.create_schema().await.unwrap();
+    let alert_store = AlertStore::Postgres(PostgresAlertStore::new(pg.pool()));
+
+    // 2. Insert viewer definition.
+    let def = make_viewer_def(Signal::Traces.into(), 300_000, 1);
+    let viewer_id = def.id;
+    pg.insert_viewer_definition(&def).await.unwrap();
+
+    // 3. Add a few entries to Redis so the runtime ingests them.
+    let mut redis_write = make_redis_store(redis_port).await;
+    for _ in 0..3 {
+        redis_write
+            .append_entry(&make_traces_entry(1_000))
+            .await
+            .unwrap();
+    }
+
+    // 4. Build viewer runtime with those entries already loaded.
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Postgres(pg.clone()),
+        StreamStore::Redis(make_redis_store(redis_port).await),
+    )
+    .await
+    .unwrap();
+    let runtime = Arc::new(Mutex::new(runtime));
+
+    // 5. Insert an alert with `count > 0` => should breach.
+    let alert_id = Uuid::new_v4();
+    let alert_def = AlertDefinition {
+        id: alert_id,
+        name: "trace count breach".into(),
+        viewer_id,
+        condition: AlertCondition::Threshold {
+            op: ThresholdOp::Gt,
+            value: 0.0,
+            metric: AlertMetric::Count,
+        },
+        severity: AlertSeverity::Warning,
+        evaluation_interval_ms: 1_000,
+        enabled: true,
+        revision: 0,
+    };
+    alert_store.insert(&alert_def).await.unwrap();
+
+    // 6. Run alert runtime tick and assert breach.
+    let alert_runtime = AlertRuntime::new(alert_store.clone(), runtime.clone());
+    let evaluations = alert_runtime.tick().await.unwrap();
+    assert_eq!(evaluations.len(), 1);
+    let evaluation = &evaluations[0];
+    assert_eq!(evaluation.alert_id, alert_id);
+    assert_eq!(evaluation.outcome, EvaluationOutcome::Breach);
+    assert!(evaluation.measured_value >= 3.0);
+
+    // 7. Updating the alert to `count > 100` should produce Ok.
+    let mut updated = alert_def.clone();
+    updated.condition = AlertCondition::Threshold {
+        op: ThresholdOp::Gt,
+        value: 100.0,
+        metric: AlertMetric::Count,
+    };
+    // bump beyond the de-duped interval window so tick() will re-evaluate.
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    alert_store.update(&updated).await.unwrap();
+
+    let evaluations = alert_runtime.tick().await.unwrap();
+    assert_eq!(evaluations.len(), 1);
+    assert_eq!(evaluations[0].outcome, EvaluationOutcome::Ok);
+}
+
+/// CRUD smoke test for the /api/alerts endpoints.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_alert_api_crud_round_trip() {
+    use litelemetry::storage::alert_store::{AlertStore, PostgresAlertStore};
+
+    // Start containers.
+    let (redis_container, pg_container) =
+        tokio::join!(Redis::default().start(), Postgres::default().start(),);
+    let redis_container = redis_container.unwrap();
+    let pg_container = pg_container.unwrap();
+    let redis_port = redis_container.get_host_port_ipv4(6379).await.unwrap();
+    let pg_port = pg_container.get_host_port_ipv4(5432).await.unwrap();
+
+    let pg = make_postgres_store(pg_port).await;
+    pg.create_schema().await.unwrap();
+    let alert_store = AlertStore::Postgres(PostgresAlertStore::new(pg.pool()));
+
+    // Insert viewer that the alert references.
+    let def = make_viewer_def(Signal::Traces.into(), 300_000, 1);
+    let viewer_id = def.id;
+    pg.insert_viewer_definition(&def).await.unwrap();
+
+    let redis = make_redis_store(redis_port).await;
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Postgres(pg.clone()),
+        StreamStore::Redis(redis.clone()),
+    )
+    .await
+    .unwrap();
+    let runtime = Arc::new(Mutex::new(runtime));
+
+    let app = build_app_with_services(
+        StreamStore::Redis(redis),
+        Some(ViewerStore::Postgres(pg)),
+        Some(runtime),
+        Some(alert_store.clone()),
+    );
+
+    // POST /api/alerts
+    let body = json!({
+        "name": "test alert",
+        "viewer_id": viewer_id,
+        "condition": {"type":"threshold","op":">","value":0,"metric":"count"},
+        "severity": "warning",
+        "evaluation_interval_ms": 5000,
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/alerts")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let id = value["id"].as_str().unwrap().to_string();
+
+    // GET /api/alerts
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/alerts")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let list: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let alerts = list["alerts"].as_array().unwrap();
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0]["id"].as_str().unwrap(), id);
+
+    // PATCH /api/alerts/{id}
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/alerts/{id}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({"enabled": false}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // DELETE /api/alerts/{id}
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/alerts/{id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 }
