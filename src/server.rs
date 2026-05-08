@@ -1,3 +1,4 @@
+use crate::apm::error_groups::{ErrorGroup, ErrorGroupAggregator, extract_error_occurrences};
 use crate::apm::service_map::{ServiceMap, build_service_map};
 use crate::apm::waterfall::{TraceWaterfall, WaterfallError, build_waterfall};
 use crate::domain::dashboard::{
@@ -18,6 +19,7 @@ use crate::notifications::{
 use crate::query::executor::{Cell as QueryCell, execute as execute_query, source_to_signal};
 use crate::query::parse as parse_query;
 use crate::slo::calculator::{CompiledSlo, ErrorBudget};
+use crate::storage::error_group_store::ErrorGroupStore;
 use crate::storage::rollup::{Resolution, RollupStore};
 use crate::storage::slo_store::SloStore;
 use crate::storage::{IncidentStore, StreamStore, ViewerStore};
@@ -1557,6 +1559,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         <a id="nav-waterfall" class="sidebar-item" href="#waterfall" data-page="waterfall">Trace Waterfall</a>
         <a id="nav-traces" class="sidebar-item" href="#traces" data-page="traces">Traces</a>
         <a id="nav-service-map" class="sidebar-item" href="#service-map" data-page="service-map">Service Map</a>
+        <a id="nav-errors" class="sidebar-item" href="#errors" data-page="errors">Errors</a>
         <a id="nav-alerts" class="sidebar-item" href="#alerts" data-page="alerts">Alerts</a>
         <a id="nav-incidents" class="sidebar-item" href="#incidents" data-page="incidents">Incidents</a>
         <a id="nav-slos" class="sidebar-item" href="#slos" data-page="slos">SLOs</a>
@@ -1869,6 +1872,54 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           </div>
         </section>
       </div><!-- #page-service-map -->
+
+      <div id="page-errors" hidden>
+        <section class="toolbar panel panel-strong">
+          <div class="toolbar-row">
+            <h2 style="margin:0;flex:1;">Error Groups</h2>
+            <select id="errors-lookback-select" aria-label="Lookback window">
+              <option value="300000">5m</option>
+              <option value="900000">15m</option>
+              <option value="3600000" selected>1h</option>
+              <option value="21600000">6h</option>
+              <option value="86400000">24h</option>
+            </select>
+            <button id="errors-refresh-button" class="secondary" type="button">Refresh</button>
+          </div>
+          <div id="errors-status-box" class="status-box" data-state="working">Loading error groups...</div>
+        </section>
+        <section class="panel panel-strong stack table-wrap">
+          <div id="errors-table-scroll" class="table-scroll" hidden>
+            <table data-testid="errors-table">
+              <thead>
+                <tr>
+                  <th>Signature</th>
+                  <th>Fingerprint</th>
+                  <th>Count</th>
+                  <th>First seen</th>
+                  <th>Last seen</th>
+                </tr>
+              </thead>
+              <tbody id="errors-table-body"></tbody>
+            </table>
+          </div>
+          <div id="errors-empty" class="empty">
+            <div class="stack">
+              <strong id="errors-empty-title">No errors yet</strong>
+              <p id="errors-empty-body">Send traces with exception events or ERROR-severity logs to populate this view.</p>
+            </div>
+          </div>
+        </section>
+        <section id="error-detail-section" class="panel panel-strong" hidden>
+          <div class="toolbar-row" style="margin-bottom: 4px;">
+            <h3 id="error-detail-title">Error Detail</h3>
+            <button id="error-detail-close" class="secondary btn-compact" type="button" style="margin-left:auto;">x</button>
+          </div>
+          <dl id="error-detail-meta" style="display:grid;grid-template-columns:max-content 1fr;gap:4px 16px;margin:0;"></dl>
+          <h4 style="margin-top:12px;">Stacktrace</h4>
+          <pre id="error-detail-stacktrace" style="background:rgba(0,0,0,0.04);padding:12px;border-radius:6px;overflow:auto;max-height:320px;white-space:pre-wrap;"></pre>
+        </section>
+      </div><!-- #page-errors -->
 
       <div id="page-dashboard" hidden>
         <div class="dashboard-page-header">
@@ -3905,10 +3956,12 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const navNotifications = document.getElementById('nav-notifications');
       const navQuery = document.getElementById('nav-query');
       const navAnomaly = document.getElementById('nav-anomaly');
+      const navErrors = document.getElementById('nav-errors');
       const newDashboardButton = document.getElementById('new-dashboard-button');
       const dashboardListEl = document.getElementById('dashboard-list');
       const pageViewers = document.getElementById('page-viewers');
       const pageQuery = document.getElementById('page-query');
+      const pageErrors = document.getElementById('page-errors');
       const pageDashboard = document.getElementById('page-dashboard');
       const pageIncidents = document.getElementById('page-incidents');
       const pageNotifications = document.getElementById('page-notifications');
@@ -3923,6 +3976,17 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const pageAnomaly = document.getElementById('page-anomaly');
       const pageServiceMap = document.getElementById('page-service-map');
       const navServiceMap = document.getElementById('nav-service-map');
+      const errorsLookbackSelect = document.getElementById('errors-lookback-select');
+      const errorsRefreshButton = document.getElementById('errors-refresh-button');
+      const errorsStatusBox = document.getElementById('errors-status-box');
+      const errorsTableScroll = document.getElementById('errors-table-scroll');
+      const errorsTableBody = document.getElementById('errors-table-body');
+      const errorsEmpty = document.getElementById('errors-empty');
+      const errorDetailSection = document.getElementById('error-detail-section');
+      const errorDetailTitle = document.getElementById('error-detail-title');
+      const errorDetailMeta = document.getElementById('error-detail-meta');
+      const errorDetailStacktrace = document.getElementById('error-detail-stacktrace');
+      const errorDetailClose = document.getElementById('error-detail-close');
       const dashboardTitle = document.getElementById('dashboard-title');
       const dashboardGrid = document.getElementById('dashboard-grid');
       const dashboardRefreshIntervalSelect = document.getElementById('dashboard-refresh-interval');
@@ -4100,6 +4164,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         currentDashboardId = dashboardId || null;
 
         pageViewers.hidden = page !== 'viewers';
+        pageErrors.hidden = page !== 'errors';
         pageDashboard.hidden = page !== 'dashboard';
         const pageWaterfallEl = document.getElementById('page-waterfall');
         if (pageWaterfallEl) pageWaterfallEl.hidden = page !== 'waterfall';
@@ -4135,6 +4200,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
         if (navAnomaly) navAnomaly.classList.toggle('active', page === 'anomaly');
         navServiceMap.classList.toggle('active', page === 'service-map');
+        navErrors.classList.toggle('active', page === 'errors');
 
         document.querySelectorAll('.sidebar-dashboard-item').forEach(el => {
           el.classList.toggle('active', el.dataset.id === dashboardId);
@@ -4185,12 +4251,122 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         if (page === 'service-map') {
           refreshServiceMap();
         }
+        if (page === 'errors') {
+          loadErrorGroups();
+        }
         sidebar.classList.remove('open');
 
         if (page !== 'dashboard' && document.body.classList.contains('fullscreen')) {
           exitDashboardFullscreen();
         }
       }
+
+      let errorGroupsCache = [];
+
+      function setErrorsStatus(state, text) {
+        errorsStatusBox.dataset.state = state;
+        errorsStatusBox.textContent = text;
+      }
+
+      function formatErrorTimestamp(ts) {
+        if (!ts) return '--';
+        try {
+          return new Date(ts).toLocaleString();
+        } catch (_) {
+          return ts;
+        }
+      }
+
+      async function loadErrorGroups() {
+        const lookbackMs = errorsLookbackSelect.value;
+        setErrorsStatus('working', 'Loading error groups...');
+        try {
+          const resp = await fetch(`/api/error-groups?lookback_ms=${encodeURIComponent(lookbackMs)}`);
+          if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}`);
+          }
+          const data = await resp.json();
+          errorGroupsCache = Array.isArray(data.error_groups) ? data.error_groups : [];
+          renderErrorGroups(errorGroupsCache);
+          setErrorsStatus('ok', `Loaded ${errorGroupsCache.length} error group(s).`);
+        } catch (err) {
+          setErrorsStatus('error', `Failed to load error groups: ${err.message || err}`);
+          errorGroupsCache = [];
+          renderErrorGroups([]);
+        }
+      }
+
+      function renderErrorGroups(groups) {
+        errorsTableBody.innerHTML = '';
+        if (!groups || groups.length === 0) {
+          errorsEmpty.hidden = false;
+          errorsTableScroll.hidden = true;
+          return;
+        }
+        errorsEmpty.hidden = true;
+        errorsTableScroll.hidden = false;
+        for (const g of groups) {
+          const tr = document.createElement('tr');
+          tr.style.cursor = 'pointer';
+          tr.dataset.fingerprint = g.fingerprint;
+          tr.appendChild(buildCell('strong', g.signature || ''));
+          tr.appendChild(buildCell('code', g.fingerprint));
+          tr.appendChild(buildCell(null, String(g.count)));
+          tr.appendChild(buildCell(null, formatErrorTimestamp(g.first_seen)));
+          tr.appendChild(buildCell(null, formatErrorTimestamp(g.last_seen)));
+          tr.addEventListener('click', () => showErrorDetail(g));
+          errorsTableBody.appendChild(tr);
+        }
+      }
+
+      function buildCell(wrapperTag, text) {
+        const td = document.createElement('td');
+        if (wrapperTag) {
+          const wrap = document.createElement(wrapperTag);
+          wrap.textContent = text;
+          td.appendChild(wrap);
+        } else {
+          td.textContent = text;
+        }
+        return td;
+      }
+
+      function showErrorDetail(group) {
+        errorDetailSection.hidden = false;
+        errorDetailTitle.textContent = group.signature || group.fingerprint;
+        const sample = group.sample_payload || {};
+        const rows = [
+          ['Fingerprint', group.fingerprint],
+          ['Count', group.count],
+          ['First seen', formatErrorTimestamp(group.first_seen)],
+          ['Last seen', formatErrorTimestamp(group.last_seen)],
+          ['Service', sample.service_name || '(unknown)'],
+          ['Signal', sample.signal || '(unknown)'],
+          ['Type', sample.exception_type || '(unknown)'],
+          ['Message', sample.exception_message || '(unknown)'],
+        ];
+        errorDetailMeta.replaceChildren();
+        for (const [key, value] of rows) {
+          const dt = document.createElement('dt');
+          dt.textContent = key;
+          const dd = document.createElement('dd');
+          dd.textContent = value === undefined || value === null ? '' : String(value);
+          errorDetailMeta.appendChild(dt);
+          errorDetailMeta.appendChild(dd);
+        }
+        errorDetailStacktrace.textContent = sample.stacktrace || '(no stacktrace captured)';
+        errorDetailSection.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+      }
+
+      errorsLookbackSelect.addEventListener('change', loadErrorGroups);
+      errorsRefreshButton.addEventListener('click', loadErrorGroups);
+      navErrors.addEventListener('click', (e) => {
+        e.preventDefault();
+        navigateTo('errors');
+      });
+      errorDetailClose.addEventListener('click', () => {
+        errorDetailSection.hidden = true;
+      });
 
       function resizeDashboardPanelCharts() {
         for (const chart of dashboardPanelCharts) {
@@ -6797,6 +6973,7 @@ pub struct AppState {
     pub attr_index: Option<crate::storage::attr_index::AttrIndexStore>,
     pub incident_store: IncidentStore,
     pub slo_store: Option<SloStore>,
+    pub error_group_store: Option<ErrorGroupStore>,
 }
 
 pub type SharedViewerRuntime = Arc<Mutex<ViewerRuntime>>;
@@ -7130,6 +7307,7 @@ pub fn build_app_with_full_services(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -7154,6 +7332,7 @@ pub fn build_app_with_services_full(
     attr_index: Option<crate::storage::attr_index::AttrIndexStore>,
     incident_store: Option<IncidentStore>,
     slo_store: Option<SloStore>,
+    error_group_store: Option<ErrorGroupStore>,
 ) -> Router {
     let incident_store = incident_store.unwrap_or_else(|| {
         IncidentStore::Memory(crate::storage::memory::MemoryIncidentStore::new())
@@ -7167,6 +7346,7 @@ pub fn build_app_with_services_full(
         attr_index,
         incident_store,
         slo_store,
+        error_group_store,
     };
     let connect = crate::grpc::build_connect_router(state.clone());
 
@@ -7232,6 +7412,7 @@ pub fn build_app_with_services_full(
         .route("/api/exemplars", get(list_exemplars))
         .route("/api/anomaly/evaluate", post(evaluate_anomaly))
         .route("/api/service-map", get(service_map))
+        .route("/api/error-groups", get(list_error_groups))
         .route("/v1/traces", post(ingest_traces))
         .route("/v1/metrics", post(ingest_metrics))
         .route("/v1/logs", post(ingest_logs))
@@ -7527,6 +7708,39 @@ async fn service_map(
     let map = build_service_map(&normalized, now, lookback_ms);
 
     Ok(Json(map))
+}
+
+#[derive(Debug, Deserialize)]
+struct ErrorGroupQuery {
+    #[serde(default)]
+    lookback_ms: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct ErrorGroupsResponse {
+    error_groups: Vec<ErrorGroup>,
+}
+
+const DEFAULT_ERROR_GROUP_LOOKBACK_MS: i64 = 60 * 60 * 1_000;
+
+async fn list_error_groups(
+    State(state): State<AppState>,
+    Query(query): Query<ErrorGroupQuery>,
+) -> Result<Json<ErrorGroupsResponse>, StatusCode> {
+    let store = state
+        .error_group_store
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let lookback_ms = query
+        .lookback_ms
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_ERROR_GROUP_LOOKBACK_MS);
+    let since = Utc::now() - chrono::Duration::milliseconds(lookback_ms);
+    let error_groups = store.list_recent(since).await.map_err(|error| {
+        tracing::error!("error_group_store list_recent failed: {error}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(Json(ErrorGroupsResponse { error_groups }))
 }
 
 async fn list_viewers(
@@ -9426,6 +9640,7 @@ async fn handle_ingest(
                         )
                         .await;
                     }
+                    record_error_groups_from_entry(state.error_group_store.as_ref(), &entry).await;
                     StatusCode::OK
                 }
                 Err(error) => {
@@ -9543,6 +9758,32 @@ async fn index_entry_attributes(
         .await
     {
         tracing::warn!("attr_index record_attributes failed: {error}");
+    }
+}
+
+/// Extract error occurrences from `entry`, fold them by fingerprint, and upsert into the store.
+///
+/// Best-effort: errors during persistence are logged but do not fail ingest.
+pub(crate) async fn record_error_groups_from_entry(
+    store: Option<&ErrorGroupStore>,
+    entry: &NormalizedEntry,
+) {
+    let Some(store) = store else { return };
+    let occurrences = extract_error_occurrences(entry);
+    if occurrences.is_empty() {
+        return;
+    }
+    let mut aggregator = ErrorGroupAggregator::new();
+    for occ in occurrences {
+        aggregator.record(occ);
+    }
+    for group in aggregator.into_sorted_groups() {
+        if let Err(e) = store.upsert(&group).await {
+            tracing::warn!(
+                "error_group upsert failed (fingerprint={}): {e}",
+                group.fingerprint
+            );
+        }
     }
 }
 
@@ -10711,6 +10952,9 @@ mod tests {
 
         assert!(html.contains("sidebar"));
         assert!(html.contains("nav-viewers"));
+        assert!(html.contains("nav-errors"));
+        assert!(html.contains("page-errors"));
+        assert!(html.contains("errors-table"));
         assert!(html.contains("new-dashboard-button"));
         assert!(html.contains("page-dashboard"));
         assert!(html.contains("dashboard-grid"));

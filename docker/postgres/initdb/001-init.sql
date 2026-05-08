@@ -83,6 +83,16 @@ CREATE TABLE IF NOT EXISTS slo_definitions (
     enabled BOOLEAN NOT NULL DEFAULT TRUE
 );
 
+CREATE TABLE IF NOT EXISTS error_groups (
+    fingerprint TEXT PRIMARY KEY,
+    signature TEXT NOT NULL,
+    first_seen TIMESTAMPTZ NOT NULL,
+    last_seen TIMESTAMPTZ NOT NULL,
+    count BIGINT NOT NULL DEFAULT 0,
+    sample_payload JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS error_groups_last_seen_idx ON error_groups (last_seen);
 
 INSERT INTO viewer_definitions (
     id,

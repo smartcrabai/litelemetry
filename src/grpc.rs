@@ -35,14 +35,16 @@ struct OtlpService {
 impl OtlpService {
     async fn store(&self, entry: NormalizedEntry) -> Result<(), ConnectError> {
         let mut store = self.state.stream_store.clone();
-        store
-            .append_entry(&entry)
-            .await
-            .map(|_| ())
-            .map_err(|error| {
-                tracing::error!("stream append_entry failed: {error}");
-                ConnectError::internal("ingest failed")
-            })
+        store.append_entry(&entry).await.map_err(|error| {
+            tracing::error!("stream append_entry failed: {error}");
+            ConnectError::internal("ingest failed")
+        })?;
+        crate::server::record_error_groups_from_entry(
+            self.state.error_group_store.as_ref(),
+            &entry,
+        )
+        .await;
+        Ok(())
     }
 }
 

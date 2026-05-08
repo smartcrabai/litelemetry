@@ -2,6 +2,9 @@ use litelemetry::alerts::AlertRuntime;
 use litelemetry::server::{SharedViewerRuntime, build_app_with_services_full};
 use litelemetry::storage::alert_store::{AlertStore, MemoryAlertStore, PostgresAlertStore};
 use litelemetry::storage::attr_index::AttrIndexStore;
+use litelemetry::storage::error_group_store::{
+    ErrorGroupStore, MemoryErrorGroupStore, PostgresErrorGroupStore,
+};
 use litelemetry::storage::memory::{
     MemoryStreamStore, MemoryViewerStore, default_dashboard_definitions, default_viewer_definitions,
 };
@@ -59,6 +62,7 @@ async fn main() {
         alert_store,
         attr_index,
         slo_store,
+        error_group_store,
     ) = if standalone {
         tracing::warn!(
             "starting in standalone (in-memory) mode; set STANDALONE=false to use persistent storage"
@@ -87,6 +91,7 @@ async fn main() {
 
         let stream_store = StreamStore::Memory(MemoryStreamStore::new(max_entries));
         let viewer_store = ViewerStore::Memory(memory_viewer_store);
+        let error_group_store = ErrorGroupStore::Memory(MemoryErrorGroupStore::new());
 
         let runtime = build_and_spawn_viewer_runtime(
             viewer_store.clone(),
@@ -113,6 +118,7 @@ async fn main() {
             Some(alert_store),
             None,
             Some(slo_store),
+            Some(error_group_store),
         )
     } else {
         let redis_url =
@@ -143,6 +149,7 @@ async fn main() {
         let mut alert_store: Option<AlertStore> = None;
         let mut attr_index: Option<AttrIndexStore> = None;
         let mut slo_store: Option<SloStore> = None;
+        let mut error_group_store: Option<ErrorGroupStore> = None;
 
         if let Some(database_url) = database_url.as_deref() {
             tracing::info!("connecting to PostgreSQL");
@@ -159,6 +166,7 @@ async fn main() {
             slo_store = Some(SloStore::Postgres(PostgresSloStore::new(
                 postgres_store.pool(),
             )));
+            let pg_pool = postgres_store.pool();
             let vs = ViewerStore::Postgres(postgres_store);
             let runtime = build_and_spawn_viewer_runtime(
                 vs.clone(),
@@ -174,6 +182,9 @@ async fn main() {
             viewer_store = Some(vs);
             viewer_runtime = Some(runtime);
             alert_store = Some(alerts);
+            error_group_store = Some(ErrorGroupStore::Postgres(PostgresErrorGroupStore::new(
+                pg_pool,
+            )));
         } else {
             tracing::info!("DATABASE_URL is not set; starting in ingest-only mode");
         }
@@ -186,6 +197,7 @@ async fn main() {
             alert_store,
             attr_index,
             slo_store,
+            error_group_store,
         )
     };
 
@@ -198,6 +210,7 @@ async fn main() {
         attr_index,
         None,
         slo_store,
+        error_group_store,
     );
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await
