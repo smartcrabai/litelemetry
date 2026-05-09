@@ -23,7 +23,8 @@ redis = { features = ["tokio-comp", "streams"], version = "1.0" }
 regex = "1"
 reqwest = { features = [
   "json",
-  "rustls-tls",
+  "rustls",
+  "rustls-native-certs",
 ], default-features = false, version = "0.13" }
 serde = { features = ["derive"], version = "1" }
 serde_json = "1"
