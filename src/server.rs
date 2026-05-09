@@ -5196,7 +5196,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       if (navNotifications) {
         navNotifications.addEventListener('click', (e) => {
           e.preventDefault();
-          navigateTo('notifications');
+          window.location.hash = '#notifications';
         });
       }
 
