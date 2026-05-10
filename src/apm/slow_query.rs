@@ -10,8 +10,8 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 use serde::Serialize;
-use thiserror::Error;
 
+use crate::apm::parse_otlp_nano as parse_nano;
 use crate::domain::telemetry::{NormalizedEntry, Signal};
 use crate::ingest::otlp_http::attribute_string_value;
 use crate::ingest::otlp_pb::payload_as_value;
@@ -20,12 +20,6 @@ use crate::ingest::otlp_pb::payload_as_value;
 pub const DB_STATEMENT_ATTR: &str = "db.statement";
 /// Default key under which DB systems are recorded in span attributes.
 pub const DB_SYSTEM_ATTR: &str = "db.system";
-
-#[derive(Debug, Error)]
-pub enum AggregateError {
-    #[error("invalid percentile: {0}")]
-    InvalidPercentile(f64),
-}
 
 /// A single DB span extracted from the trace stream. Used both for slow-query
 /// aggregation and for N+1 detection.
@@ -86,20 +80,25 @@ pub fn normalize_statement(stmt: &str) -> String {
 
 /// Compute an integer percentile (`0.0..=100.0`) over a *sorted* slice using
 /// the nearest-rank method. Returns `0` for empty slices.
-pub fn percentile(sorted_values: &[u64], p: f64) -> Result<u64, AggregateError> {
-    if !(0.0..=100.0).contains(&p) {
-        return Err(AggregateError::InvalidPercentile(p));
-    }
+///
+/// # Panics (debug)
+///
+/// Panics in debug builds if `p` is outside `0.0..=100.0`.
+pub fn percentile(sorted_values: &[u64], p: f64) -> u64 {
+    debug_assert!(
+        (0.0..=100.0).contains(&p),
+        "percentile argument must be in 0.0..=100.0, got {p}"
+    );
     if sorted_values.is_empty() {
-        return Ok(0);
+        return 0;
     }
     if p <= 0.0 {
-        return Ok(sorted_values[0]);
+        return sorted_values[0];
     }
     // nearest-rank: ceil(p/100 * N) - 1, clamped into the slice range.
     let rank = (p / 100.0 * sorted_values.len() as f64).ceil() as usize;
     let idx = rank.saturating_sub(1).min(sorted_values.len() - 1);
-    Ok(sorted_values[idx])
+    sorted_values[idx]
 }
 
 /// Pull DB span facts out of trace entries.
@@ -163,7 +162,7 @@ fn extract_fact_from_span(
     let trace_id = span
         .get("traceId")
         .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
+        .filter(|s| !s.is_empty())?
         .to_string();
     let start_ns = parse_nano(span.get("startTimeUnixNano"));
     let end_ns = parse_nano(span.get("endTimeUnixNano"));
@@ -180,23 +179,9 @@ fn extract_fact_from_span(
     })
 }
 
-fn parse_nano(value: Option<&serde_json::Value>) -> u64 {
-    let Some(v) = value else { return 0 };
-    if let Some(n) = v.as_u64() {
-        return n;
-    }
-    if let Some(s) = v.as_str() {
-        return s.parse::<u64>().unwrap_or(0);
-    }
-    0
-}
-
 /// Group facts by `(statement, system)` and compute percentile latencies.
 /// Drops groups whose `p95 < min_p95_ms`.
-pub fn aggregate_slow_queries(
-    facts: &[DbSpanFact],
-    min_p95_ms: u64,
-) -> Result<Vec<SlowQueryStats>, AggregateError> {
+pub fn aggregate_slow_queries(facts: &[DbSpanFact], min_p95_ms: u64) -> Vec<SlowQueryStats> {
     let mut groups: HashMap<(String, Option<String>), Vec<u64>> = HashMap::new();
     for fact in facts {
         groups
@@ -208,10 +193,10 @@ pub fn aggregate_slow_queries(
     let mut out = Vec::with_capacity(groups.len());
     for ((statement, system), mut durations) in groups {
         durations.sort_unstable();
-        let p50 = percentile(&durations, 50.0)?;
-        let p95 = percentile(&durations, 95.0)?;
-        let p99 = percentile(&durations, 99.0)?;
-        let max_ms = *durations.last().unwrap_or(&0);
+        let p50 = percentile(&durations, 50.0);
+        let p95 = percentile(&durations, 95.0);
+        let p99 = percentile(&durations, 99.0);
+        let max_ms = *durations.last().expect("durations is non-empty");
         if p95 < min_p95_ms {
             continue;
         }
@@ -228,7 +213,7 @@ pub fn aggregate_slow_queries(
 
     // Sort by p95 descending so the worst offenders bubble up first.
     out.sort_by(|a, b| b.p95_ms.cmp(&a.p95_ms).then(b.count.cmp(&a.count)));
-    Ok(out)
+    out
 }
 
 /// Group key for N+1 detection: (trace_id, normalized statement, db.system).
@@ -370,26 +355,26 @@ mod tests {
 
     #[test]
     fn test_percentile_empty_slice_returns_zero() {
-        assert_eq!(percentile(&[], 95.0).unwrap(), 0);
+        assert_eq!(percentile(&[], 95.0), 0);
     }
 
     #[test]
     fn test_percentile_p50_p95_p99() {
         let sorted: Vec<u64> = (1..=100).collect();
-        assert_eq!(percentile(&sorted, 50.0).unwrap(), 50);
-        assert_eq!(percentile(&sorted, 95.0).unwrap(), 95);
-        assert_eq!(percentile(&sorted, 99.0).unwrap(), 99);
+        assert_eq!(percentile(&sorted, 50.0), 50);
+        assert_eq!(percentile(&sorted, 95.0), 95);
+        assert_eq!(percentile(&sorted, 99.0), 99);
     }
 
     #[test]
     fn test_percentile_single_value_returns_value() {
-        assert_eq!(percentile(&[42], 95.0).unwrap(), 42);
+        assert_eq!(percentile(&[42], 95.0), 42);
     }
 
     #[test]
-    fn test_percentile_invalid_value_errors() {
-        assert!(percentile(&[1, 2, 3], -1.0).is_err());
-        assert!(percentile(&[1, 2, 3], 101.0).is_err());
+    #[should_panic(expected = "percentile argument must be in 0.0..=100.0")]
+    fn test_percentile_invalid_value_panics() {
+        percentile(&[1, 2, 3], -1.0);
     }
 
     #[test]
@@ -427,7 +412,7 @@ mod tests {
                 duration_ms: (i + 1) * 10,
             })
             .collect();
-        let stats = aggregate_slow_queries(&facts, 50).unwrap();
+        let stats = aggregate_slow_queries(&facts, 50);
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].count, 10);
         // p95 of {10, 20, ..., 100} is 100.
@@ -446,7 +431,7 @@ mod tests {
                 duration_ms: 1,
             })
             .collect();
-        let stats = aggregate_slow_queries(&facts, 100).unwrap();
+        let stats = aggregate_slow_queries(&facts, 100);
         assert!(stats.is_empty());
     }
 

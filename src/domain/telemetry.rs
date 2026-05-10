@@ -3,7 +3,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// OTel signal type
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Signal {
     Traces,
     Metrics,
@@ -17,6 +18,14 @@ impl Signal {
             Signal::Traces => 0b001,
             Signal::Metrics => 0b010,
             Signal::Logs => 0b100,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Signal::Traces => "traces",
+            Signal::Metrics => "metrics",
+            Signal::Logs => "logs",
         }
     }
 

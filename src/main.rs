@@ -1,6 +1,7 @@
 use litelemetry::alerts::AlertRuntime;
 use litelemetry::server::{SharedViewerRuntime, build_app_with_services_full};
 use litelemetry::storage::alert_store::{AlertStore, MemoryAlertStore, PostgresAlertStore};
+use litelemetry::storage::api_key_store::{ApiKeyStore, MemoryApiKeyStore, PostgresApiKeyStore};
 use litelemetry::storage::attr_index::AttrIndexStore;
 use litelemetry::storage::error_group_store::{
     ErrorGroupStore, MemoryErrorGroupStore, PostgresErrorGroupStore,
@@ -53,6 +54,10 @@ async fn main() {
         viewer_runtime_poll_ms_raw.as_deref(),
     ));
     let standalone = exit_on_config_error(read_standalone(standalone_raw.as_deref()));
+    let api_keys_enabled = std::env::var("API_KEYS_ENABLED")
+        .ok()
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false);
 
     let (
         stream_store,
@@ -63,6 +68,7 @@ async fn main() {
         attr_index,
         slo_store,
         error_group_store,
+        api_key_store,
     ) = if standalone {
         tracing::warn!(
             "starting in standalone (in-memory) mode; set STANDALONE=false to use persistent storage"
@@ -119,6 +125,7 @@ async fn main() {
             None,
             Some(slo_store),
             Some(error_group_store),
+            Some(ApiKeyStore::Memory(MemoryApiKeyStore::new())),
         )
     } else {
         let redis_url =
@@ -150,6 +157,7 @@ async fn main() {
         let mut attr_index: Option<AttrIndexStore> = None;
         let mut slo_store: Option<SloStore> = None;
         let mut error_group_store: Option<ErrorGroupStore> = None;
+        let mut api_key_store: Option<ApiKeyStore> = None;
 
         if let Some(database_url) = database_url.as_deref() {
             tracing::info!("connecting to PostgreSQL");
@@ -182,6 +190,9 @@ async fn main() {
             viewer_store = Some(vs);
             viewer_runtime = Some(runtime);
             alert_store = Some(alerts);
+            api_key_store = Some(ApiKeyStore::Postgres(PostgresApiKeyStore::new(
+                pg_pool.clone(),
+            )));
             error_group_store = Some(ErrorGroupStore::Postgres(PostgresErrorGroupStore::new(
                 pg_pool,
             )));
@@ -198,6 +209,7 @@ async fn main() {
             attr_index,
             slo_store,
             error_group_store,
+            api_key_store,
         )
     };
 
@@ -211,6 +223,8 @@ async fn main() {
         None,
         slo_store,
         error_group_store,
+        api_key_store,
+        api_keys_enabled,
     );
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await

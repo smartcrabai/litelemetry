@@ -170,3 +170,11 @@ INSERT INTO dashboard_definitions (id, slug, name, layout_json, revision, enable
     1,
     true
 ) ON CONFLICT DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS api_keys (
+    id UUID PRIMARY KEY,
+    name TEXT NOT NULL,
+    key_hash TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS api_keys_hash_idx ON api_keys (key_hash);

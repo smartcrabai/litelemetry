@@ -107,7 +107,7 @@ impl PostgresSloStore {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.into_iter().map(row_to_slo).collect())
+        rows.into_iter().map(row_to_slo).collect()
     }
 
     pub async fn get(&self, id: Uuid) -> Result<Option<SloDefinition>, sqlx::Error> {
@@ -120,7 +120,7 @@ impl PostgresSloStore {
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(row_to_slo))
+        row.map(row_to_slo).transpose()
     }
 
     pub async fn delete(&self, id: Uuid) -> Result<bool, sqlx::Error> {
@@ -145,6 +145,9 @@ impl MemorySloStore {
 
     pub async fn insert(&self, slo: &SloDefinition) -> Result<(), StorageError> {
         let mut guard = self.inner.lock().await;
+        if guard.iter().any(|s| s.id == slo.id) {
+            return Err(StorageError::DuplicateKey(slo.id.to_string()));
+        }
         guard.push(slo.clone());
         Ok(())
     }
@@ -169,13 +172,15 @@ impl MemorySloStore {
     }
 }
 
-fn row_to_slo(row: sqlx::postgres::PgRow) -> SloDefinition {
+fn row_to_slo(row: sqlx::postgres::PgRow) -> Result<SloDefinition, sqlx::Error> {
     use sqlx::Row;
     let success_json: Value = row.get("success_filter_json");
     let total_json: Value = row.get("total_filter_json");
-    let success_filter = serde_json::from_value(success_json).unwrap_or_default();
-    let total_filter = serde_json::from_value(total_json).unwrap_or_default();
-    SloDefinition {
+    let success_filter =
+        serde_json::from_value(success_json).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+    let total_filter =
+        serde_json::from_value(total_json).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+    Ok(SloDefinition {
         id: row.get("id"),
         name: row.get("name"),
         viewer_id: row.get("viewer_id"),
@@ -184,7 +189,7 @@ fn row_to_slo(row: sqlx::postgres::PgRow) -> SloDefinition {
         success_filter,
         total_filter,
         enabled: row.get("enabled"),
-    }
+    })
 }
 
 #[cfg(test)]

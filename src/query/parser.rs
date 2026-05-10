@@ -16,7 +16,7 @@
 //! op         := '=' | '!=' | '<>' | '<' | '<=' | '>' | '>=' | LIKE
 //! col_list   := column (',' column)*
 //! column     := [a-zA-Z_][a-zA-Z_0-9.]*
-//! value      := string | number | TRUE | FALSE
+//! value      := string | number
 //! string     := '\'' ... '\'' | '"' ... '"'
 //! number     := -?[0-9]+ ( '.' [0-9]+ )?
 //! ```
@@ -453,10 +453,14 @@ fn parse_projection(p: &mut Parser) -> Result<Projection, ParseError> {
         Ok(Projection::Aggregate { func, arg, alias })
     } else {
         p.bump();
-        // Optional `AS alias` -- but the alias is currently ignored for plain
-        // columns (the column name itself is the output column). We still
-        // accept and discard it for forward compat.
-        let _ = parse_optional_alias(p)?;
+        let alias_offset = p.current_offset();
+        if let Some(alias) = parse_optional_alias(p)? {
+            return Err(ParseError::Unexpected {
+                found: alias,
+                expected: "no alias for plain column",
+                offset: alias_offset,
+            });
+        }
         Ok(Projection::Column(name))
     }
 }
@@ -615,15 +619,11 @@ fn parse_value(p: &mut Parser) -> Result<Value, ParseError> {
         Some(Spanned {
             tok: Tok::Ident(name),
             offset,
-        }) => match name.to_ascii_lowercase().as_str() {
-            "true" => Ok(Value::Bool(true)),
-            "false" => Ok(Value::Bool(false)),
-            other => Err(ParseError::Unexpected {
-                found: other.to_string(),
-                expected: "string, number, true, or false",
-                offset,
-            }),
-        },
+        }) => Err(ParseError::Unexpected {
+            found: name,
+            expected: "string or number literal",
+            offset,
+        }),
         Some(s) => Err(ParseError::Unexpected {
             found: format!("{:?}", s.tok),
             expected: "literal value",
@@ -822,5 +822,14 @@ mod tests {
     fn parse_unterminated_string() {
         let err = parse("SELECT * FROM traces WHERE service_name = 'oops").unwrap_err();
         assert!(matches!(err, ParseError::UnterminatedString(_)));
+    }
+
+    #[test]
+    fn parse_reject_alias_on_plain_column() {
+        let err = parse("SELECT service_name AS svc FROM traces").unwrap_err();
+        assert!(
+            matches!(err, ParseError::Unexpected { expected, .. } if expected == "no alias for plain column"),
+            "expected alias rejection, got: {err:?}"
+        );
     }
 }

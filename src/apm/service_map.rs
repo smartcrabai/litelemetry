@@ -12,6 +12,7 @@
 //! computed from the spans owned by the node. Per-edge statistics are
 //! computed from the child spans on the edge.
 
+use crate::apm::parse_otlp_nano as parse_nano;
 use crate::domain::telemetry::{NormalizedEntry, Signal};
 use crate::ingest::otlp_http::attribute_string_value;
 use crate::ingest::otlp_pb::payload_as_value;
@@ -192,12 +193,12 @@ fn collect_spans_from_value(
             .get("resource")
             .and_then(|r| r.get("attributes"))
             .and_then(serde_json::Value::as_array);
-        let service = resource_attrs
+        let Some(service) = resource_attrs
             .and_then(|attrs| attribute_string_value(attrs, "service.name"))
-            .unwrap_or_default();
-        if service.is_empty() {
+            .filter(|s| !s.is_empty())
+        else {
             continue;
-        }
+        };
 
         let Some(scope_spans) = rs.get("scopeSpans").and_then(|v| v.as_array()) else {
             continue;
@@ -252,17 +253,6 @@ fn collect_spans_from_value(
             }
         }
     }
-}
-
-fn parse_nano(value: Option<&serde_json::Value>) -> u64 {
-    let Some(v) = value else { return 0 };
-    if let Some(n) = v.as_u64() {
-        return n;
-    }
-    if let Some(s) = v.as_str() {
-        return s.parse::<u64>().unwrap_or(0);
-    }
-    0
 }
 
 /// Nearest-rank percentile of a slice of f64s. Returns 0.0 if empty.

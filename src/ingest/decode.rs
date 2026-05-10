@@ -34,7 +34,11 @@ pub enum DecodeError {
 /// "application/x-protobuf" -> Protobuf
 /// "application/json" (charset parameter allowed) -> Json
 pub fn parse_content_type(content_type: &str) -> Result<ContentType, DecodeError> {
-    let mime_type = content_type.split(';').next().unwrap_or("").trim();
+    let mime_type = content_type
+        .split(';')
+        .next()
+        .expect("split always yields at least one element")
+        .trim();
     match mime_type {
         "application/x-protobuf" => Ok(ContentType::Protobuf),
         "application/json" => Ok(ContentType::Json),

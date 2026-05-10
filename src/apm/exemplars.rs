@@ -14,6 +14,7 @@
 //! Outputs:
 //!   - one entry per bucket that has at least one matching trace_id (capped per bucket).
 
+use crate::apm::bucket_start;
 use crate::domain::telemetry::{NormalizedEntry, Signal};
 use crate::ingest::otlp_pb::payload_as_value;
 use chrono::{DateTime, Utc};
@@ -141,13 +142,6 @@ fn service_matches(filter: Option<&str>, candidate: Option<&str>) -> bool {
             .map(|s| s.eq_ignore_ascii_case(want))
             .unwrap_or(false),
     }
-}
-
-fn bucket_start(ts_ms: i64, bucket_ms: i64) -> i64 {
-    // Floor division that works for negative timestamps too (i.e. before 1970).
-    // bucket_ms is validated > 0 above.
-    let q = ts_ms.div_euclid(bucket_ms);
-    q * bucket_ms
 }
 
 /// Extract trace_ids from an OTLP trace payload (JSON or protobuf). Empty IDs are skipped.

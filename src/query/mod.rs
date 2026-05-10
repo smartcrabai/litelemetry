@@ -15,7 +15,7 @@
 //! Supported projections: `*`, plain columns, aggregates `count(*)`, `count(col)`,
 //! `sum(col)`, `avg(col)`.
 //!
-//! Supported `WHERE` ops: `=`, `!=`, `<>`, `>`, `<`, `>=`, `<=` combined with
+//! Supported `WHERE` ops: `=`, `!=`, `<>`, `>`, `<`, `>=`, `<=`, `LIKE` combined with
 //! `AND` / `OR`.
 //!
 //! Supported columns:

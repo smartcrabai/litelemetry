@@ -16,12 +16,13 @@ use litelemetry::domain::viewer::ViewerDefinition;
 use litelemetry::server::{
     build_app, build_app_with_full_services, build_app_with_services, build_app_with_services_full,
 };
+use litelemetry::storage::api_key_store::MemoryApiKeyStore;
 use litelemetry::storage::attr_index::AttrIndexStore;
 use litelemetry::storage::memory::{MemoryStreamStore, MemoryViewerStore};
 use litelemetry::storage::postgres::{PostgresStore, ViewerSnapshotRow};
 use litelemetry::storage::redis::RedisStore;
 use litelemetry::storage::rollup::{RedisRollupStore, RollupStore};
-use litelemetry::storage::{IncidentStore, StreamStore, ViewerStore};
+use litelemetry::storage::{ApiKeyStore, IncidentStore, StreamStore, ViewerStore};
 use litelemetry::viewer_runtime::runtime::ViewerRuntime;
 use litelemetry::viewer_runtime::state::StreamCursor;
 use serde_json::json;
@@ -94,6 +95,8 @@ async fn setup_viewer_app() -> ViewerTestEnv {
         None,
         None,
         Some(error_group_store),
+        None,
+        false,
     );
 
     ViewerTestEnv {
@@ -7842,6 +7845,8 @@ async fn test_attribute_index_records_and_serves_attributes() {
         None,
         None,
         None,
+        None,
+        false,
     );
 
     // Ingest a JSON trace payload carrying http.route and http.method.
@@ -8032,6 +8037,8 @@ async fn setup_incident_app() -> IncidentTestEnv {
         Some(IncidentStore::Postgres(pg)),
         None,
         None,
+        None,
+        false,
     );
     IncidentTestEnv {
         app,
@@ -8498,6 +8505,8 @@ async fn setup_slo_app() -> ViewerTestEnv {
         None,
         Some(slo_store),
         None,
+        None,
+        false,
     );
 
     ViewerTestEnv {
@@ -9391,4 +9400,376 @@ async fn test_db_insights_endpoints_return_slow_queries_and_n_plus_one() {
         .map(|v| v.as_str().unwrap_or("").to_string())
         .collect();
     assert!(services.contains(&"orders-api".to_string()));
+}
+
+// --- API key authentication --------------------------------------------------
+
+fn make_auth_app(api_keys_enabled: bool, store: Option<ApiKeyStore>) -> axum::Router {
+    build_app_with_services_full(
+        StreamStore::Memory(MemoryStreamStore::new(1_000)),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        store,
+        api_keys_enabled,
+    )
+}
+
+async fn send_get_request_with_auth(
+    app: &axum::Router,
+    uri: impl Into<String>,
+    bearer_token: Option<&str>,
+) -> axum::response::Response {
+    let mut builder = Request::builder().method("GET").uri(uri.into());
+    if let Some(token) = bearer_token {
+        builder = builder.header("Authorization", format!("Bearer {token}"));
+    }
+    app.clone()
+        .oneshot(builder.body(axum::body::Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+async fn send_json_request_with_auth(
+    app: &axum::Router,
+    method: &str,
+    uri: impl Into<String>,
+    payload: serde_json::Value,
+    bearer_token: Option<&str>,
+) -> axum::response::Response {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri.into())
+        .header("content-type", "application/json");
+    if let Some(token) = bearer_token {
+        builder = builder.header("Authorization", format!("Bearer {token}"));
+    }
+    app.clone()
+        .oneshot(
+            builder
+                .body(axum::body::Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+// --- middleware bypass ---
+
+#[tokio::test]
+async fn api_keys_disabled_allows_requests_without_auth_header() {
+    // Given an app with api_keys_enabled = false (default, backward compat)
+    let app = make_auth_app(false, None);
+
+    // When a request is made to /api/viewers without any Authorization header
+    let response = send_get_request_with_auth(&app, "/api/viewers", None).await;
+
+    // Then the request passes through (503 = no viewer store wired, but not 401)
+    assert_ne!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "auth should be bypassed when api_keys_enabled = false"
+    );
+}
+
+#[tokio::test]
+async fn api_keys_disabled_allows_requests_with_any_bearer_token() {
+    // Given an app with api_keys_enabled = false
+    let app = make_auth_app(false, None);
+
+    // When a request is made with a random invalid key
+    let response = send_get_request_with_auth(&app, "/api/viewers", Some("lt_invalidtoken")).await;
+
+    // Then the request is not rejected with 401
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+// --- missing / invalid auth ---
+
+#[tokio::test]
+async fn api_keys_enabled_rejects_request_with_no_auth_header() {
+    // Given an app with api_keys_enabled = true and an empty store
+    let store = ApiKeyStore::Memory(MemoryApiKeyStore::new());
+    let app = make_auth_app(true, Some(store));
+
+    // When a request arrives with no Authorization header
+    let response = send_get_request_with_auth(&app, "/api/viewers", None).await;
+
+    // Then 401 Unauthorized is returned
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn api_keys_enabled_rejects_request_with_invalid_key() {
+    // Given an app with api_keys_enabled = true and a store that has no matching key
+    let store = ApiKeyStore::Memory(MemoryApiKeyStore::new());
+    let app = make_auth_app(true, Some(store));
+
+    // When a request arrives with a random bearer token
+    let response =
+        send_get_request_with_auth(&app, "/api/viewers", Some("lt_badkeybadkeybadkey")).await;
+
+    // Then 401 Unauthorized is returned
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn api_keys_enabled_rejects_non_bearer_scheme() {
+    // Given an app with auth enabled and a populated store
+    let store = ApiKeyStore::Memory(MemoryApiKeyStore::new());
+    let app = make_auth_app(true, Some(store));
+
+    // When a request arrives using Basic auth instead of Bearer
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/viewers")
+                .header("Authorization", "Basic dXNlcjpwYXNz")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Then 401 Unauthorized is returned
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+// --- valid authentication ---
+
+#[tokio::test]
+async fn api_keys_enabled_accepts_request_with_valid_key() {
+    // Given an app with api_keys_enabled = true and a store containing a known key
+    let raw_key = "lt_testkey1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+    let key_hash = litelemetry::domain::api_key::hash_api_key(raw_key);
+
+    let memory_store = MemoryApiKeyStore::new();
+    memory_store
+        .insert(&litelemetry::domain::api_key::ApiKey {
+            id: uuid::Uuid::new_v4(),
+            name: "test".to_string(),
+            key_hash,
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
+    let store = ApiKeyStore::Memory(memory_store);
+    let app = make_auth_app(true, Some(store));
+
+    // When a request is made with the valid raw key
+    let response = send_get_request_with_auth(&app, "/api/viewers", Some(raw_key)).await;
+
+    // Then the request is not rejected with 401 (503 = no viewer store, but auth passed)
+    assert_ne!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "valid key should pass authentication"
+    );
+}
+
+// --- API key CRUD ---
+
+#[tokio::test]
+async fn create_api_key_returns_raw_key_and_201() {
+    // Given an app with auth disabled for the creation flow (bootstrap scenario)
+    let store = ApiKeyStore::Memory(MemoryApiKeyStore::new());
+    let bootstrap_app = make_auth_app(false, Some(store));
+
+    let response = send_json_request_with_auth(
+        &bootstrap_app,
+        "POST",
+        "/api/api-keys",
+        json!({ "name": "my-key" }),
+        None,
+    )
+    .await;
+
+    // Then 201 Created is returned with the raw key
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = response_json(response).await;
+    assert!(body["id"].is_string());
+    assert_eq!(body["name"], "my-key");
+    assert!(
+        body["key"].as_str().unwrap_or("").starts_with("lt_"),
+        "raw key should start with 'lt_'"
+    );
+    assert!(
+        body.get("key_hash").is_none(),
+        "key_hash must not be exposed"
+    );
+}
+
+#[tokio::test]
+async fn create_api_key_with_empty_name_returns_400() {
+    // Given an app with auth disabled so we can test the handler validation
+    let store = ApiKeyStore::Memory(MemoryApiKeyStore::new());
+    let app = make_auth_app(false, Some(store));
+
+    // When POST /api/api-keys is called with an empty name
+    let response =
+        send_json_request_with_auth(&app, "POST", "/api/api-keys", json!({ "name": "" }), None)
+            .await;
+
+    // Then 400 Bad Request is returned
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn list_api_keys_returns_keys_without_key_hash() {
+    // Given an app (auth disabled for bootstrap) with one key already inserted
+    let memory_store = MemoryApiKeyStore::new();
+    memory_store
+        .insert(&litelemetry::domain::api_key::ApiKey {
+            id: uuid::Uuid::new_v4(),
+            name: "existing-key".to_string(),
+            key_hash: "somehash".to_string(),
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
+    let store = ApiKeyStore::Memory(memory_store);
+    let app = make_auth_app(false, Some(store));
+
+    // When GET /api/api-keys is called
+    let response = send_get_request_with_auth(&app, "/api/api-keys", None).await;
+
+    // Then 200 OK is returned with the key listed and no key_hash field
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    let keys = body["api_keys"].as_array().unwrap();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0]["name"], "existing-key");
+    assert!(
+        keys[0].get("key_hash").is_none(),
+        "key_hash must not be exposed in list response"
+    );
+}
+
+#[tokio::test]
+async fn delete_api_key_removes_it_from_store() {
+    // Given an app (auth disabled) with one key
+    let key_id = uuid::Uuid::new_v4();
+    let memory_store = MemoryApiKeyStore::new();
+    memory_store
+        .insert(&litelemetry::domain::api_key::ApiKey {
+            id: key_id,
+            name: "to-delete".to_string(),
+            key_hash: "delete-hash".to_string(),
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
+    let store = ApiKeyStore::Memory(memory_store);
+    let app = make_auth_app(false, Some(store));
+
+    // When DELETE /api/api-keys/{id} is called
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/api-keys/{key_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Then 204 No Content is returned
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    // And the key is no longer listed
+    let list_response = send_get_request_with_auth(&app, "/api/api-keys", None).await;
+    let body = response_json(list_response).await;
+    let keys = body["api_keys"].as_array().unwrap();
+    assert!(keys.is_empty(), "deleted key must not appear in list");
+}
+
+#[tokio::test]
+async fn delete_nonexistent_api_key_returns_404() {
+    // Given an app (auth disabled) with an empty store
+    let store = ApiKeyStore::Memory(MemoryApiKeyStore::new());
+    let app = make_auth_app(false, Some(store));
+
+    // When DELETE is called for an id that does not exist
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/api-keys/{}", uuid::Uuid::new_v4()))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Then 404 Not Found is returned
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn deleted_key_no_longer_authenticates() {
+    // Given a key that is created and then deleted
+    let raw_key = "lt_willbedeleted1234567890abcdef1234567890abcdef1234567890abcdef12";
+    let key_hash = litelemetry::domain::api_key::hash_api_key(raw_key);
+    let key_id = uuid::Uuid::new_v4();
+
+    let memory_store = MemoryApiKeyStore::new();
+    memory_store
+        .insert(&litelemetry::domain::api_key::ApiKey {
+            id: key_id,
+            name: "ephemeral".to_string(),
+            key_hash,
+            created_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    // Verify it works before deletion
+    let store = ApiKeyStore::Memory(memory_store);
+    let app = make_auth_app(true, Some(store));
+    let before = send_get_request_with_auth(&app, "/api/viewers", Some(raw_key)).await;
+    assert_ne!(
+        before.status(),
+        StatusCode::UNAUTHORIZED,
+        "key should work before deletion"
+    );
+
+    // Delete the key
+    let delete_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/api-keys/{key_id}"))
+                .header("Authorization", format!("Bearer {raw_key}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        delete_response.status(),
+        StatusCode::NO_CONTENT,
+        "delete should return 204"
+    );
+
+    // When the same key is used after deletion
+    let after = send_get_request_with_auth(&app, "/api/viewers", Some(raw_key)).await;
+
+    // Then 401 Unauthorized is returned
+    assert_eq!(
+        after.status(),
+        StatusCode::UNAUTHORIZED,
+        "deleted key must no longer authenticate"
+    );
 }
