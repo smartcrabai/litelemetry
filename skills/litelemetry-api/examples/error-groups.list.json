@@ -1,0 +1,29 @@
+{
+  "error_groups": [
+    {
+      "fingerprint": "9b1c4f7a2d3e1c8a",
+      "signature": "RuntimeError: connection refused",
+      "count": 87,
+      "first_seen": "2026-05-11T16:01:12.000Z",
+      "last_seen": "2026-05-11T17:02:44.789Z",
+      "sample_payload": {
+        "exception.type": "RuntimeError",
+        "exception.message": "connection refused",
+        "service.name": "payments",
+        "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736"
+      }
+    },
+    {
+      "fingerprint": "2a17b330ee0c41d2",
+      "signature": "TimeoutError: upstream timed out",
+      "count": 14,
+      "first_seen": "2026-05-11T16:31:00.000Z",
+      "last_seen": "2026-05-11T17:00:08.500Z",
+      "sample_payload": {
+        "exception.type": "TimeoutError",
+        "exception.message": "upstream timed out",
+        "service.name": "checkout"
+      }
+    }
+  ]
+}

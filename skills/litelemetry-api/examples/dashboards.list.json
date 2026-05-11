@@ -1,0 +1,22 @@
+{
+  "dashboards": [
+    {
+      "id": "8e0d2a7f-1d3b-4d11-9f88-7b2c5e6a8011",
+      "slug": "checkout-overview",
+      "name": "Checkout overview",
+      "panel_count": 3,
+      "viewer_ids": [
+        "3f1c5d40-9c0b-4b7a-8c8f-3a2e1b0f0001",
+        "3f1c5d40-9c0b-4b7a-8c8f-3a2e1b0f0002",
+        "3f1c5d40-9c0b-4b7a-8c8f-3a2e1b0f0003"
+      ]
+    },
+    {
+      "id": "8e0d2a7f-1d3b-4d11-9f88-7b2c5e6a8012",
+      "slug": "platform-health",
+      "name": "Platform health",
+      "panel_count": 1,
+      "viewer_ids": ["3f1c5d40-9c0b-4b7a-8c8f-3a2e1b0f0009"]
+    }
+  ]
+}

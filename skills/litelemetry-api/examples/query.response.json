@@ -1,0 +1,12 @@
+{
+  "columns": ["service_name", "name", "status_code", "duration_ms"],
+  "rows": [
+    ["checkout", "POST /checkout/submit", 2, 812],
+    ["payments", "payments.charge",       2, 540],
+    ["checkout", "POST /checkout/submit", 1, 145]
+  ],
+  "scanned": 18402,
+  "matched": 87,
+  "returned": 3,
+  "truncated": false
+}

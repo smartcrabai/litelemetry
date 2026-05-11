@@ -1,0 +1,14 @@
+{
+  "nodes": [
+    {"name": "checkout", "span_count": 4120, "error_count": 87, "p95_duration_ms": 412.7},
+    {"name": "payments", "span_count": 4112, "error_count": 124, "p95_duration_ms": 532.1},
+    {"name": "catalog",  "span_count": 9870, "error_count": 2,   "p95_duration_ms": 28.4},
+    {"name": "db",       "span_count": 18402,"error_count": 5,   "p95_duration_ms": 9.1}
+  ],
+  "edges": [
+    {"from": "checkout", "to": "payments", "calls": 4090, "error_rate": 0.030},
+    {"from": "payments", "to": "db",       "calls": 8120, "error_rate": 0.001},
+    {"from": "catalog",  "to": "db",       "calls": 9710, "error_rate": 0.000},
+    {"from": "checkout", "to": "db",       "calls": 4101, "error_rate": 0.001}
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "alerts": [
+    {
+      "id": "be3e2b9a-aa1e-4c1c-99ab-6f3a3a9e7001",
+      "name": "checkout p95 high",
+      "viewer_id": "3f1c5d40-9c0b-4b7a-8c8f-3a2e1b0f0002",
+      "condition": {
+        "threshold": {
+          "metric": "p95_ms",
+          "op": "gt",
+          "value": 500
+        }
+      },
+      "severity": "warn",
+      "evaluation_interval_ms": 60000,
+      "enabled": true,
+      "revision": 3
+    },
+    {
+      "id": "be3e2b9a-aa1e-4c1c-99ab-6f3a3a9e7002",
+      "name": "payments error rate",
+      "viewer_id": "3f1c5d40-9c0b-4b7a-8c8f-3a2e1b0f0003",
+      "condition": {
+        "threshold": {
+          "metric": "error_rate",
+          "op": "gt",
+          "value": 0.02
+        }
+      },
+      "severity": "critical",
+      "evaluation_interval_ms": 30000,
+      "enabled": true,
+      "revision": 1
+    }
+  ]
+}

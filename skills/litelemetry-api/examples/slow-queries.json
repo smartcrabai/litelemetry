@@ -1,0 +1,29 @@
+[
+  {
+    "statement": "SELECT * FROM orders WHERE user_id = ? AND status IN (?, ?)",
+    "system": "postgresql",
+    "count": 1820,
+    "p50_ms": 18,
+    "p95_ms": 314,
+    "p99_ms": 902,
+    "max_ms": 2410
+  },
+  {
+    "statement": "SELECT id, sku, price FROM items WHERE catalog_id = ?",
+    "system": "postgresql",
+    "count": 9410,
+    "p50_ms": 4,
+    "p95_ms": 92,
+    "p99_ms": 188,
+    "max_ms": 612
+  },
+  {
+    "statement": "UPDATE inventory SET reserved = reserved + ? WHERE sku = ?",
+    "system": "mysql",
+    "count": 412,
+    "p50_ms": 21,
+    "p95_ms": 240,
+    "p99_ms": 540,
+    "max_ms": 1100
+  }
+]

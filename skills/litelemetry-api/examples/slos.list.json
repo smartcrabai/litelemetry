@@ -1,0 +1,32 @@
+{
+  "slos": [
+    {
+      "id": "fa61c920-21d0-4c1a-8b1d-a9d3b7c5e001",
+      "name": "checkout 99.5",
+      "viewer_id": "3f1c5d40-9c0b-4b7a-8c8f-3a2e1b0f0001",
+      "target_pct": 99.5,
+      "window_ms": 2592000000,
+      "success_filters": [
+        {"field": "status_code", "op": "neq", "value": "2"}
+      ],
+      "total_filters": [
+        {"field": "name", "op": "eq", "value": "checkout.submit"}
+      ],
+      "enabled": true
+    },
+    {
+      "id": "fa61c920-21d0-4c1a-8b1d-a9d3b7c5e002",
+      "name": "catalog 99.9",
+      "viewer_id": null,
+      "target_pct": 99.9,
+      "window_ms": 604800000,
+      "success_filters": [
+        {"field": "status_code", "op": "neq", "value": "2"}
+      ],
+      "total_filters": [
+        {"field": "service_name", "op": "eq", "value": "catalog"}
+      ],
+      "enabled": true
+    }
+  ]
+}

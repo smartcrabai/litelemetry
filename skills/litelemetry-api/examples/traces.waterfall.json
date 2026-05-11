@@ -1,0 +1,56 @@
+{
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "spans": [
+    {
+      "id": "1",
+      "parent_id": "",
+      "name": "POST /checkout/submit",
+      "service_name": "checkout",
+      "start_ms": 0.0,
+      "duration_ms": 812.0,
+      "status": 2,
+      "attributes": {
+        "http.method": "POST",
+        "http.route": "/checkout/submit",
+        "http.status_code": "500"
+      }
+    },
+    {
+      "id": "2",
+      "parent_id": "1",
+      "name": "payments.charge",
+      "service_name": "payments",
+      "start_ms": 15.0,
+      "duration_ms": 540.0,
+      "status": 2,
+      "attributes": {
+        "rpc.system": "grpc",
+        "rpc.service": "payments.PaymentsService",
+        "rpc.method": "Charge"
+      }
+    },
+    {
+      "id": "3",
+      "parent_id": "2",
+      "name": "SELECT card",
+      "service_name": "db",
+      "start_ms": 32.0,
+      "duration_ms": 8.0,
+      "status": 1,
+      "attributes": {
+        "db.system": "postgresql",
+        "db.statement": "SELECT * FROM cards WHERE user_id = ?"
+      }
+    },
+    {
+      "id": "4",
+      "parent_id": "1",
+      "name": "audit.record",
+      "service_name": "checkout",
+      "start_ms": 580.0,
+      "duration_ms": 220.0,
+      "status": 1,
+      "attributes": {}
+    }
+  ]
+}

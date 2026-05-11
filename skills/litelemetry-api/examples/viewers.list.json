@@ -1,0 +1,74 @@
+{
+  "viewers": [
+    {
+      "id": "3f1c5d40-9c0b-4b7a-8c8f-3a2e1b0f0001",
+      "slug": "checkout-errors",
+      "name": "checkout errors",
+      "signals": ["traces"],
+      "chart_type": "table",
+      "query": null,
+      "filters": [
+        {"field": "service_name", "op": "eq", "value": "checkout"},
+        {"field": "status_code",  "op": "eq", "value": "2"}
+      ],
+      "filter_mode": "and",
+      "aggregation": null,
+      "refresh_interval_ms": 5000,
+      "lookback_ms": 900000,
+      "entry_count": 42,
+      "status": {"kind": "ready"},
+      "entries": [
+        {
+          "observed_at": "2026-05-11T17:01:02.345Z",
+          "signal": "traces",
+          "service_name": "checkout",
+          "payload_size_bytes": 1837,
+          "payload_preview": "POST /checkout/submit — RuntimeError: connection refused",
+          "metric_name": null,
+          "metric_value": null
+        }
+      ],
+      "traces": [
+        {
+          "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+          "root_span_name": "POST /checkout/submit",
+          "service_names": ["checkout", "payments"],
+          "duration_ms": 812,
+          "has_error": true
+        }
+      ],
+      "aggregated_buckets": [],
+      "exemplars": []
+    },
+    {
+      "id": "3f1c5d40-9c0b-4b7a-8c8f-3a2e1b0f0002",
+      "slug": "request-p95",
+      "name": "request p95",
+      "signals": ["metrics"],
+      "chart_type": "line",
+      "query": null,
+      "filters": [],
+      "filter_mode": "and",
+      "aggregation": {"fn": "p95", "bucket_ms": 60000, "group_by": ["service_name"]},
+      "refresh_interval_ms": 15000,
+      "lookback_ms": 3600000,
+      "entry_count": 12480,
+      "status": {"kind": "ready"},
+      "entries": [],
+      "traces": [],
+      "aggregated_buckets": [
+        {
+          "bucket_start_ms": 1747000200000,
+          "group": {"service_name": "checkout"},
+          "value": 412.7
+        }
+      ],
+      "exemplars": [
+        {
+          "bucket_start_ms": 1747000200000,
+          "trace_ids": ["4bf92f3577b34da6a3ce929d0e0e4736"]
+        }
+      ]
+    }
+  ]
+}
