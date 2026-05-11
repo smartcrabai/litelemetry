@@ -153,7 +153,8 @@ fn row_to_def(row: &sqlx::postgres::PgRow) -> Result<AlertDefinition, AlertRowEr
     })
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("failed to parse alert row")]
 struct AlertRowError;
 
 /// In-memory alert store, used in standalone mode.

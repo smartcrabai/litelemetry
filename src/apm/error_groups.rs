@@ -40,7 +40,7 @@ pub struct ErrorOccurrence {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_name: Option<String>,
     /// Originating signal type.
-    pub signal: &'static str,
+    pub signal: Signal,
     /// Time the entry was observed by the ingest layer.
     pub observed_at: DateTime<Utc>,
 }
@@ -59,20 +59,18 @@ pub struct ErrorGroup {
 /// Compute the canonical fingerprint hex string for a given (type, message)
 /// pair. Numbers are stripped from the message so that "id=42" and "id=43"
 /// fold into the same bucket.
-pub fn compute_fingerprint(exception_type: &str, exception_message: &str) -> String {
-    let normalized_type = normalize_token(exception_type);
-    let normalized_message = normalize_token(exception_message);
+pub fn compute_fingerprint(
+    exception_type: Option<&str>,
+    exception_message: Option<&str>,
+) -> String {
+    let normalized_type = normalize_token(exception_type.unwrap_or(""));
+    let normalized_message = normalize_token(exception_message.unwrap_or(""));
     let mut hasher = Sha256::new();
     hasher.update(normalized_type.as_bytes());
     hasher.update(b"\0");
     hasher.update(normalized_message.as_bytes());
     let digest = hasher.finalize();
-    use std::fmt::Write as _;
-    let mut hex = String::with_capacity(FINGERPRINT_HEX_LEN);
-    for byte in &digest[..FINGERPRINT_BYTE_PREFIX] {
-        let _ = write!(hex, "{byte:02x}");
-    }
-    hex
+    hex::encode(&digest[..FINGERPRINT_BYTE_PREFIX])
 }
 
 /// Normalize a string for fingerprinting.
@@ -166,8 +164,8 @@ fn extract_from_traces(entry: &NormalizedEntry) -> Vec<ErrorOccurrence> {
                         exception_message.as_deref(),
                     );
                     let fingerprint = compute_fingerprint(
-                        exception_type.as_deref().unwrap_or(""),
-                        exception_message.as_deref().unwrap_or(""),
+                        exception_type.as_deref(),
+                        exception_message.as_deref(),
                     );
                     out.push(ErrorOccurrence {
                         fingerprint,
@@ -176,7 +174,7 @@ fn extract_from_traces(entry: &NormalizedEntry) -> Vec<ErrorOccurrence> {
                         exception_message,
                         stacktrace,
                         service_name: entry.service_name.clone(),
-                        signal: "traces",
+                        signal: Signal::Traces,
                         observed_at: entry.observed_at,
                     });
                 }
@@ -221,7 +219,7 @@ fn extract_from_logs(entry: &NormalizedEntry) -> Vec<ErrorOccurrence> {
                 } else {
                     format!("{severity_text}: {body_text}")
                 };
-                let fingerprint = compute_fingerprint(&severity_text, &body_text);
+                let fingerprint = compute_fingerprint(Some(&severity_text), Some(&body_text));
                 out.push(ErrorOccurrence {
                     fingerprint,
                     signature,
@@ -229,7 +227,7 @@ fn extract_from_logs(entry: &NormalizedEntry) -> Vec<ErrorOccurrence> {
                     exception_message: Some(body_text),
                     stacktrace: None,
                     service_name: entry.service_name.clone(),
-                    signal: "logs",
+                    signal: Signal::Logs,
                     observed_at: entry.observed_at,
                 });
             }
@@ -305,11 +303,9 @@ impl ErrorGroupAggregator {
         }
     }
 
-    /// Drain the aggregator into a list sorted by `last_seen` descending.
-    pub fn into_sorted_groups(self) -> Vec<ErrorGroup> {
-        let mut groups: Vec<ErrorGroup> = self.groups.into_values().collect();
-        groups.sort_by_key(|g| std::cmp::Reverse(g.last_seen));
-        groups
+    /// Drain the aggregator into a list of groups.
+    pub fn into_groups(self) -> Vec<ErrorGroup> {
+        self.groups.into_values().collect()
     }
 }
 
@@ -340,8 +336,8 @@ mod tests {
 
     #[test]
     fn fingerprint_stable_for_same_input() {
-        let a = compute_fingerprint("RuntimeError", "boom");
-        let b = compute_fingerprint("RuntimeError", "boom");
+        let a = compute_fingerprint(Some("RuntimeError"), Some("boom"));
+        let b = compute_fingerprint(Some("RuntimeError"), Some("boom"));
         assert_eq!(a, b);
         assert_eq!(a.len(), FINGERPRINT_HEX_LEN);
     }
@@ -349,20 +345,20 @@ mod tests {
     #[test]
     fn fingerprint_normalizes_digits() {
         // numbers should not influence the bucket
-        let a = compute_fingerprint("RuntimeError", "user_id=42 not found");
-        let b = compute_fingerprint("RuntimeError", "user_id=99999 not found");
+        let a = compute_fingerprint(Some("RuntimeError"), Some("user_id=42 not found"));
+        let b = compute_fingerprint(Some("RuntimeError"), Some("user_id=99999 not found"));
         assert_eq!(a, b);
     }
 
     #[test]
     fn fingerprint_normalizes_uuids() {
         let a = compute_fingerprint(
-            "RuntimeError",
-            "missing trace 550e8400-e29b-41d4-a716-446655440000",
+            Some("RuntimeError"),
+            Some("missing trace 550e8400-e29b-41d4-a716-446655440000"),
         );
         let b = compute_fingerprint(
-            "RuntimeError",
-            "missing trace deadbeefdeadbeefdeadbeefdeadbeef",
+            Some("RuntimeError"),
+            Some("missing trace deadbeefdeadbeefdeadbeefdeadbeef"),
         );
         // both contain a long hex blob; after normalization they should fold
         assert_eq!(a, b);
@@ -370,8 +366,8 @@ mod tests {
 
     #[test]
     fn fingerprint_distinct_for_different_types() {
-        let a = compute_fingerprint("RuntimeError", "boom");
-        let b = compute_fingerprint("ValueError", "boom");
+        let a = compute_fingerprint(Some("RuntimeError"), Some("boom"));
+        let b = compute_fingerprint(Some("ValueError"), Some("boom"));
         assert_ne!(a, b);
     }
 
@@ -401,7 +397,7 @@ mod tests {
         assert_eq!(occs[0].exception_type.as_deref(), Some("RuntimeError"));
         assert_eq!(occs[0].exception_message.as_deref(), Some("kaboom 7"));
         assert_eq!(occs[0].stacktrace.as_deref(), Some("trace..."));
-        assert_eq!(occs[0].signal, "traces");
+        assert_eq!(occs[0].signal, Signal::Traces);
     }
 
     #[test]
@@ -437,7 +433,7 @@ mod tests {
         let early = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
         let late = Utc.with_ymd_and_hms(2024, 1, 1, 0, 1, 0).unwrap();
 
-        let fingerprint = compute_fingerprint("RuntimeError", "boom 42");
+        let fingerprint = compute_fingerprint(Some("RuntimeError"), Some("boom 42"));
         agg.record(ErrorOccurrence {
             fingerprint: fingerprint.clone(),
             signature: "RuntimeError: boom 42".into(),
@@ -445,7 +441,7 @@ mod tests {
             exception_message: Some("boom 42".into()),
             stacktrace: None,
             service_name: Some("svc-a".into()),
-            signal: "traces",
+            signal: Signal::Traces,
             observed_at: early,
         });
         agg.record(ErrorOccurrence {
@@ -455,11 +451,11 @@ mod tests {
             exception_message: Some("boom 99".into()),
             stacktrace: None,
             service_name: Some("svc-b".into()),
-            signal: "traces",
+            signal: Signal::Traces,
             observed_at: late,
         });
 
-        let groups = agg.into_sorted_groups();
+        let groups = agg.into_groups();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].count, 2);
         assert_eq!(groups[0].first_seen, early);

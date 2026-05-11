@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::apm::parse_otlp_nano as parse_nano;
 use crate::domain::telemetry::{NormalizedEntry, Signal};
 use crate::ingest::otlp_http::attribute_string_value;
 use crate::ingest::otlp_pb::payload_as_value;
@@ -268,17 +269,6 @@ fn string_field(span: &Value, key: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string()
-}
-
-fn parse_nano(value: Option<&Value>) -> u64 {
-    let Some(v) = value else { return 0 };
-    if let Some(n) = v.as_u64() {
-        return n;
-    }
-    if let Some(s) = v.as_str() {
-        return s.parse::<u64>().unwrap_or(0);
-    }
-    0
 }
 
 #[cfg(test)]

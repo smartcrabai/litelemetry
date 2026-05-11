@@ -15,10 +15,10 @@
 use std::collections::BTreeMap;
 
 use serde::Serialize;
-use serde_json::Value as JsonValue;
 use thiserror::Error;
 
 use super::ast::{AggArg, AggFunc, CompareOp, Expr, Projection, SelectStmt, Source, Value};
+use crate::apm::parse_otlp_nano;
 use crate::domain::telemetry::{NormalizedEntry, Signal};
 use crate::ingest::otlp_pb::payload_as_value;
 use crate::viewer_runtime::compiler::extract_searchable_payload_text;
@@ -41,7 +41,6 @@ pub enum ExecuteError {
 #[serde(untagged)]
 pub enum Cell {
     Null,
-    Bool(bool),
     Number(f64),
     String(String),
 }
@@ -115,23 +114,24 @@ fn known_columns() -> &'static [&'static str] {
     ]
 }
 
+fn check_column(col: &str) -> Result<(), ExecuteError> {
+    if known_columns().iter().any(|k| k.eq_ignore_ascii_case(col)) {
+        Ok(())
+    } else {
+        Err(ExecuteError::UnknownColumn(col.to_string()))
+    }
+}
+
 /// Validate that every referenced column is known.
 fn validate_columns(stmt: &SelectStmt) -> Result<(), ExecuteError> {
-    fn check(col: &str) -> Result<(), ExecuteError> {
-        if known_columns().iter().any(|k| k.eq_ignore_ascii_case(col)) {
-            Ok(())
-        } else {
-            Err(ExecuteError::UnknownColumn(col.to_string()))
-        }
-    }
     for p in &stmt.projections {
         match p {
             Projection::Star => {}
-            Projection::Column(c) => check(c)?,
+            Projection::Column(c) => check_column(c)?,
             Projection::Aggregate {
                 arg: AggArg::Column(c),
                 ..
-            } => check(c)?,
+            } => check_column(c)?,
             Projection::Aggregate {
                 arg: AggArg::Star, ..
             } => {}
@@ -141,22 +141,14 @@ fn validate_columns(stmt: &SelectStmt) -> Result<(), ExecuteError> {
         validate_expr_columns(expr)?;
     }
     for c in &stmt.group_by {
-        check(c)?;
+        check_column(c)?;
     }
     Ok(())
 }
 
 fn validate_expr_columns(expr: &Expr) -> Result<(), ExecuteError> {
     match expr {
-        Expr::Compare { column, .. } => {
-            if !known_columns()
-                .iter()
-                .any(|k| k.eq_ignore_ascii_case(column))
-            {
-                return Err(ExecuteError::UnknownColumn(column.clone()));
-            }
-            Ok(())
-        }
+        Expr::Compare { column, .. } => check_column(column),
         Expr::And(a, b) | Expr::Or(a, b) => {
             validate_expr_columns(a)?;
             validate_expr_columns(b)
@@ -205,14 +197,7 @@ fn field_value(entry: &NormalizedEntry, name: &str) -> FieldValue {
             .clone()
             .map(FieldValue::Str)
             .unwrap_or(FieldValue::Null),
-        "signal" => FieldValue::Str(
-            match entry.signal {
-                Signal::Traces => "traces",
-                Signal::Metrics => "metrics",
-                Signal::Logs => "logs",
-            }
-            .to_string(),
-        ),
+        "signal" => FieldValue::Str(entry.signal.as_str().to_string()),
         "observed_at_ms" => FieldValue::Number(entry.observed_at.timestamp_millis() as f64),
         "duration_ms" => extract_duration_ms(entry)
             .map(FieldValue::Number)
@@ -243,13 +228,9 @@ fn extract_duration_ms(entry: &NormalizedEntry) -> Option<f64> {
             let spans = ss.get("spans").and_then(|v| v.as_array());
             let Some(spans) = spans else { continue };
             for span in spans {
-                let Some(start) = parse_unix_nano(span.get("startTimeUnixNano")) else {
-                    continue;
-                };
-                let Some(end) = parse_unix_nano(span.get("endTimeUnixNano")) else {
-                    continue;
-                };
-                if end >= start {
+                let start = parse_otlp_nano(span.get("startTimeUnixNano"));
+                let end = parse_otlp_nano(span.get("endTimeUnixNano"));
+                if start > 0 && end >= start {
                     let dur_ms = (end - start) as f64 / 1_000_000.0;
                     max_ms = Some(max_ms.map_or(dur_ms, |prev| prev.max(dur_ms)));
                 }
@@ -257,24 +238,6 @@ fn extract_duration_ms(entry: &NormalizedEntry) -> Option<f64> {
         }
     }
     max_ms
-}
-
-/// OTLP encodes UnixNano fields as either string or number; accept both.
-fn parse_unix_nano(v: Option<&JsonValue>) -> Option<u64> {
-    let v = v?;
-    if let Some(n) = v.as_u64() {
-        return Some(n);
-    }
-    if let Some(s) = v.as_str() {
-        return s.parse::<u64>().ok();
-    }
-    if let Some(f) = v.as_f64()
-        && f >= 0.0
-        && f.is_finite()
-    {
-        return Some(f as u64);
-    }
-    None
 }
 
 /// Evaluate the WHERE clause against a single entry.
@@ -303,11 +266,7 @@ fn eval_compare(lhs: &FieldValue, op: CompareOp, rhs: &Value) -> bool {
         },
         (FieldValue::Number(a), Value::Str(b)) => match b.parse::<f64>() {
             Ok(b) => eval_compare(&FieldValue::Number(*a), op, &Value::Number(b)),
-            Err(_) => match op {
-                CompareOp::Eq => false,
-                CompareOp::Ne => true,
-                _ => false,
-            },
+            Err(_) => matches!(op, CompareOp::Ne),
         },
         (FieldValue::Str(a), Value::Str(b)) => match op {
             CompareOp::Eq => a.eq_ignore_ascii_case(b),
@@ -320,13 +279,8 @@ fn eval_compare(lhs: &FieldValue, op: CompareOp, rhs: &Value) -> bool {
         },
         (FieldValue::Str(a), Value::Number(b)) => match a.parse::<f64>() {
             Ok(a) => eval_compare(&FieldValue::Number(a), op, &Value::Number(*b)),
-            Err(_) => match op {
-                CompareOp::Eq => false,
-                CompareOp::Ne => true,
-                _ => false,
-            },
+            Err(_) => matches!(op, CompareOp::Ne),
         },
-        _ => false,
     }
 }
 
@@ -407,6 +361,10 @@ struct GroupAccum {
     aggs: Vec<AggAccum>,
 }
 
+fn effective_limit(limit: Option<usize>) -> usize {
+    limit.unwrap_or(MAX_RESULT_ROWS).min(MAX_RESULT_ROWS)
+}
+
 /// Public entry point.
 pub fn execute<I>(stmt: &SelectStmt, entries: I) -> Result<QueryResult, ExecuteError>
 where
@@ -435,6 +393,7 @@ where
         // Plain SELECT path -- collect rows directly.
         let mut rows: Vec<Vec<Cell>> = Vec::new();
         let mut truncated = false;
+        let limit_for_collect = effective_limit(limit);
         for entry in entries.into_iter() {
             scanned += 1;
             if entry.signal != target_signal {
@@ -446,7 +405,6 @@ where
                 continue;
             }
             matched += 1;
-            let limit_for_collect = limit.unwrap_or(MAX_RESULT_ROWS).min(MAX_RESULT_ROWS);
             if rows.len() >= limit_for_collect {
                 truncated = true;
                 continue;
@@ -467,13 +425,12 @@ where
 
     // Aggregate path.
     let mut groups: BTreeMap<String, GroupAccum> = BTreeMap::new();
-    // Cache the aggregate projection indices and their column args.
-    let agg_specs: Vec<(usize, AggFunc, AggArg)> = stmt
+    // Cache the argument for each aggregate projection.
+    let agg_specs: Vec<AggArg> = stmt
         .projections
         .iter()
-        .enumerate()
-        .filter_map(|(i, p)| match p {
-            Projection::Aggregate { func, arg, .. } => Some((i, *func, arg.clone())),
+        .filter_map(|p| match p {
+            Projection::Aggregate { arg, .. } => Some(arg.clone()),
             _ => None,
         })
         .collect();
@@ -509,7 +466,7 @@ where
             aggs: vec![AggAccum::default(); agg_count],
         });
 
-        for (idx, (_, _, arg)) in agg_specs.iter().enumerate() {
+        for (idx, arg) in agg_specs.iter().enumerate() {
             match arg {
                 AggArg::Star => slot.aggs[idx].observe_count(),
                 AggArg::Column(c) => {
@@ -566,7 +523,7 @@ where
         rows.push(row);
     }
 
-    let limit_val = limit.unwrap_or(MAX_RESULT_ROWS).min(MAX_RESULT_ROWS);
+    let limit_val = effective_limit(limit);
     let pre_limit = rows.len();
     if rows.len() > limit_val {
         rows.truncate(limit_val);
@@ -609,14 +566,7 @@ fn render_plain_row(stmt: &SelectStmt, entry: &NormalizedEntry) -> Vec<Cell> {
         match p {
             Projection::Star => {
                 out.push(Cell::Number(entry.observed_at.timestamp_millis() as f64));
-                out.push(Cell::String(
-                    match entry.signal {
-                        Signal::Traces => "traces",
-                        Signal::Metrics => "metrics",
-                        Signal::Logs => "logs",
-                    }
-                    .to_string(),
-                ));
+                out.push(Cell::String(entry.signal.as_str().to_string()));
                 out.push(match &entry.service_name {
                     Some(s) => Cell::String(s.clone()),
                     None => Cell::Null,
@@ -643,7 +593,7 @@ fn render_plain_row(stmt: &SelectStmt, entry: &NormalizedEntry) -> Vec<Cell> {
 mod tests {
     use super::*;
     use crate::query::parser::parse;
-    use serde_json::Map;
+    use serde_json::{Map, Value as JsonValue};
 
     /// Test helper: convert the result rows to a `Vec<JsonValue>` (object form).
     fn rows_as_objects(result: &QueryResult) -> Vec<JsonValue> {
@@ -656,7 +606,6 @@ mod tests {
                     let cell = row.get(i).cloned().unwrap_or(Cell::Null);
                     let value = match cell {
                         Cell::Null => JsonValue::Null,
-                        Cell::Bool(b) => JsonValue::Bool(b),
                         Cell::Number(n) => serde_json::Number::from_f64(n)
                             .map(JsonValue::Number)
                             .unwrap_or(JsonValue::Null),

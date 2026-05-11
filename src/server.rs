@@ -1,6 +1,9 @@
+use crate::api_auth::api_key_auth_middleware;
 use crate::apm::error_groups::{ErrorGroup, ErrorGroupAggregator, extract_error_occurrences};
+use crate::apm::parse_otlp_nano as parse_nano;
 use crate::apm::service_map::{ServiceMap, build_service_map};
 use crate::apm::waterfall::{TraceWaterfall, WaterfallError, build_waterfall};
+use crate::domain::api_key::ApiKey;
 use crate::domain::dashboard::{
     DashboardDefinition, PanelInput, build_layout_json, panel_inputs_from_viewer_ids,
 };
@@ -22,7 +25,7 @@ use crate::slo::calculator::{CompiledSlo, ErrorBudget};
 use crate::storage::error_group_store::ErrorGroupStore;
 use crate::storage::rollup::{Resolution, RollupStore};
 use crate::storage::slo_store::SloStore;
-use crate::storage::{IncidentStore, StreamStore, ViewerStore};
+use crate::storage::{ApiKeyStore, IncidentStore, StreamStore, ViewerStore};
 use crate::viewer_runtime::compiler::{
     CompiledViewer, compile, extract_searchable_payload_text, query_from_definition,
 };
@@ -33,8 +36,8 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::{HeaderMap, StatusCode},
-    response::Html,
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::{Html, IntoResponse, Response},
     routing::{delete, get, post},
 };
 use chrono::{DateTime, Utc};
@@ -7168,6 +7171,9 @@ pub struct AppState {
     pub incident_store: IncidentStore,
     pub slo_store: Option<SloStore>,
     pub error_group_store: Option<ErrorGroupStore>,
+    pub api_key_store: Option<ApiKeyStore>,
+    /// When false, the API key auth middleware is bypassed (useful for bootstrap or local dev).
+    pub api_keys_enabled: bool,
 }
 
 pub type SharedViewerRuntime = Arc<Mutex<ViewerRuntime>>;
@@ -7201,6 +7207,12 @@ impl AppState {
 
     fn require_slo_store(&self) -> Result<&SloStore, StatusCode> {
         self.slo_store
+            .as_ref()
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)
+    }
+
+    pub(crate) fn require_api_key_store(&self) -> Result<&ApiKeyStore, StatusCode> {
+        self.api_key_store
             .as_ref()
             .ok_or(StatusCode::SERVICE_UNAVAILABLE)
     }
@@ -7278,6 +7290,34 @@ fn dashboard_columns_from_layout(layout_json: &serde_json::Value) -> Result<u32,
     }
 
     Ok(columns)
+}
+
+const API_KEY_PREFIX: &str = "lt_";
+
+#[derive(Debug, Deserialize)]
+struct CreateApiKeyRequest {
+    name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateApiKeyResponse {
+    id: Uuid,
+    name: String,
+    /// Raw key returned only once at creation time.
+    key: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct ApiKeyListItem {
+    id: Uuid,
+    name: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct ApiKeyListResponse {
+    api_keys: Vec<ApiKeyListItem>,
 }
 
 /// Raw filter condition sent by the client in create / patch / preview requests.
@@ -7502,6 +7542,8 @@ pub fn build_app_with_full_services(
         None,
         None,
         None,
+        None,
+        false,
     )
 }
 
@@ -7527,6 +7569,8 @@ pub fn build_app_with_services_full(
     incident_store: Option<IncidentStore>,
     slo_store: Option<SloStore>,
     error_group_store: Option<ErrorGroupStore>,
+    api_key_store: Option<ApiKeyStore>,
+    api_keys_enabled: bool,
 ) -> Router {
     let incident_store = incident_store.unwrap_or_else(|| {
         IncidentStore::Memory(crate::storage::memory::MemoryIncidentStore::new())
@@ -7541,12 +7585,12 @@ pub fn build_app_with_services_full(
         incident_store,
         slo_store,
         error_group_store,
+        api_key_store,
+        api_keys_enabled,
     };
     let connect = crate::grpc::build_connect_router(state.clone());
 
-    Router::new()
-        .route("/", get(index))
-        .route("/healthz", get(healthz))
+    let api_routes = Router::new()
         .route("/api/query", post(run_query))
         .route("/api/viewers", get(list_viewers).post(create_viewer))
         .route("/api/viewers/preview", post(preview_viewer))
@@ -7609,9 +7653,20 @@ pub fn build_app_with_services_full(
         .route("/api/error-groups", get(list_error_groups))
         .route("/api/slow-queries", get(list_slow_queries))
         .route("/api/n-plus-one", get(list_n_plus_one))
+        .route("/api/api-keys", get(list_api_keys).post(create_api_key))
+        .route("/api/api-keys/{id}", delete(delete_api_key))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            api_key_auth_middleware,
+        ));
+
+    Router::new()
+        .route("/", get(index))
+        .route("/healthz", get(healthz))
         .route("/v1/traces", post(ingest_traces))
         .route("/v1/metrics", post(ingest_metrics))
         .route("/v1/logs", post(ingest_logs))
+        .merge(api_routes)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state)
         .fallback_service(connect.into_axum_service())
@@ -8356,7 +8411,6 @@ struct QueryErrorBody {
 fn cell_to_json(cell: QueryCell) -> serde_json::Value {
     match cell {
         QueryCell::Null => serde_json::Value::Null,
-        QueryCell::Bool(b) => serde_json::Value::Bool(b),
         QueryCell::Number(n) => serde_json::Number::from_f64(n)
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
@@ -9399,12 +9453,8 @@ struct CreateAlertRequest {
     condition: serde_json::Value,
     severity: String,
     evaluation_interval_ms: i32,
-    #[serde(default = "default_alert_enabled")]
+    #[serde(default = "default_true")]
     enabled: bool,
-}
-
-fn default_alert_enabled() -> bool {
-    true
 }
 
 #[derive(Debug, Serialize)]
@@ -9828,10 +9878,7 @@ async fn list_slow_queries(
 
     let entries = collect_traces_entries(runtime, lookback_ms).await;
     let facts = extract_db_spans(&entries);
-    let stats = aggregate_slow_queries(&facts, min_p95_ms).map_err(|error| {
-        tracing::error!("aggregate_slow_queries failed: {error}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let stats = aggregate_slow_queries(&facts, min_p95_ms);
     Ok(Json(stats))
 }
 
@@ -10066,7 +10113,7 @@ pub(crate) async fn record_error_groups_from_entry(
     for occ in occurrences {
         aggregator.record(occ);
     }
-    for group in aggregator.into_sorted_groups() {
+    for group in aggregator.into_groups() {
         if let Err(e) = store.upsert(&group).await {
             tracing::warn!(
                 "error_group upsert failed (fingerprint={}): {e}",
@@ -10165,11 +10212,7 @@ fn viewer_summary(
 }
 
 fn signal_name(signal: Signal) -> &'static str {
-    match signal {
-        Signal::Traces => "traces",
-        Signal::Metrics => "metrics",
-        Signal::Logs => "logs",
-    }
+    signal.as_str()
 }
 
 fn parse_signal_name(value: &str) -> Option<Signal> {
@@ -10682,17 +10725,6 @@ fn extract_traces_from_entries(
     traces
 }
 
-fn parse_nano(value: Option<&serde_json::Value>) -> u64 {
-    let Some(v) = value else { return 0 };
-    if let Some(n) = v.as_u64() {
-        return n;
-    }
-    if let Some(s) = v.as_str() {
-        return s.parse::<u64>().unwrap_or(0);
-    }
-    0
-}
-
 // --- Incident API ----------------------------------------------------------
 
 const MAX_INCIDENT_SEVERITY_LEN: usize = 32;
@@ -11012,6 +11044,102 @@ async fn collect_slo_entries(
     Ok(viewer_state.entries.clone())
 }
 
+// --- API key management handlers ---
+
+async fn create_api_key(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateApiKeyRequest>,
+) -> Result<Response, StatusCode> {
+    let store = state.require_api_key_store()?;
+
+    let name = payload.name.trim().to_string();
+    if name.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let uuid1 = Uuid::new_v4().simple().to_string();
+    let uuid2 = Uuid::new_v4().simple().to_string();
+    let raw_key = format!("{API_KEY_PREFIX}{uuid1}{uuid2}");
+    let key_hash = crate::domain::api_key::hash_api_key(&raw_key);
+    let id = Uuid::new_v4();
+    let now = Utc::now();
+
+    store
+        .insert(&ApiKey {
+            id,
+            name: name.clone(),
+            key_hash,
+            created_at: now,
+        })
+        .await
+        .map_err(|error| {
+            tracing::error!("api_key_store insert failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let mut response = (
+        StatusCode::CREATED,
+        Json(CreateApiKeyResponse {
+            id,
+            name,
+            key: raw_key,
+            created_at: now,
+        }),
+    )
+        .into_response();
+    {
+        let h = response.headers_mut();
+        h.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store, no-cache, must-revalidate, private"),
+        );
+        h.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+        h.insert(header::EXPIRES, HeaderValue::from_static("0"));
+    }
+
+    Ok(response)
+}
+
+async fn list_api_keys(
+    State(state): State<AppState>,
+) -> Result<Json<ApiKeyListResponse>, StatusCode> {
+    let store = state.require_api_key_store()?;
+
+    let keys = store.list().await.map_err(|error| {
+        tracing::error!("api_key_store list failed: {error}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(ApiKeyListResponse {
+        api_keys: keys
+            .into_iter()
+            .map(|k| ApiKeyListItem {
+                id: k.id,
+                name: k.name,
+                created_at: k.created_at,
+            })
+            .collect(),
+    }))
+}
+
+async fn delete_api_key(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, StatusCode> {
+    let store = state.require_api_key_store()?;
+
+    let deleted = store.delete(id).await.map_err(|error| {
+        tracing::error!("api_key_store delete failed: {error}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    if deleted {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -11021,6 +11149,11 @@ mod tests {
         http::Request,
     };
     use tower::ServiceExt;
+
+    use crate::domain::api_key::hash_api_key;
+    use crate::storage::api_key_store::MemoryApiKeyStore;
+    use crate::storage::memory::MemoryStreamStore;
+    use crate::storage::memory::MemoryViewerStore;
 
     #[test]
     fn test_chart_type_from_definition_defaults_to_table_when_kind_is_missing() {
@@ -11219,6 +11352,513 @@ mod tests {
         let status = response.status();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         (status, String::from_utf8(body.into()).unwrap())
+    }
+
+    fn make_auth_test_app(api_key_store: Option<ApiKeyStore>, api_keys_enabled: bool) -> Router {
+        build_app_with_services_full(
+            StreamStore::Memory(MemoryStreamStore::new(100)),
+            Some(ViewerStore::Memory(MemoryViewerStore::new())),
+            None, // viewer_runtime
+            None, // rollup_store
+            None, // alert_store
+            None, // attr_index
+            None, // incident_store (defaults to Memory)
+            None, // slo_store
+            None, // error_group_store
+            api_key_store,
+            api_keys_enabled,
+        )
+    }
+
+    // --- API key auth middleware integration tests ---
+
+    #[tokio::test]
+    async fn auth_without_token_when_enabled_returns_401() {
+        // Given: auth enabled with an empty api_key_store, no Authorization header
+        let app = make_auth_test_app(Some(ApiKeyStore::Memory(MemoryApiKeyStore::new())), true);
+
+        // When: requesting /api/api-keys without an Authorization header
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/api-keys")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Then: 401 Unauthorized
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_with_invalid_token_when_enabled_returns_401() {
+        // Given: auth enabled, a key is in the store but we use a different token
+        let store = MemoryApiKeyStore::new();
+        let raw_key = "lt_valid_key_in_store";
+        let key_hash_val = hash_api_key(raw_key);
+        let key = ApiKey {
+            id: Uuid::new_v4(),
+            name: "test-key".to_string(),
+            key_hash: key_hash_val,
+            created_at: Utc::now(),
+        };
+        store.insert(&key).await.unwrap();
+        let app = make_auth_test_app(Some(ApiKeyStore::Memory(store)), true);
+
+        // When: using a wrong token (not matching any hash)
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/api-keys")
+                    .header("Authorization", "Bearer lt_wrong_token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Then: 401 Unauthorized
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_with_valid_token_when_enabled_succeeds() {
+        // Given: auth enabled, the store contains a key whose hash matches the token
+        let store = MemoryApiKeyStore::new();
+        let raw_key = "lt_my_valid_token_42";
+        let key_hash_val = hash_api_key(raw_key);
+        let key = ApiKey {
+            id: Uuid::new_v4(),
+            name: "test-key".to_string(),
+            key_hash: key_hash_val,
+            created_at: Utc::now(),
+        };
+        store.insert(&key).await.unwrap();
+        let app = make_auth_test_app(Some(ApiKeyStore::Memory(store)), true);
+
+        // When: using the correct token to list api-keys
+        let auth_header = format!("Bearer {}", raw_key);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/api-keys")
+                    .header("Authorization", auth_header.as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Then: 200 OK
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_when_disabled_bypasses_check() {
+        // Given: auth disabled (api_keys_enabled=false), no token
+        let app = make_auth_test_app(Some(ApiKeyStore::Memory(MemoryApiKeyStore::new())), false);
+
+        // When: requesting /api/api-keys without Authorization header
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/api-keys")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Then: 200 OK (auth is bypassed, api_key_store responds)
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_protects_dashboards_endpoint() {
+        // Given: auth enabled, no token
+        let app = make_auth_test_app(Some(ApiKeyStore::Memory(MemoryApiKeyStore::new())), true);
+
+        // When: requesting /api/dashboards
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/dashboards")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Then: 401 Unauthorized
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_does_not_affect_healthz() {
+        // Given: auth enabled, no token
+        let app = make_auth_test_app(Some(ApiKeyStore::Memory(MemoryApiKeyStore::new())), true);
+
+        // When: hitting /healthz (which is outside /api/* scope)
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Then: 200 OK (healthz never requires auth)
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body.as_ref(), b"ok");
+    }
+
+    #[tokio::test]
+    async fn auth_does_not_affect_root_page() {
+        // Given: auth enabled, no token
+        let app = make_auth_test_app(Some(ApiKeyStore::Memory(MemoryApiKeyStore::new())), true);
+
+        // When: hitting / (which is outside /api/* scope)
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        // Then: 200 OK (even with auth enabled)
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // --- API key management handler integration tests ---
+
+    #[tokio::test]
+    async fn create_api_key_returns_created() {
+        // Given: auth disabled, empty store
+        let app = make_auth_test_app(Some(ApiKeyStore::Memory(MemoryApiKeyStore::new())), false);
+
+        // When: creating a new API key with valid name
+        let payload = serde_json::json!({ "name": "test-key" });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/api-keys")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Then: 201 Created with key info (raw key starts with lt_)
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["name"], "test-key");
+        assert!(json["key"].as_str().unwrap().starts_with("lt_"));
+        assert!(json["id"].as_str().is_some());
+        assert!(json["created_at"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn create_api_key_rejects_empty_name() {
+        // Given: auth disabled
+        let app = make_auth_test_app(Some(ApiKeyStore::Memory(MemoryApiKeyStore::new())), false);
+
+        // When: creating a key with whitespace-only name
+        let payload = serde_json::json!({ "name": "   " });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/api-keys")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Then: 400 Bad Request
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_api_key_requires_auth_when_enabled() {
+        // Given: auth enabled, store with an existing key (so bootstrap is not triggered), no auth header
+        let store = MemoryApiKeyStore::new();
+        store
+            .insert(&ApiKey {
+                id: Uuid::new_v4(),
+                name: "existing".to_string(),
+                key_hash: "abc123".to_string(),
+                created_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        let app = make_auth_test_app(Some(ApiKeyStore::Memory(store)), true);
+
+        // When: trying to create a key without authentication
+        let payload = serde_json::json!({ "name": "should-fail" });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/api-keys")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Then: 401 Unauthorized
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn list_api_keys_returns_empty_list() {
+        // Given: auth disabled, empty store
+        let app = make_auth_test_app(Some(ApiKeyStore::Memory(MemoryApiKeyStore::new())), false);
+
+        // When: listing keys
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/api-keys")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Then: 200 OK with empty array
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["api_keys"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_api_keys_includes_created_key_without_hash() {
+        // Given: a key exists in the store, auth disabled
+        let store = MemoryApiKeyStore::new();
+        let key = ApiKey {
+            id: Uuid::new_v4(),
+            name: "my-key".to_string(),
+            key_hash: "abc123".to_string(),
+            created_at: Utc::now(),
+        };
+        store.insert(&key).await.unwrap();
+        let app = make_auth_test_app(Some(ApiKeyStore::Memory(store)), false);
+
+        // When: listing keys
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/api-keys")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Then: key appears in list but key_hash is NOT exposed
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let keys = json["api_keys"].as_array().unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0]["name"], "my-key");
+        assert!(keys[0].get("key_hash").is_none());
+        assert!(keys[0].get("key").is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_existing_api_key_returns_no_content() {
+        // Given: a key exists in the store, auth disabled
+        let store = MemoryApiKeyStore::new();
+        let key = ApiKey {
+            id: Uuid::new_v4(),
+            name: "delete-me".to_string(),
+            key_hash: "del-hash".to_string(),
+            created_at: Utc::now(),
+        };
+        store.insert(&key).await.unwrap();
+        let app = make_auth_test_app(Some(ApiKeyStore::Memory(store)), false);
+
+        // When: deleting the key
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/api-keys/{}", key.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Then: 204 No Content
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn delete_nonexistent_api_key_returns_not_found() {
+        // Given: empty store, auth disabled
+        let app = make_auth_test_app(Some(ApiKeyStore::Memory(MemoryApiKeyStore::new())), false);
+
+        // When: deleting a random UUID
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/api-keys/{}", Uuid::new_v4()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Then: 404 Not Found
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_api_key_requires_auth_when_enabled() {
+        // Given: auth enabled, a key exists
+        let store = MemoryApiKeyStore::new();
+        let key = ApiKey {
+            id: Uuid::new_v4(),
+            name: "protected".to_string(),
+            key_hash: "prot-hash".to_string(),
+            created_at: Utc::now(),
+        };
+        store.insert(&key).await.unwrap();
+        let app = make_auth_test_app(Some(ApiKeyStore::Memory(store)), true);
+
+        // When: trying to delete without authentication
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/api-keys/{}", key.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Then: 401 Unauthorized
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // --- End-to-end: create key then use it for auth ---
+
+    #[tokio::test]
+    async fn created_api_key_can_be_used_for_authenticated_requests() {
+        // Given: auth disabled (for initial key creation)
+        let store = MemoryApiKeyStore::new();
+        let store_for_enabled = store.clone();
+        let app_disabled = make_auth_test_app(Some(ApiKeyStore::Memory(store)), false);
+
+        // When: creating a key via the API
+        let payload = serde_json::json!({ "name": "e2e-key" });
+        let response = app_disabled
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/api-keys")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let raw_key = json["key"].as_str().unwrap().to_string();
+
+        // Then: build a new app with auth enabled (same underlying store)
+        let app_enabled = make_auth_test_app(Some(ApiKeyStore::Memory(store_for_enabled)), true);
+
+        // When: using the created key to authenticate
+        let auth_header = format!("Bearer {}", raw_key);
+        let response = app_enabled
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/api-keys")
+                    .header("Authorization", auth_header.as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Then: 200 OK — the key authenticates successfully
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn created_api_key_cannot_use_wrong_key_for_auth() {
+        // Given: create a key with auth disabled
+        let store = MemoryApiKeyStore::new();
+        let store_for_enabled = store.clone();
+        let app_disabled = make_auth_test_app(Some(ApiKeyStore::Memory(store)), false);
+
+        let payload = serde_json::json!({ "name": "e2e-key2" });
+        let response = app_disabled
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/api-keys")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let _body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+
+        // Then: build app with auth enabled (same store)
+        let app_enabled = make_auth_test_app(Some(ApiKeyStore::Memory(store_for_enabled)), true);
+
+        // When: using a DIFFERENT (wrong) key
+        let response = app_enabled
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/api-keys")
+                    .header("Authorization", "Bearer lt_completely_different_key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Then: 401 Unauthorized — wrong key is rejected
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

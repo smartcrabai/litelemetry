@@ -16,7 +16,7 @@ use tokio::sync::Mutex;
 use crate::apm::error_groups::ErrorGroup;
 use crate::storage::StorageError;
 
-const CREATE_ERROR_GROUPS_SQL: &str = "
+pub const CREATE_ERROR_GROUPS_SQL: &str = "
 CREATE TABLE IF NOT EXISTS error_groups (
     fingerprint TEXT PRIMARY KEY,
     signature TEXT NOT NULL,
@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS error_groups (
     sample_payload JSONB NOT NULL DEFAULT '{}'::jsonb
 )";
 
-const CREATE_ERROR_GROUPS_LAST_SEEN_INDEX_SQL: &str =
+pub const CREATE_ERROR_GROUPS_LAST_SEEN_INDEX_SQL: &str =
     "CREATE INDEX IF NOT EXISTS error_groups_last_seen_idx ON error_groups (last_seen)";
 
 /// Backed by PostgreSQL `error_groups`.
@@ -38,16 +38,6 @@ pub struct PostgresErrorGroupStore {
 impl PostgresErrorGroupStore {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
-    }
-
-    pub async fn create_schema(&self) -> Result<(), sqlx::Error> {
-        sqlx::query(CREATE_ERROR_GROUPS_SQL)
-            .execute(&self.pool)
-            .await?;
-        sqlx::query(CREATE_ERROR_GROUPS_LAST_SEEN_INDEX_SQL)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
     }
 
     /// Upsert an error group, incrementing `count` and updating `last_seen`/sample.
@@ -93,7 +83,13 @@ impl PostgresErrorGroupStore {
                 signature: row.get("signature"),
                 first_seen: row.get("first_seen"),
                 last_seen: row.get("last_seen"),
-                count: row.get::<i64, _>("count").max(0) as u64,
+                count: {
+                    let raw: i64 = row.get("count");
+                    if raw < 0 {
+                        tracing::warn!("negative error group count ({raw}), clamping to 0");
+                    }
+                    raw.max(0) as u64
+                },
                 sample_payload: row.get::<Value, _>("sample_payload"),
             })
             .collect())

@@ -70,11 +70,7 @@ impl Resolution {
 }
 
 fn signal_str(signal: Signal) -> &'static str {
-    match signal {
-        Signal::Traces => "traces",
-        Signal::Metrics => "metrics",
-        Signal::Logs => "logs",
-    }
+    signal.as_str()
 }
 
 /// Returns the bucket-start epoch in seconds for an epoch-millisecond input.
@@ -104,11 +100,11 @@ pub fn rollup_key(signal: Signal, resolution: Resolution, bucket_epoch_seconds: 
 pub fn sanitize_service_name(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for ch in name.chars() {
-        if ch.is_control() || ch.is_whitespace() || ch == ':' {
-            out.push('_');
+        out.push(if ch.is_control() || ch.is_whitespace() || ch == ':' {
+            '_'
         } else {
-            out.push(ch);
-        }
+            ch
+        });
     }
     if out.len() > 200 {
         out.truncate(200);

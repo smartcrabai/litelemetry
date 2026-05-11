@@ -75,10 +75,6 @@ impl WebhookDispatcher {
         let client = Client::builder().timeout(DEFAULT_TIMEOUT).build()?;
         Ok(Self { client })
     }
-
-    pub fn from_client(client: Client) -> Self {
-        Self { client }
-    }
 }
 
 impl NotificationDispatcher for WebhookDispatcher {
@@ -91,9 +87,6 @@ impl NotificationDispatcher for WebhookDispatcher {
         channel: &NotificationChannel,
         payload: &NotificationPayload,
     ) -> Result<(), NotificationError> {
-        if channel.kind != "webhook" {
-            return Err(NotificationError::UnsupportedKind(channel.kind.clone()));
-        }
         let cfg = WebhookConfig::from_channel(channel)?;
         let headers = cfg.build_headers()?;
 

@@ -1,10 +1,17 @@
 //! `NotificationDispatcher` trait and shared payload type.
 
+use std::sync::OnceLock;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::notifications::NotificationChannel;
 use crate::notifications::webhook::WebhookDispatcher;
+
+fn webhook_dispatcher() -> &'static WebhookDispatcher {
+    static DISPATCHER: OnceLock<WebhookDispatcher> = OnceLock::new();
+    DISPATCHER.get_or_init(|| WebhookDispatcher::new().expect("webhook HTTP client initialized"))
+}
 
 /// Payload delivered to a notification channel.
 ///
@@ -76,11 +83,7 @@ pub async fn dispatch_to_channel(
     payload: &NotificationPayload,
 ) -> Result<(), NotificationError> {
     match channel.kind.as_str() {
-        "webhook" => {
-            let dispatcher = WebhookDispatcher::new()
-                .map_err(|e| NotificationError::Transport(e.to_string()))?;
-            dispatcher.dispatch(channel, payload).await
-        }
+        "webhook" => webhook_dispatcher().dispatch(channel, payload).await,
         other => Err(NotificationError::UnsupportedKind(other.to_string())),
     }
 }

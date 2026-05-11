@@ -1,5 +1,6 @@
 pub mod alerts;
 pub mod anomaly;
+pub mod api_auth;
 pub mod apm;
 pub mod domain;
 pub mod grpc;

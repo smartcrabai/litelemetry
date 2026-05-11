@@ -55,7 +55,7 @@ impl CompiledSlo {
         if slo.window_ms <= 0 {
             return Err(CalculatorError::NonPositiveWindow(slo.window_ms));
         }
-        if !(0.0..=100.0).contains(&slo.target_pct) || slo.target_pct.is_nan() {
+        if slo.target_pct.is_nan() || !(0.0..=100.0).contains(&slo.target_pct) {
             return Err(CalculatorError::InvalidTarget(slo.target_pct));
         }
 
@@ -144,8 +144,6 @@ fn compile_filter_only(
     let definition_json = if list.filters.is_empty() {
         json!({})
     } else {
-        // SloFilterClause already serializes to {field, op, value}, the shape
-        // expected by the viewer compiler.
         json!({
             "filters": list.filters,
             "filter_mode": "and",

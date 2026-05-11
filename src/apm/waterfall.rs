@@ -4,6 +4,7 @@
 //! target `trace_id`, this module produces a [`TraceWaterfall`] suitable for
 //! rendering as a gantt-style chart.
 
+use crate::apm::parse_otlp_nano as parse_nano;
 use crate::domain::telemetry::{NormalizedEntry, Signal};
 use crate::ingest::otlp_http::attribute_string_value;
 use crate::ingest::otlp_pb::payload_as_value;
@@ -63,7 +64,7 @@ pub fn build_waterfall(
         .iter()
         .map(|s| s.start_ns)
         .min()
-        .unwrap_or_default();
+        .expect("raw_spans non-empty after empty check");
 
     let normalized: Vec<WaterfallSpan> = raw_spans
         .into_iter()
@@ -165,18 +166,6 @@ fn collect_raw_spans(entries: &[NormalizedEntry], trace_id: &str) -> Vec<RawSpan
         }
     }
     spans
-}
-
-/// OTLP can encode nano timestamps as a JSON number or string.
-fn parse_nano(value: Option<&Value>) -> u64 {
-    let Some(v) = value else { return 0 };
-    if let Some(n) = v.as_u64() {
-        return n;
-    }
-    if let Some(s) = v.as_str() {
-        return s.parse::<u64>().unwrap_or(0);
-    }
-    0
 }
 
 fn ns_to_ms(ns: u64) -> f64 {

@@ -90,18 +90,8 @@ impl Detector for ZScoreDetector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::telemetry::Signal;
-    use bytes::Bytes;
+    use crate::anomaly::tests::make_entry;
     use chrono::Duration;
-
-    fn make_entry(observed_at: DateTime<Utc>) -> NormalizedEntry {
-        NormalizedEntry {
-            signal: Signal::Traces,
-            observed_at,
-            service_name: Some("svc".into()),
-            payload: Bytes::new(),
-        }
-    }
 
     #[test]
     fn empty_does_not_breach() {

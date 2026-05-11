@@ -4,7 +4,7 @@ use uuid::Uuid;
 /// A single filter clause used inside an SLO success/total filter list.
 ///
 /// Mirrors the structure consumed by the viewer compiler's FilterMatcher
-/// (`field` ∈ {service_name, payload}, `op` ∈ {eq, contains, regex}).
+/// (`field` in {service_name, payload}, `op` in {eq, contains, regex}).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SloFilterClause {
     pub field: String,

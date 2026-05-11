@@ -16,6 +16,7 @@
 //! data point of the first metric for `Signal::Metrics`); when no value is
 //! available the entry is ignored.
 
+use crate::apm::bucket_start;
 use crate::domain::telemetry::{NormalizedEntry, Signal};
 use crate::ingest::otlp_pb::payload_as_value;
 use serde::Serialize;
@@ -203,13 +204,6 @@ pub fn aggregate_entries(spec: &CompiledAggregation, entries: &[NormalizedEntry]
             value: slot.finalize(spec),
         })
         .collect()
-}
-
-/// Aligns a timestamp (epoch ms) down to the nearest `bucket_ms` boundary.
-fn bucket_start(ts_ms: i64, bucket_ms: i64) -> i64 {
-    // div_euclid is correct for negative ts as well, although in practice
-    // observed_at is always positive.
-    ts_ms.div_euclid(bucket_ms) * bucket_ms
 }
 
 /// Per-bucket accumulator state.

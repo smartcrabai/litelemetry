@@ -11,11 +11,6 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-/// Default polling interval used by the runtime tick when no per-alert
-/// schedule has yet elapsed. Individual alerts honour their own
-/// `evaluation_interval_ms` field.
-pub const DEFAULT_TICK_MS: u64 = 1_000;
-
 #[derive(Debug, Error)]
 pub enum AlertRuntimeError {
     #[error("storage error: {0}")]

@@ -1,4 +1,5 @@
 pub mod alert_store;
+pub mod api_key_store;
 pub mod attr_index;
 pub mod error_group_store;
 pub mod incident_store;
@@ -8,6 +9,7 @@ pub mod redis;
 pub mod rollup;
 pub mod slo_store;
 
+pub use api_key_store::ApiKeyStore;
 pub use incident_store::IncidentStore;
 
 use crate::domain::dashboard::DashboardDefinition;
@@ -24,6 +26,8 @@ pub enum StorageError {
     Redis(#[from] ::redis::RedisError),
     #[error("postgres: {0}")]
     Postgres(#[from] sqlx::Error),
+    #[error("duplicate key: {0}")]
+    DuplicateKey(String),
 }
 
 /// Enum store responsible for stream read/write

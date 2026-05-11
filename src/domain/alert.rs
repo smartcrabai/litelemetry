@@ -64,14 +64,6 @@ pub enum AlertMetric {
     Count,
 }
 
-impl AlertMetric {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            AlertMetric::Count => "count",
-        }
-    }
-}
-
 /// Alert evaluation condition.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

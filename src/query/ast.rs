@@ -89,5 +89,4 @@ pub enum CompareOp {
 pub enum Value {
     Str(String),
     Number(f64),
-    Bool(bool),
 }

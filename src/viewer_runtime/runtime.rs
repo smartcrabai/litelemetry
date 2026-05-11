@@ -41,13 +41,9 @@ fn sanitize_stream_cursor(viewer_id: Uuid, mut cursor: StreamCursor) -> StreamCu
             continue;
         }
 
-        let signal_name = match signal {
-            Signal::Traces => "traces",
-            Signal::Metrics => "metrics",
-            Signal::Logs => "logs",
-        };
         tracing::warn!(
-            "viewer {viewer_id}: invalid snapshot cursor {cursor_id:?} for {signal_name}, clearing it"
+            "viewer {viewer_id}: invalid snapshot cursor {cursor_id:?} for {}, clearing it",
+            signal.as_str()
         );
         cursor.clear(signal);
     }

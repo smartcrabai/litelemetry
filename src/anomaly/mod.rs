@@ -57,7 +57,18 @@ impl DetectorSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::telemetry::Signal;
+    use bytes::Bytes;
     use serde_json::json;
+
+    pub(crate) fn make_entry(observed_at: DateTime<Utc>) -> NormalizedEntry {
+        NormalizedEntry {
+            signal: Signal::Traces,
+            observed_at,
+            service_name: Some("svc".into()),
+            payload: Bytes::new(),
+        }
+    }
 
     #[test]
     fn detector_spec_deserializes_no_data() {
