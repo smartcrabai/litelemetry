@@ -46,6 +46,46 @@ The server accepts OpenTelemetry data via two transports on the **same** HTTP po
 
   Implemented with [`buffa`](https://github.com/anthropics/buffa) (protobuf) and [`connectrpc`](https://github.com/anthropics/connect-rust); registered into the existing axum router via `fallback_service`. Point any OTLP client at `http://<host>:<port>` (no path, no separate gRPC port).
 
+## API authentication
+
+All `/api/*` REST endpoints can be protected with Bearer-token API keys. OTLP ingest endpoints (`/v1/traces`, `/v1/metrics`, `/v1/logs`, OTLP gRPC paths), the healthz endpoint, and the static UI are **not** affected.
+
+Set `API_KEYS_ENABLED=true` to turn auth on. It defaults to `false` for backward compatibility.
+
+### Key format and storage
+
+- Keys are generated server-side in the form `lt_<128 hex chars>` (two UUID v4s, 256-bit entropy).
+- Only the SHA-256 hash is persisted (in `api_keys` table for Postgres mode, or in-memory for standalone). **The raw key is returned exactly once** in the create response and cannot be retrieved later.
+- The `api_keys` table is created automatically by `docker/postgres/initdb/001-init.sql` on first startup.
+
+### Bootstrap
+
+When `API_KEYS_ENABLED=true` and the key store is empty, `POST /api/api-keys` is reachable without authentication so an initial key can be created. As soon as one key exists, all `/api/*` requests (including further key management) require a valid `Authorization: Bearer <key>` header.
+
+### Key management endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/api-keys` | Create a key. Body: `{"name": "<label>"}`. Response includes the raw `key` (returned once). |
+| `GET`  | `/api/api-keys` | List keys (id, name, created_at — no hashes, no raw values). |
+| `DELETE` | `/api/api-keys/{id}` | Revoke a key. |
+
+Example bootstrap flow:
+
+```bash
+# 1. Create the first key (no auth required because the store is empty)
+curl -X POST http://localhost:8080/api/api-keys \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"admin"}'
+# => {"id":"...","name":"admin","key":"lt_<128 hex>","created_at":"..."}
+
+# 2. Subsequent requests must include the Bearer token
+curl http://localhost:8080/api/api-keys \
+  -H 'Authorization: Bearer lt_<128 hex>'
+```
+
+In standalone mode the key store lives in memory and is wiped on every restart — re-run the bootstrap flow each time. Use Postgres (`STANDALONE=false`) for durable keys.
+
 ## Prerequisites
 
 - Rust (edition 2024)
@@ -66,6 +106,7 @@ The server accepts OpenTelemetry data via two transports on the **same** HTTP po
 | `VIEWER_RUNTIME_POLL_MS` | `1000` | Poll interval for the background viewer runtime |
 | `MEMORY_STREAM_MAX_ENTRIES` | `100000` | Maximum number of in-memory stream entries retained per signal when `STANDALONE=true`. |
 | `REDIS_STREAM_MAX_ENTRIES` | `100000` | Maximum number of Redis stream entries retained per signal (used only when `STANDALONE=false`). Each `XADD` is issued with `MAXLEN ~ N` for approximate trimming. Set to `0` to disable trimming. |
+| `API_KEYS_ENABLED` | `false` | When `true` / `1`, all `/api/*` endpoints require `Authorization: Bearer <key>`. OTLP, healthz, and the static UI remain unauthenticated. See [API authentication](#api-authentication). |
 
 When set, numeric environment variables must parse cleanly. Invalid values fail fast at startup instead of silently falling back to defaults.
 
