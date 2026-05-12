@@ -1081,11 +1081,14 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
       .dashboard-panel-media {
         max-height: 220px;
+        width: 100%;
+        min-width: 0;
       }
 
       .dashboard-panel-scroll {
         overflow: auto;
         max-height: 220px;
+        min-width: 0;
       }
 
       body.fullscreen #sidebar {
@@ -1131,6 +1134,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         display: grid;
         gap: 12px;
         align-content: start;
+        min-width: 0;
       }
 
       .dashboard-panel-title {
@@ -4461,7 +4465,9 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         document.body.classList.toggle('fullscreen', enabled);
         dashboardFullscreenButton.textContent = enabled ? 'X' : '[ ]';
         dashboardFullscreenButton.setAttribute('aria-label', enabled ? 'Exit fullscreen' : 'Enter fullscreen');
-        if (dashboardPanelCharts.length) requestAnimationFrame(resizeDashboardPanelCharts);
+        if (dashboardPanelCharts.length) {
+          requestAnimationFrame(() => requestAnimationFrame(resizeDashboardPanelCharts));
+        }
       }
 
       function enterDashboardFullscreen() {
@@ -12424,6 +12430,42 @@ mod tests {
                 "must contain fullscreen CSS rule: {css}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_dashboard_panel_css_min_width_allows_grid_shrink_after_fullscreen_exit() {
+        // Given: .dashboard-panel is a CSS Grid item with implicit min-width:auto,
+        //        which prevents the grid track from shrinking below the canvas's inline width
+        //        after fullscreen exit.
+        // When: min-width:0 is added to .dashboard-panel, .dashboard-panel-media, and
+        //       .dashboard-panel-scroll, and width:100% is added to .dashboard-panel-media.
+        // Then: the grid can shrink and the canvas follows its container width.
+        let (_, html) = index_html().await;
+
+        for (needle, label) in [
+            ("min-width: 0", "min-width:0"),
+            ("width: 100%", "width:100%"),
+        ] {
+            assert!(html.contains(needle), "must contain {label}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_fullscreen_layout_uses_double_raf_for_layout_settle() {
+        // Given: fullscreen exit triggers CSS class removal followed by chart.resize().
+        //        A single requestAnimationFrame may fire before CSS Grid layout recalculation
+        //        completes, leaving canvas with stale wide inline dimensions.
+        // When: applyFullscreenLayout is called after fullscreen exit.
+        // Then: it uses double requestAnimationFrame so chart.resize() observes the
+        //       post-CSS-change container dimensions.
+        let (_, html) = index_html().await;
+
+        assert!(
+            html.contains(
+                "requestAnimationFrame(() => requestAnimationFrame(resizeDashboardPanelCharts))"
+            ),
+            "applyFullscreenLayout must use double rAF to wait for layout recalculation before chart.resize()"
+        );
     }
 
     #[tokio::test]
