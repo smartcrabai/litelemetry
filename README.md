@@ -241,6 +241,21 @@ src/
     └── runtime.rs             # Fan-out, diff updates & resume logic
 ```
 
+### Kubernetes Metrics Viewer Example
+
+```json
+{
+  "signal": "metrics",
+  "aggregation": {
+    "fn": "avg",
+    "bucket_ms": 60000,
+    "metric_name": "system.cpu.utilization",
+    "group_by": ["k8s.node.name"]
+  },
+  "where": "attributes['k8s.cluster.name'] = 'prod'"
+}
+```
+
 ## License
 
 [Apache License 2.0](LICENSE)

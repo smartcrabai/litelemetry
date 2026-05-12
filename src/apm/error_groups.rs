@@ -19,6 +19,7 @@ use crate::ingest::otlp_pb::payload_as_value;
 const FINGERPRINT_HEX_LEN: usize = 16;
 /// Number of leading bytes from the digest required to render that hex prefix.
 const FINGERPRINT_BYTE_PREFIX: usize = FINGERPRINT_HEX_LEN / 2;
+const OTEL_ERROR_SEVERITY_NUMBER: i64 = 17;
 
 /// One occurrence of an error event extracted from a payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,7 +110,10 @@ fn signature_from_exception(
         (Some(t), Some(m)) if !t.is_empty() && !m.is_empty() => format!("{t}: {m}"),
         (Some(t), _) if !t.is_empty() => t.to_string(),
         (_, Some(m)) if !m.is_empty() => m.to_string(),
-        _ => "<unknown error>".to_string(),
+        _ => {
+            tracing::debug!("exception event with no type or message, using fallback signature");
+            "<unknown error>".to_string()
+        }
     }
 }
 
@@ -155,7 +159,10 @@ fn extract_from_traces(entry: &NormalizedEntry) -> Vec<ErrorOccurrence> {
                         .get("attributes")
                         .and_then(Value::as_array)
                         .cloned()
-                        .unwrap_or_default();
+                        .unwrap_or_else(|| {
+                            tracing::warn!("exception event missing attributes, using empty list");
+                            Vec::new()
+                        });
                     let exception_type = attribute_string_value(&attrs, "exception.type");
                     let exception_message = attribute_string_value(&attrs, "exception.message");
                     let stacktrace = attribute_string_value(&attrs, "exception.stacktrace");
@@ -212,8 +219,14 @@ fn extract_from_logs(entry: &NormalizedEntry) -> Vec<ErrorOccurrence> {
                 let severity_text = record
                     .get("severityText")
                     .and_then(Value::as_str)
-                    .unwrap_or("ERROR")
-                    .to_string();
+                    .map(str::to_string)
+                    .or_else(|| {
+                        record
+                            .get("severityNumber")
+                            .and_then(Value::as_i64)
+                            .map(|num| format!("severity={num}"))
+                    })
+                    .unwrap_or_else(|| "ERROR".to_string());
                 let signature = if body_text.is_empty() {
                     severity_text.clone()
                 } else {
@@ -244,7 +257,7 @@ fn is_error_log_record(record: &Value) -> bool {
     }
     if let Some(num) = record.get("severityNumber").and_then(Value::as_i64) {
         // OTel spec: ERROR = 17..=20, FATAL = 21..=24
-        if num >= 17 {
+        if num >= OTEL_ERROR_SEVERITY_NUMBER {
             return true;
         }
     }

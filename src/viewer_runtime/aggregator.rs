@@ -7,8 +7,9 @@
 //! Aggregation is deliberately self-contained: it consumes the same entries that
 //! the table view shows and groups them by `bucket_start_ms` (a UTC epoch
 //! milliseconds boundary aligned to `bucket_ms`) and an optional set of group keys
-//! derived from the entry. For now, the only supported group_by key is
-//! `service_name`; unknown keys are ignored at compile time.
+//! derived from the entry. Supported group_by keys are `service_name`,
+//! `k8s.node.name`, `k8s.cluster.name`, `k8s.namespace.name`, `k8s.pod.name`,
+//! and `host.name`; unknown keys are silently ignored.
 //!
 //! `count` and `rate` work for any signal because they only need
 //! `NormalizedEntry::observed_at`. `sum`, `avg`, and the percentile functions
@@ -18,6 +19,7 @@
 
 use crate::apm::bucket_start;
 use crate::domain::telemetry::{NormalizedEntry, Signal};
+use crate::ingest::otlp_http::attribute_string_value;
 use crate::ingest::otlp_pb::payload_as_value;
 use serde::Serialize;
 use serde_json::Value;
@@ -90,12 +92,22 @@ impl AggFn {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupKey {
     ServiceName,
+    K8sNodeName,
+    K8sClusterName,
+    K8sNamespace,
+    K8sPodName,
+    HostName,
 }
 
 impl GroupKey {
-    fn parse(s: &str) -> Option<Self> {
+    pub(crate) fn parse(s: &str) -> Option<Self> {
         match s {
             "service_name" => Some(GroupKey::ServiceName),
+            "k8s.node.name" => Some(GroupKey::K8sNodeName),
+            "k8s.cluster.name" => Some(GroupKey::K8sClusterName),
+            "k8s.namespace.name" => Some(GroupKey::K8sNamespace),
+            "k8s.pod.name" => Some(GroupKey::K8sPodName),
+            "host.name" => Some(GroupKey::HostName),
             _ => None,
         }
     }
@@ -105,6 +117,16 @@ impl GroupKey {
             GroupKey::ServiceName => entry
                 .service_name
                 .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            GroupKey::K8sNodeName => extract_resource_attribute(entry, "k8s.node.name")
+                .unwrap_or_else(|| "unknown".to_string()),
+            GroupKey::K8sClusterName => extract_resource_attribute(entry, "k8s.cluster.name")
+                .unwrap_or_else(|| "unknown".to_string()),
+            GroupKey::K8sNamespace => extract_resource_attribute(entry, "k8s.namespace.name")
+                .unwrap_or_else(|| "unknown".to_string()),
+            GroupKey::K8sPodName => extract_resource_attribute(entry, "k8s.pod.name")
+                .unwrap_or_else(|| "unknown".to_string()),
+            GroupKey::HostName => extract_resource_attribute(entry, "host.name")
                 .unwrap_or_else(|| "unknown".to_string()),
         }
     }
@@ -116,6 +138,7 @@ pub struct CompiledAggregation {
     pub func: AggFn,
     pub bucket_ms: i64,
     pub group_by: Vec<GroupKey>,
+    pub metric_name: Option<String>,
 }
 
 /// One produced bucket -- a time slice with optional group keys and the
@@ -160,10 +183,16 @@ pub fn parse_aggregation(
         Some(_) => return Err(AggregationError::InvalidGroupBy),
     };
 
+    let metric_name = obj
+        .get("metric_name")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
     Ok(Some(CompiledAggregation {
         func,
         bucket_ms: bucket_ms_raw,
         group_by,
+        metric_name,
     }))
 }
 
@@ -180,14 +209,15 @@ pub fn aggregate_entries(spec: &CompiledAggregation, entries: &[NormalizedEntry]
         let bucket_start_ms = bucket_start(entry.observed_at.timestamp_millis(), spec.bucket_ms);
         let group_keys: Vec<String> = spec.group_by.iter().map(|gk| gk.extract(entry)).collect();
 
-        let value_opt = if spec.func.requires_numeric() {
-            extract_numeric_value(entry)
+        let needs_numeric = spec.func.requires_numeric();
+        let value_opt = if needs_numeric {
+            extract_numeric_value(entry, spec.metric_name.as_deref())
         } else {
             None
         };
 
         // For sum/avg/percentiles, ignore entries without a numeric value.
-        if spec.func.requires_numeric() && value_opt.is_none() {
+        if needs_numeric && value_opt.is_none() {
             continue;
         }
 
@@ -279,9 +309,10 @@ fn percentile(samples: &mut [f64], p: f64) -> f64 {
 /// Best-effort numeric value extractor for an entry.
 ///
 /// Currently only inspects metric payloads, returning the first
-/// `asInt`/`asDouble` data point of the first metric. Returns None for
+/// `asInt`/`asDouble` data point of the first metric. When `metric_name` is
+/// `Some`, skips metrics whose `name` field does not match. Returns None for
 /// traces / logs / unparseable metric payloads.
-fn extract_numeric_value(entry: &NormalizedEntry) -> Option<f64> {
+fn extract_numeric_value(entry: &NormalizedEntry, metric_name: Option<&str>) -> Option<f64> {
     if entry.signal != Signal::Metrics {
         return None;
     }
@@ -292,6 +323,11 @@ fn extract_numeric_value(entry: &NormalizedEntry) -> Option<f64> {
         for sm in scope_metrics {
             let metrics = sm.get("metrics").and_then(|v| v.as_array())?;
             for m in metrics {
+                if let Some(filter) = metric_name
+                    && m.get("name").and_then(|v| v.as_str()) != Some(filter)
+                {
+                    continue;
+                }
                 if let Some(v) = first_data_point_value(m) {
                     return Some(v);
                 }
@@ -330,6 +366,27 @@ fn first_data_point_value(metric: &Value) -> Option<f64> {
     None
 }
 
+fn extract_resource_attribute(entry: &NormalizedEntry, key: &str) -> Option<String> {
+    if entry.signal != Signal::Metrics {
+        return None;
+    }
+    let value = payload_as_value(Signal::Metrics, &entry.payload)?;
+    let resource_metrics = value.get("resourceMetrics")?.as_array()?;
+    for rm in resource_metrics {
+        let Some(attrs) = rm
+            .get("resource")
+            .and_then(|v| v.get("attributes"))
+            .and_then(|v| v.as_array())
+        else {
+            continue;
+        };
+        if let Some(sv) = attribute_string_value(attrs, key) {
+            return Some(sv);
+        }
+    }
+    None
+}
+
 /// Serializes the aggregation spec to its JSON shape, used for round-tripping
 /// in API responses.
 pub fn aggregation_to_json(spec: &CompiledAggregation) -> Value {
@@ -338,13 +395,22 @@ pub fn aggregation_to_json(spec: &CompiledAggregation) -> Value {
         .iter()
         .map(|gk| match gk {
             GroupKey::ServiceName => "service_name",
+            GroupKey::K8sNodeName => "k8s.node.name",
+            GroupKey::K8sClusterName => "k8s.cluster.name",
+            GroupKey::K8sNamespace => "k8s.namespace.name",
+            GroupKey::K8sPodName => "k8s.pod.name",
+            GroupKey::HostName => "host.name",
         })
         .collect();
-    serde_json::json!({
+    let mut obj = serde_json::json!({
         "fn": spec.func.as_str(),
         "bucket_ms": spec.bucket_ms,
         "group_by": group_by,
-    })
+    });
+    if let Some(ref name) = spec.metric_name {
+        obj["metric_name"] = serde_json::json!(name);
+    }
+    obj
 }
 
 #[cfg(test)]
@@ -439,6 +505,7 @@ mod tests {
             func: AggFn::Count,
             bucket_ms: 60_000,
             group_by: vec![],
+            metric_name: None,
         };
         let entries = vec![
             entry(Signal::Traces, 60_000, None, Bytes::new()),
@@ -460,6 +527,7 @@ mod tests {
             func: AggFn::Rate,
             bucket_ms: 10_000,
             group_by: vec![],
+            metric_name: None,
         };
         let entries = vec![
             entry(Signal::Traces, 0, None, Bytes::new()),
@@ -479,6 +547,7 @@ mod tests {
             func: AggFn::Count,
             bucket_ms: 60_000,
             group_by: vec![GroupKey::ServiceName],
+            metric_name: None,
         };
         let entries = vec![
             entry(Signal::Traces, 60_000, Some("a"), Bytes::new()),
@@ -501,6 +570,7 @@ mod tests {
             func: AggFn::Sum,
             bucket_ms: 60_000,
             group_by: vec![],
+            metric_name: None,
         };
         let entries = vec![
             entry(Signal::Metrics, 60_000, None, metric_payload(10)),
@@ -518,6 +588,7 @@ mod tests {
             func: AggFn::Avg,
             bucket_ms: 60_000,
             group_by: vec![],
+            metric_name: None,
         };
         let entries = vec![
             entry(Signal::Metrics, 60_000, None, metric_payload(10)),
@@ -534,11 +605,13 @@ mod tests {
             func: AggFn::P50,
             bucket_ms: 60_000,
             group_by: vec![],
+            metric_name: None,
         };
         let spec_p95 = CompiledAggregation {
             func: AggFn::P95,
             bucket_ms: 60_000,
             group_by: vec![],
+            metric_name: None,
         };
         let entries: Vec<_> = (1..=10)
             .map(|i| entry(Signal::Metrics, 60_000, None, metric_payload(i)))
@@ -558,6 +631,7 @@ mod tests {
             func: AggFn::Sum,
             bucket_ms: 60_000,
             group_by: vec![],
+            metric_name: None,
         };
         let entries = vec![
             entry(Signal::Traces, 60_000, None, Bytes::from_static(b"{}")),
@@ -575,11 +649,315 @@ mod tests {
             func: AggFn::P95,
             bucket_ms: 30_000,
             group_by: vec![GroupKey::ServiceName],
+            metric_name: None,
         };
         let value = aggregation_to_json(&spec);
         assert_eq!(
             value,
             json!({ "fn": "p95", "bucket_ms": 30_000, "group_by": ["service_name"] })
+        );
+    }
+
+    fn metric_payload_with_resource_attrs(attrs: Vec<(&str, &str)>, value: u64) -> Bytes {
+        let attributes: Vec<Value> = attrs
+            .into_iter()
+            .map(|(key, val)| json!({"key": key, "value": {"stringValue": val}}))
+            .collect();
+        Bytes::from(
+            json!({
+                "resourceMetrics": [{
+                    "resource": { "attributes": attributes },
+                    "scopeMetrics": [{
+                        "metrics": [{
+                            "name": "test",
+                            "sum": {
+                                "dataPoints": [{ "asInt": value.to_string() }]
+                            }
+                        }]
+                    }]
+                }]
+            })
+            .to_string(),
+        )
+    }
+
+    fn multi_metric_payload() -> Bytes {
+        Bytes::from(
+            json!({
+                "resourceMetrics": [{
+                    "scopeMetrics": [{
+                        "metrics": [
+                            {
+                                "name": "system.cpu.utilization",
+                                "gauge": {
+                                    "dataPoints": [{ "asDouble": 0.5 }]
+                                }
+                            },
+                            {
+                                "name": "system.memory.utilization",
+                                "gauge": {
+                                    "dataPoints": [{ "asDouble": 0.8 }]
+                                }
+                            }
+                        ]
+                    }]
+                }]
+            })
+            .to_string(),
+        )
+    }
+
+    #[test]
+    fn parse_aggregation_parses_metric_name_field() {
+        let spec = parse_aggregation(&json!({
+            "aggregation": {
+                "fn": "sum",
+                "bucket_ms": 60_000,
+                "metric_name": "system.cpu.utilization"
+            }
+        }))
+        .unwrap()
+        .unwrap();
+        assert_eq!(spec.metric_name, Some("system.cpu.utilization".to_string()));
+    }
+
+    #[test]
+    fn aggregate_count_with_group_by_resource_attributes() {
+        struct Case {
+            group_key: GroupKey,
+            attr_key: &'static str,
+            inputs: &'static [(&'static str, u64)],
+            expected: &'static [(&'static str, f64)],
+        }
+        let cases = &[
+            Case {
+                group_key: GroupKey::K8sNodeName,
+                attr_key: "k8s.node.name",
+                inputs: &[("node-a", 1), ("node-b", 2), ("node-a", 3)],
+                expected: &[("node-a", 2.0), ("node-b", 1.0)],
+            },
+            Case {
+                group_key: GroupKey::K8sClusterName,
+                attr_key: "k8s.cluster.name",
+                inputs: &[("prod", 1), ("staging", 2), ("prod", 3)],
+                expected: &[("prod", 2.0), ("staging", 1.0)],
+            },
+            Case {
+                group_key: GroupKey::K8sNamespace,
+                attr_key: "k8s.namespace.name",
+                inputs: &[("default", 1), ("kube-system", 2)],
+                expected: &[("default", 1.0), ("kube-system", 1.0)],
+            },
+            Case {
+                group_key: GroupKey::K8sPodName,
+                attr_key: "k8s.pod.name",
+                inputs: &[("pod-1", 1), ("pod-2", 2), ("pod-1", 3)],
+                expected: &[("pod-1", 2.0), ("pod-2", 1.0)],
+            },
+            Case {
+                group_key: GroupKey::HostName,
+                attr_key: "host.name",
+                inputs: &[("host-1", 1), ("host-2", 2)],
+                expected: &[("host-1", 1.0), ("host-2", 1.0)],
+            },
+        ];
+        for case in cases {
+            let entries: Vec<_> = case
+                .inputs
+                .iter()
+                .enumerate()
+                .map(|(i, (name, val))| {
+                    entry(
+                        Signal::Metrics,
+                        60_000 + (i as i64 * 5_000),
+                        None,
+                        metric_payload_with_resource_attrs(vec![(case.attr_key, name)], *val),
+                    )
+                })
+                .collect();
+            let spec = CompiledAggregation {
+                func: AggFn::Count,
+                bucket_ms: 60_000,
+                group_by: vec![case.group_key],
+                metric_name: None,
+            };
+            let buckets = aggregate_entries(&spec, &entries);
+            assert_eq!(
+                buckets.len(),
+                case.expected.len(),
+                "bucket count mismatch for {}",
+                case.attr_key
+            );
+            for (i, (exp_name, exp_val)) in case.expected.iter().enumerate() {
+                assert_eq!(
+                    buckets[i].group_keys,
+                    vec![(*exp_name).to_string()],
+                    "group key mismatch for {}",
+                    case.attr_key
+                );
+                assert_eq!(
+                    buckets[i].value, *exp_val,
+                    "value mismatch for {}",
+                    case.attr_key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn extract_resource_attribute_returns_unknown_for_missing_key() {
+        let entry = entry(
+            Signal::Metrics,
+            60_000,
+            None,
+            metric_payload_with_resource_attrs(vec![("k8s.node.name", "node-a")], 1),
+        );
+        let result = GroupKey::K8sClusterName.extract(&entry);
+        assert_eq!(result, "unknown");
+    }
+
+    #[test]
+    fn extract_resource_attribute_returns_unknown_for_non_metric_signal() {
+        let entry = entry(Signal::Traces, 60_000, None, Bytes::new());
+        let result = GroupKey::K8sNodeName.extract(&entry);
+        assert_eq!(result, "unknown");
+    }
+
+    #[test]
+    fn service_name_group_key_returns_unknown_when_not_set() {
+        let spec = CompiledAggregation {
+            func: AggFn::Count,
+            bucket_ms: 60_000,
+            group_by: vec![GroupKey::ServiceName],
+            metric_name: None,
+        };
+        let entries = vec![entry(Signal::Traces, 60_000, None, Bytes::new())];
+
+        let buckets = aggregate_entries(&spec, &entries);
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].group_keys, vec!["unknown".to_string()]);
+    }
+
+    #[test]
+    fn aggregate_filters_by_metric_name() {
+        let spec = CompiledAggregation {
+            func: AggFn::Sum,
+            bucket_ms: 60_000,
+            group_by: vec![],
+            metric_name: Some("system.cpu.utilization".to_string()),
+        };
+        let entries = vec![entry(Signal::Metrics, 60_000, None, multi_metric_payload())];
+
+        let buckets = aggregate_entries(&spec, &entries);
+        assert_eq!(buckets.len(), 1);
+        assert!((buckets[0].value - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn aggregate_no_metric_name_filter_returns_first_metric_when_none() {
+        let spec = CompiledAggregation {
+            func: AggFn::Sum,
+            bucket_ms: 60_000,
+            group_by: vec![],
+            metric_name: None,
+        };
+        let entries = vec![entry(Signal::Metrics, 60_000, None, multi_metric_payload())];
+
+        let buckets = aggregate_entries(&spec, &entries);
+        assert_eq!(buckets.len(), 1);
+        // Without filter, returns first metric value (0.5)
+        assert!((buckets[0].value - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn aggregate_metric_name_filter_skips_when_no_match() {
+        let spec = CompiledAggregation {
+            func: AggFn::Sum,
+            bucket_ms: 60_000,
+            group_by: vec![],
+            metric_name: Some("nonexistent.metric".to_string()),
+        };
+        let entries = vec![entry(Signal::Metrics, 60_000, None, multi_metric_payload())];
+
+        let buckets = aggregate_entries(&spec, &entries);
+        // No matching metric → no numeric value → entry skipped.
+        assert!(buckets.is_empty());
+    }
+
+    #[test]
+    fn aggregation_to_json_emits_metric_name_when_set() {
+        let spec = CompiledAggregation {
+            func: AggFn::Avg,
+            bucket_ms: 30_000,
+            group_by: vec![],
+            metric_name: Some("system.cpu.utilization".to_string()),
+        };
+        let value = aggregation_to_json(&spec);
+        assert_eq!(
+            value,
+            json!({
+                "fn": "avg",
+                "bucket_ms": 30_000,
+                "group_by": [],
+                "metric_name": "system.cpu.utilization"
+            })
+        );
+    }
+
+    #[test]
+    fn aggregation_to_json_omits_metric_name_when_none() {
+        let spec = CompiledAggregation {
+            func: AggFn::Avg,
+            bucket_ms: 30_000,
+            group_by: vec![],
+            metric_name: None,
+        };
+        let value = aggregation_to_json(&spec);
+        assert_eq!(
+            value,
+            json!({ "fn": "avg", "bucket_ms": 30_000, "group_by": [] })
+        );
+    }
+
+    #[test]
+    fn parse_aggregation_parses_k8s_group_by_keys() {
+        let spec = parse_aggregation(&json!({
+            "aggregation": {
+                "fn": "count",
+                "bucket_ms": 60_000,
+                "group_by": ["k8s.node.name", "k8s.cluster.name", "k8s.namespace.name", "k8s.pod.name", "host.name", "unknown_key"]
+            }
+        }))
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            spec.group_by,
+            vec![
+                GroupKey::K8sNodeName,
+                GroupKey::K8sClusterName,
+                GroupKey::K8sNamespace,
+                GroupKey::K8sPodName,
+                GroupKey::HostName,
+            ]
+        );
+    }
+
+    #[test]
+    fn aggregation_to_json_round_trips_new_group_keys() {
+        let spec = CompiledAggregation {
+            func: AggFn::Count,
+            bucket_ms: 60_000,
+            group_by: vec![GroupKey::K8sNodeName, GroupKey::HostName],
+            metric_name: None,
+        };
+        let value = aggregation_to_json(&spec);
+        assert_eq!(
+            value,
+            json!({
+                "fn": "count",
+                "bucket_ms": 60_000,
+                "group_by": ["k8s.node.name", "host.name"]
+            })
         );
     }
 }
