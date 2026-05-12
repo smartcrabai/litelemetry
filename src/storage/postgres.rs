@@ -272,6 +272,48 @@ impl PostgresStore {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Updates the viewer's name and increments revision
+    pub async fn update_viewer_name(&self, id: Uuid, name: &str) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE viewer_definitions
+             SET name = $1,
+                 revision = revision + 1
+             WHERE id = $2",
+        )
+        .bind(name)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Updates definition_json, layout_json, and name in a single query (also increments revision by +1)
+    pub async fn update_viewer_definition_and_name(
+        &self,
+        id: Uuid,
+        definition_json: &Value,
+        layout_json: &Value,
+        name: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE viewer_definitions
+             SET definition_json = $1,
+                 layout_json = $2,
+                 name = $3,
+                 revision = revision + 1
+             WHERE id = $4",
+        )
+        .bind(definition_json)
+        .bind(layout_json)
+        .bind(name)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Upserts a viewer snapshot
     pub async fn upsert_snapshot(&self, snapshot: &ViewerSnapshotRow) -> Result<(), sqlx::Error> {
         let status_json = serde_json::to_value(&snapshot.status)

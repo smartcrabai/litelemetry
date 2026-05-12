@@ -149,6 +149,10 @@ impl CompiledViewer {
         self.definition.definition_json = definition_json;
         self.definition.layout_json = layout_json;
     }
+
+    pub fn update_name(&mut self, name: &str) {
+        self.definition.name = name.to_string();
+    }
 }
 
 /// Extracts and normalizes the query from definition_json.

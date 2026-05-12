@@ -1254,15 +1254,6 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         opacity: 0.4;
       }
 
-      .chart-section {
-        display: none;
-      }
-
-      .chart-section.visible {
-        display: grid;
-        gap: 18px;
-      }
-
       .chart-section canvas {
         width: 100%;
         max-height: 400px;
@@ -1690,101 +1681,118 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           </div>
         </div>
       </section>
+      </div><!-- #page-viewers -->
 
-      <section id="viewer-detail-section" class="panel panel-strong chart-section">
-        <div class="toolbar-row" style="margin-bottom: 4px;">
-          <h3 id="viewer-detail-title">Viewer Detail</h3>
-        </div>
-        <div id="viewer-detail-query-row" class="toolbar-row" hidden>
-          <input id="viewer-detail-query-input" placeholder="Query filter" maxlength="200"
-                 aria-label="Query filter"
-                 style="flex:1; min-width: 120px;" list="viewer-detail-query-datalist" />
-          <datalist id="viewer-detail-query-datalist"></datalist>
-          <button id="viewer-detail-query-update" class="secondary btn-compact" type="button">Update</button>
-        </div>
-        <div id="viewer-filter-section" class="filter-section" hidden>
-          <div class="filter-badges" id="viewer-filter-badges"></div>
-          <div id="viewer-filter-editor" hidden>
-            <div class="toolbar-row" style="margin-top:6px;">
-              <input id="detail-query-input" type="text" placeholder="Simple text search (optional)" aria-label="Text search query" style="flex:1;min-width:180px;" list="detail-query-datalist" />
-              <datalist id="detail-query-datalist"></datalist>
-              <div class="filter-mode-toggle" id="detail-filter-mode-toggle">
-                <button id="detail-filter-mode-and" class="active" type="button" title="All filters must match" aria-pressed="true">AND</button>
-                <button id="detail-filter-mode-or" type="button" title="Any filter must match" aria-pressed="false">OR</button>
+      <div id="page-viewer-detail" hidden>
+        <section class="toolbar panel panel-strong">
+          <div class="toolbar-row" style="align-items:center;gap:10px;">
+            <button id="viewer-detail-back" class="secondary" type="button">&larr; Back</button>
+            <h2 id="viewer-detail-title" style="margin:0;">Viewer Detail</h2>
+          </div>
+        </section>
+
+        <section class="panel panel-strong chart-section">
+          <div class="status-box" id="viewer-detail-status-box" data-state="idle"></div>
+
+          <div class="toolbar-row" style="margin-bottom: 4px;align-items:center;gap:10px;">
+            <label>Name: <input id="viewer-detail-name-input" type="text" maxlength="80" style="width:200px;" /></label>
+            <label>Chart: <select id="viewer-detail-chart-select" aria-label="Chart type" style="width:140px;"></select></label>
+            <span style="flex:1;"></span>
+            <button id="viewer-detail-save-button" class="primary btn-compact" type="button">Save</button>
+            <button id="viewer-detail-delete-button" class="secondary btn-compact" type="button">Delete</button>
+          </div>
+
+          <div id="viewer-detail-query-row" class="toolbar-row" hidden>
+            <input id="viewer-detail-query-input" placeholder="Query filter" maxlength="200"
+                   aria-label="Query filter"
+                   style="flex:1; min-width: 120px;" list="viewer-detail-query-datalist" />
+            <datalist id="viewer-detail-query-datalist"></datalist>
+            <button id="viewer-detail-query-update" class="secondary btn-compact" type="button">Update</button>
+          </div>
+
+          <div id="viewer-filter-section" class="filter-section" hidden>
+            <div class="filter-badges" id="viewer-filter-badges"></div>
+            <div id="viewer-filter-editor" hidden>
+              <div class="toolbar-row" style="margin-top:6px;">
+                <input id="detail-query-input" type="text" placeholder="Simple text search (optional)" aria-label="Text search query" style="flex:1;min-width:180px;" list="detail-query-datalist" />
+                <datalist id="detail-query-datalist"></datalist>
+                <div class="filter-mode-toggle" id="detail-filter-mode-toggle">
+                  <button id="detail-filter-mode-and" class="active" type="button" title="All filters must match" aria-pressed="true">AND</button>
+                  <button id="detail-filter-mode-or" type="button" title="Any filter must match" aria-pressed="false">OR</button>
+                </div>
+              </div>
+              <div id="detail-filter-rows-container" style="display:grid;gap:6px;margin-top:8px;"></div>
+              <div style="display:flex;gap:8px;margin-top:8px;">
+                <button id="detail-add-filter-button" class="secondary" type="button">+ Add filter</button>
+                <button id="detail-save-filters-button" class="primary" type="button">Save filters</button>
               </div>
             </div>
-            <div id="detail-filter-rows-container" style="display:grid;gap:6px;margin-top:8px;"></div>
-            <div style="display:flex;gap:8px;margin-top:8px;">
-              <button id="detail-add-filter-button" class="secondary" type="button">+ Add filter</button>
-              <button id="detail-save-filters-button" class="primary" type="button">Save filters</button>
+            <button id="edit-viewer-filters-button" class="secondary btn-compact" type="button" aria-expanded="false" aria-controls="viewer-filter-editor">Edit filters</button>
+          </div>
+          <div id="viewer-chart-container">
+            <canvas id="viewer-chart-canvas"></canvas>
+          </div>
+          <div id="viewer-entries-table" class="entries-table-wrap" hidden>
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Signal</th>
+                  <th>Service</th>
+                  <th>Preview</th>
+                </tr>
+              </thead>
+              <tbody id="viewer-entries-body"></tbody>
+            </table>
+          </div>
+          <div id="viewer-trace-list" class="entries-table-wrap" hidden>
+            <table>
+              <thead>
+                <tr>
+                  <th>Trace ID</th>
+                  <th>Root Span</th>
+                  <th>Services</th>
+                  <th>Spans</th>
+                  <th>Duration</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="viewer-trace-list-body"></tbody>
+            </table>
+          </div>
+          <div id="viewer-trace-detail" class="trace-detail-panel" hidden>
+            <div class="trace-detail-header">
+              <button id="trace-back-button" class="secondary" type="button">&larr; Back</button>
+              <h3 id="trace-detail-title"></h3>
+            </div>
+            <div class="trace-timeline-wrap">
+              <div class="trace-timeline-header">
+                <div>Service &amp; Operation</div>
+                <div class="trace-axis" id="trace-axis"></div>
+              </div>
+              <div id="trace-timeline"></div>
             </div>
           </div>
-          <button id="edit-viewer-filters-button" class="secondary btn-compact" type="button" aria-expanded="false" aria-controls="viewer-filter-editor">Edit filters</button>
-        </div>
-        <div id="viewer-chart-container">
-          <canvas id="viewer-chart-canvas"></canvas>
-        </div>
-        <div id="viewer-entries-table" class="entries-table-wrap" hidden>
-          <table>
-            <thead>
-              <tr>
-                <th>Time</th>
-                <th>Signal</th>
-                <th>Service</th>
-                <th>Preview</th>
-              </tr>
-            </thead>
-            <tbody id="viewer-entries-body"></tbody>
-          </table>
-        </div>
-        <div id="viewer-trace-list" class="entries-table-wrap" hidden>
-          <table>
-            <thead>
-              <tr>
-                <th>Trace ID</th>
-                <th>Root Span</th>
-                <th>Services</th>
-                <th>Spans</th>
-                <th>Duration</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody id="viewer-trace-list-body"></tbody>
-          </table>
-        </div>
-        <div id="viewer-trace-detail" class="trace-detail-panel" hidden>
-          <div class="trace-detail-header">
-            <button id="trace-back-button" class="secondary" type="button">&larr; Back</button>
-            <h3 id="trace-detail-title"></h3>
-          </div>
-          <div class="trace-timeline-wrap">
-            <div class="trace-timeline-header">
-              <div>Service &amp; Operation</div>
-              <div class="trace-axis" id="trace-axis"></div>
+          <div id="viewer-exemplars" class="entries-table-wrap" hidden>
+            <div class="toolbar-row" style="margin-bottom: 4px;">
+              <strong>Exemplars (metric bucket -> sample trace_ids)</strong>
+              <button id="viewer-exemplars-refresh" class="secondary btn-compact" type="button">Refresh</button>
             </div>
-            <div id="trace-timeline"></div>
+            <table>
+              <thead>
+                <tr>
+                  <th>Bucket Start</th>
+                  <th>Sample Trace IDs</th>
+                </tr>
+              </thead>
+              <tbody id="viewer-exemplars-body"></tbody>
+            </table>
+            <p id="viewer-exemplars-empty" hidden style="text-align:center; color: var(--muted);">
+              No matching trace samples in the current window.
+            </p>
           </div>
-        </div>
-        <div id="viewer-exemplars" class="entries-table-wrap" hidden>
-          <div class="toolbar-row" style="margin-bottom: 4px;">
-            <strong>Exemplars (metric bucket -> sample trace_ids)</strong>
-            <button id="viewer-exemplars-refresh" class="secondary btn-compact" type="button">Refresh</button>
-          </div>
-          <table>
-            <thead>
-              <tr>
-                <th>Bucket Start</th>
-                <th>Sample Trace IDs</th>
-              </tr>
-            </thead>
-            <tbody id="viewer-exemplars-body"></tbody>
-          </table>
-          <p id="viewer-exemplars-empty" hidden style="text-align:center; color: var(--muted);">
-            No matching trace samples in the current window.
-          </p>
-        </div>
-      </section>
-      </div><!-- #page-viewers -->
+        </section>
+      </div><!-- #page-viewer-detail -->
 
       <div id="page-query" hidden>
         <section class="panel panel-strong stack" aria-labelledby="query-title">
@@ -2382,7 +2390,6 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const viewerEmptyBody = document.getElementById('viewer-empty-body');
       const viewerTableScroll = document.getElementById('viewer-table-scroll');
       const viewerTableBody = document.getElementById('viewer-table-body');
-      const viewerDetailSection = document.getElementById('viewer-detail-section');
       const viewerDetailTitle = document.getElementById('viewer-detail-title');
       const viewerChartContainer = document.getElementById('viewer-chart-container');
       const viewerChartCanvas = document.getElementById('viewer-chart-canvas');
@@ -2414,6 +2421,13 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       const viewerDetailQueryRow = document.getElementById('viewer-detail-query-row');
       const viewerDetailQueryInput = document.getElementById('viewer-detail-query-input');
       const viewerDetailQueryUpdate = document.getElementById('viewer-detail-query-update');
+      const pageViewerDetail = document.getElementById('page-viewer-detail');
+      const viewerDetailNameInput = document.getElementById('viewer-detail-name-input');
+      const viewerDetailChartSelect = document.getElementById('viewer-detail-chart-select');
+      const viewerDetailSaveButton = document.getElementById('viewer-detail-save-button');
+      const viewerDetailDeleteButton = document.getElementById('viewer-detail-delete-button');
+      const viewerDetailBack = document.getElementById('viewer-detail-back');
+      const viewerDetailStatusBox = document.getElementById('viewer-detail-status-box');
 
       // --- Filter builder (create form) ---
       const filterModeAndBtn = document.getElementById('filter-mode-and');
@@ -2649,7 +2663,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             throw new Error(`HTTP ${response.status}${text ? ': ' + text : ''}`);
           }
           await refreshViewers({ silent: true });
-          await showViewerDetail(viewerId);
+          await loadViewerDetailPage(viewerId);
           setStatus('ok', 'Filters saved.');
         } catch (error) {
           setStatus('error', `Failed to save filters: ${error.message}`);
@@ -2961,7 +2975,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           await refreshViewers({ silent: true });
           if (selectedViewerId === viewerId) {
-            await showViewerDetail(viewerId);
+            await loadViewerDetailPage(viewerId);
           }
           setStatus('ok', successMsg);
         } catch (error) {
@@ -3038,7 +3052,9 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           delCell.appendChild(delBtn);
           row.appendChild(delCell);
 
-          row.addEventListener('click', () => showViewerDetail(viewer.id));
+          row.addEventListener('click', () => {
+            window.location.hash = buildViewerHash(viewer.id);
+          });
           viewerTableBody.appendChild(row);
         }
       }
@@ -3506,9 +3522,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             const detail = await detailResp.json();
             const match = (detail.traces || []).find(t => t.trace_id === traceId);
             if (match) {
-              showViewerDetail(v.id).then(() => {
-                setTimeout(() => showTraceDetail(match), 50);
-              });
+              window.location.hash = buildViewerHash(v.id) + '?trace=' + encodeURIComponent(traceId);
               setStatus('ok', 'Opened trace ' + truncateId(traceId));
               return;
             }
@@ -3701,9 +3715,10 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         viewerTraceList.hidden = false;
       });
 
-      async function showViewerDetail(viewerId) {
+      async function loadViewerDetailPage(viewerId) {
         selectedViewerId = viewerId;
-        renderViewerTable();
+        viewerDetailStatusBox.dataset.state = 'working';
+        viewerDetailStatusBox.textContent = 'Loading viewer...';
 
         try {
           const response = await fetch(`/api/viewers/${viewerId}`, {
@@ -3716,11 +3731,14 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           viewerDetailTitle.textContent = `${viewer.name} (${chartType})`;
           viewerDetailQueryInput.value = viewer.query || '';
           viewerDetailQueryRow.hidden = false;
-          viewerDetailSection.classList.add('visible');
           hideAllDetailPanels();
+
+          viewerDetailNameInput.value = viewer.name || '';
+          populateViewerDetailChartSelect(viewer, chartType);
 
           renderFilterBadges(viewer);
           hydrateFilterEditor(viewer);
+          viewerFilterSection.hidden = false;
           viewerFilterEditor.hidden = true;
           editViewerFiltersButton.textContent = 'Edit filters';
           editViewerFiltersButton.setAttribute('aria-expanded', 'false');
@@ -3740,13 +3758,25 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           if (viewerTargetsMetrics(viewer)) {
             loadExemplarsForViewer(viewerId);
           }
+
+          viewerDetailStatusBox.dataset.state = 'ok';
+          viewerDetailStatusBox.textContent = `Loaded ${viewer.entry_count} entries.`;
+
+          // Auto-open trace detail if ?trace= param present
+          const traceId = new URLSearchParams(window.location.hash.split('?')[1] || '').get('trace');
+          if (traceId && viewer.traces) {
+            const traceMatch = viewer.traces.find(t => t.trace_id === traceId);
+            if (traceMatch) {
+              setTimeout(() => showTraceDetail(traceMatch), 100);
+            }
+          }
         } catch (error) {
-          viewerDetailSection.classList.remove('visible');
-          viewerDetailTitle.textContent = '';
+          viewerDetailTitle.textContent = 'Viewer Detail';
           hideAllDetailPanels();
           if (currentChart) { currentChart.destroy(); currentChart = null; }
           viewerEntriesBody.replaceChildren();
-          setStatus('error', `Failed to load viewer detail: ${error.message}`);
+          viewerDetailStatusBox.dataset.state = 'error';
+          viewerDetailStatusBox.textContent = `Failed to load viewer detail: ${error.message}`;
         }
       }
 
@@ -3973,7 +4003,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
           if (selectedViewerId === viewerId) {
             selectedViewerId = null;
-            viewerDetailSection.classList.remove('visible');
+            navigateTo('viewers');
           }
           setStatus('ok', 'Viewer deleted');
           await refreshViewers();
@@ -4019,6 +4049,58 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           createViewer();
         }
       });
+
+      // --- Viewer detail page event handlers ---
+      viewerDetailBack.addEventListener('click', () => {
+        history.back();
+      });
+
+      viewerDetailSaveButton.addEventListener('click', () => {
+        if (!selectedViewerId) return;
+        const payload = { name: viewerDetailNameInput.value.trim() };
+        const chartType = viewerDetailChartSelect.value;
+        if (chartType) payload.chart_type = chartType;
+        patchViewer(selectedViewerId, payload, 'Viewer updated.');
+      });
+
+      viewerDetailDeleteButton.addEventListener('click', () => {
+        if (!selectedViewerId) return;
+        const name = viewerDetailNameInput.value.trim() || 'this viewer';
+        deleteViewer(selectedViewerId, name);
+      });
+
+      viewerDetailChartSelect.addEventListener('change', () => {
+        if (!selectedViewerId) return;
+        const chartType = viewerDetailChartSelect.value;
+        if (chartType) {
+          patchViewer(selectedViewerId, { chart_type: chartType }, `Chart type updated to ${chartTypeLabel(chartType)}.`);
+        }
+      });
+
+      viewerDetailNameInput.addEventListener('keydown', event => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          viewerDetailSaveButton.click();
+        }
+      });
+
+      function populateViewerDetailChartSelect(viewer, currentChartType) {
+        viewerDetailChartSelect.replaceChildren();
+        if (!viewerSupportsMetricCharts(viewer)) {
+          const opt = document.createElement('option');
+          opt.value = '';
+          opt.textContent = 'N/A';
+          viewerDetailChartSelect.appendChild(opt);
+          return;
+        }
+        for (const [val, label] of Object.entries(CHART_TYPE_LABELS)) {
+          const opt = document.createElement('option');
+          opt.value = val;
+          opt.textContent = label;
+          if (val === currentChartType) opt.selected = true;
+          viewerDetailChartSelect.appendChild(opt);
+        }
+      }
 
       syncCreateForm();
       previewViewer(true);
@@ -4239,13 +4321,15 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         return true;
       }
 
-      function navigateTo(page, dashboardId) {
+      function navigateTo(page, id) {
         stopDashboardRefresh();
         cancelPreview();
         currentPage = page;
-        currentDashboardId = dashboardId || null;
+        currentDashboardId = (page === 'dashboard') ? (id || null) : null;
+        const currentViewerId = (page === 'viewer-detail') ? (id || null) : null;
 
         pageViewers.hidden = page !== 'viewers';
+        pageViewerDetail.hidden = page !== 'viewer-detail';
         pageErrors.hidden = page !== 'errors';
         pageDashboard.hidden = page !== 'dashboard';
         const pageWaterfallEl = document.getElementById('page-waterfall');
@@ -4287,7 +4371,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         if (navDbInsights) navDbInsights.classList.toggle('active', page === 'db-insights');
 
         document.querySelectorAll('.sidebar-dashboard-item').forEach(el => {
-          el.classList.toggle('active', el.dataset.id === dashboardId);
+          el.classList.toggle('active', el.dataset.id === currentDashboardId);
         });
 
         updateDashboardRefreshControls();
@@ -4296,10 +4380,14 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           refreshSlos();
         }
 
-        if (page === 'dashboard' && dashboardId) {
+        if (page === 'viewer-detail' && currentViewerId) {
+          loadViewerDetailPage(currentViewerId);
+        }
+
+        if (page === 'dashboard' && id) {
           setDashboardLastUpdated(null);
           const hashData = parseDashboardHash();
-          const hashMatch = hashData != null && hashData.id === dashboardId;
+          const hashMatch = hashData != null && hashData.id === id;
           dashboardLookbackMs = hashMatch ? hashData.lookbackMs : null;
           dashboardMaxLookbackMs = null;
           dashboardRangeMode = dashboardRangeModeFromLookbackMs(dashboardLookbackMs);
@@ -4314,7 +4402,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           syncDashboardRangeControls();
           updateFilterTags();
           fetchAndPopulateServices();
-          loadDashboard(dashboardId);
+          loadDashboard(id);
           restartDashboardRefresh();
         }
         if (page === 'viewers') {
@@ -5722,6 +5810,25 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         title.textContent = v.name;
         div.appendChild(title);
 
+        div.style.cursor = 'pointer';
+        div.setAttribute('role', 'button');
+        div.setAttribute('tabindex', '0');
+        const navigateToPanelViewer = () => {
+          window.location.hash = buildViewerHash(panel.viewer_id);
+        };
+        const handlePanelClick = (e) => {
+          if (e.target.tagName === 'BUTTON' || e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT' || e.target.tagName === 'A') return;
+          navigateToPanelViewer();
+        };
+        const handlePanelKeydown = (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            navigateToPanelViewer();
+          }
+        };
+        div.addEventListener('click', handlePanelClick);
+        div.addEventListener('keydown', handlePanelKeydown);
+
         const chartType = readViewerChartType(v);
         const isTraces = v.signals.includes('traces');
         const supportsMetricCharts = viewerSupportsMetricCharts(v);
@@ -6435,7 +6542,25 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       serviceMapRefreshButton.addEventListener('click', refreshServiceMap);
       serviceMapLookback.addEventListener('change', refreshServiceMap);
 
+      function buildViewerHash(id) {
+        return `#viewer/${id}`;
+      }
+
+      function parseViewerHash() {
+        const match = window.location.hash.match(/^#viewer\/([^/?]+)(\?.*)?$/);
+        if (!match) return null;
+        const id = match[1];
+        const params = new URLSearchParams(match[2] ? match[2].slice(1) : '');
+        const traceId = params.get('trace');
+        return { id, traceId };
+      }
+
       function routeFromHash() {
+        const viewerHash = parseViewerHash();
+        if (viewerHash) {
+          navigateTo('viewer-detail', viewerHash.id);
+          return;
+        }
         const hashData = parseDashboardHash();
         if (hashData) {
           navigateTo('dashboard', hashData.id);
@@ -7363,6 +7488,7 @@ struct CreateViewerRequest {
 
 #[derive(Debug, Deserialize)]
 struct PatchViewerRequest {
+    name: Option<String>,
     chart_type: Option<String>,
     #[serde(default)]
     query: Option<String>,
@@ -8181,6 +8307,30 @@ async fn create_viewer(
     Ok((StatusCode::CREATED, Json(CreateViewerResponse { id })))
 }
 
+fn patch_compile_validate(
+    id: Uuid,
+    definition_json: &serde_json::Value,
+    signal_mask: SignalMask,
+) -> Result<(), StatusCode> {
+    let temp_def = ViewerDefinition {
+        id,
+        slug: String::new(),
+        name: String::new(),
+        refresh_interval_ms: DEFAULT_VIEWER_REFRESH_MS,
+        lookback_ms: DEFAULT_VIEWER_LOOKBACK_MS,
+        signal_mask,
+        definition_json: definition_json.clone(),
+        layout_json: serde_json::Value::Object(Default::default()),
+        revision: 1,
+        enabled: true,
+    };
+    let _ = compile(temp_def).map_err(|e| {
+        tracing::error!("patch_viewer: compile failed: {e}");
+        StatusCode::BAD_REQUEST
+    })?;
+    Ok(())
+}
+
 async fn patch_viewer(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -8199,7 +8349,16 @@ async fn patch_viewer(
     }
 
     // Read current state under lock, then release before DB write
-    let (definition_json, layout_json, matcher_changed, aggregation_changed, signal_mask) = {
+    let (
+        definition_json,
+        layout_json,
+        matcher_changed,
+        aggregation_changed,
+        chart_type_changed,
+        signal_mask,
+        name_changed,
+        new_name,
+    ) = {
         let rt = runtime.lock().await;
         let (viewer, _) = rt
             .viewers()
@@ -8218,6 +8377,23 @@ async fn patch_viewer(
         {
             return Err(StatusCode::BAD_REQUEST);
         }
+        let chart_type_changed = new_chart_type != current_kind;
+
+        let name_changed = match &payload.name {
+            Some(name) => {
+                let trimmed = name.trim();
+                if trimmed.is_empty() {
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+                if trimmed.chars().count() > 80 {
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+                trimmed != viewer.definition().name
+            }
+            None => false,
+        };
+        let new_name = payload.name.as_ref().map(|n| n.trim().to_string());
+
         let current_query = viewer.query().map(str::to_string);
         let old_def_json = &viewer.definition().definition_json;
         let mut definition_json = old_def_json.clone();
@@ -8235,7 +8411,7 @@ async fn patch_viewer(
         let aggregation_changed =
             definition_json.get("aggregation") != old_def_json.get("aggregation");
         let matcher_changed = query_changed || filters_changed;
-        if new_chart_type == current_kind && !matcher_changed && !aggregation_changed {
+        if !chart_type_changed && !matcher_changed && !aggregation_changed && !name_changed {
             return Ok(StatusCode::OK);
         }
         let layout_json = viewer.definition().layout_json.clone();
@@ -8245,39 +8421,59 @@ async fn patch_viewer(
             layout_json,
             matcher_changed,
             aggregation_changed,
+            chart_type_changed,
             signal_mask,
+            name_changed,
+            new_name,
         )
     };
 
-    if matcher_changed || aggregation_changed {
-        let temp_def = ViewerDefinition {
-            id,
-            slug: String::new(),
-            name: String::new(),
-            refresh_interval_ms: DEFAULT_VIEWER_REFRESH_MS,
-            lookback_ms: DEFAULT_VIEWER_LOOKBACK_MS,
-            signal_mask,
-            definition_json: definition_json.clone(),
-            layout_json: serde_json::Value::Object(Default::default()),
-            revision: 1,
-            enabled: true,
-        };
-        compile(temp_def).map_err(|e| {
-            tracing::error!("patch_viewer: compile failed: {e}");
-            StatusCode::BAD_REQUEST
-        })?;
+    // Validate compilation if definition changed
+    let def_update_needed = chart_type_changed || matcher_changed || aggregation_changed;
+    if def_update_needed {
+        patch_compile_validate(id, &definition_json, signal_mask)?;
     }
 
-    let updated = viewer_store
-        .update_viewer_definition_json(id, &definition_json, &layout_json)
-        .await
-        .map_err(|error| {
-            tracing::error!("update_viewer_definition_json failed: {error}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    // Combine name and definition updates into a single DB round-trip when both change
+    if def_update_needed && name_changed {
+        let updated = viewer_store
+            .update_viewer_definition_and_name(
+                id,
+                &definition_json,
+                &layout_json,
+                new_name.as_ref().unwrap(),
+            )
+            .await
+            .map_err(|error| {
+                tracing::error!("update_viewer_definition_and_name failed: {error}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        if !updated {
+            return Err(StatusCode::NOT_FOUND);
+        }
+    } else {
+        if def_update_needed {
+            let updated = viewer_store
+                .update_viewer_definition_json(id, &definition_json, &layout_json)
+                .await
+                .map_err(|error| {
+                    tracing::error!("update_viewer_definition_json failed: {error}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+            if !updated {
+                return Err(StatusCode::NOT_FOUND);
+            }
+        }
 
-    if !updated {
-        return Err(StatusCode::NOT_FOUND);
+        if name_changed {
+            viewer_store
+                .update_viewer_name(id, new_name.as_ref().unwrap())
+                .await
+                .map_err(|error| {
+                    tracing::error!("update_viewer_name failed: {error}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+        }
     }
 
     let mut rt = runtime.lock().await;
@@ -8288,9 +8484,18 @@ async fn patch_viewer(
                 tracing::error!("viewer {id}: rebuild_viewer failed: {error}");
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
-    } else {
+    } else if chart_type_changed || aggregation_changed {
         rt.update_viewer_definition(id, definition_json, layout_json);
     }
+
+    if name_changed {
+        rt.update_viewer_name(id, new_name.as_ref().unwrap());
+    }
+
+    rt.persist_viewer_snapshot(id).await.map_err(|error| {
+        tracing::error!("viewer {id}: persist_viewer_snapshot failed: {error}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     Ok(StatusCode::OK)
 }
