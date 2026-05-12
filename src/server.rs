@@ -26,6 +26,7 @@ use crate::storage::error_group_store::ErrorGroupStore;
 use crate::storage::rollup::{Resolution, RollupStore};
 use crate::storage::slo_store::SloStore;
 use crate::storage::{ApiKeyStore, IncidentStore, StreamStore, ViewerStore};
+use crate::viewer_runtime::aggregator::GroupKey;
 use crate::viewer_runtime::compiler::{
     CompiledViewer, compile, extract_searchable_payload_text, query_from_definition,
 };
@@ -7468,6 +7469,8 @@ struct AggregationInput {
     bucket_ms: i64,
     #[serde(default)]
     group_by: Vec<String>,
+    #[serde(default)]
+    metric_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -8200,13 +8203,27 @@ fn apply_filters_to_definition(
 fn apply_aggregation_to_definition(
     definition_json: &mut serde_json::Value,
     aggregation: Option<&AggregationInput>,
-) {
-    let Some(agg) = aggregation else { return };
-    definition_json["aggregation"] = json!({
+) -> Result<(), StatusCode> {
+    let Some(agg) = aggregation else {
+        return Ok(());
+    };
+    let mut group_by = Vec::with_capacity(agg.group_by.len());
+    for s in &agg.group_by {
+        if GroupKey::parse(s).is_none() {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        group_by.push(s.as_str());
+    }
+    let mut aggregation_json = json!({
         "fn": agg.func,
         "bucket_ms": agg.bucket_ms,
-        "group_by": agg.group_by,
+        "group_by": group_by,
     });
+    if let Some(ref metric_name) = agg.metric_name {
+        aggregation_json["metric_name"] = json!(metric_name);
+    }
+    definition_json["aggregation"] = aggregation_json;
+    Ok(())
 }
 
 fn default_viewer_layout() -> serde_json::Value {
@@ -8283,7 +8300,7 @@ async fn create_viewer(
         payload.filters.as_deref(),
         payload.filter_mode.as_deref(),
     );
-    apply_aggregation_to_definition(&mut definition_json, payload.aggregation.as_ref());
+    apply_aggregation_to_definition(&mut definition_json, payload.aggregation.as_ref())?;
     let definition = ViewerDefinition {
         id,
         slug: viewer_slug(id),
@@ -8404,7 +8421,7 @@ async fn patch_viewer(
             payload.filters.as_deref(),
             payload.filter_mode.as_deref(),
         );
-        apply_aggregation_to_definition(&mut definition_json, payload.aggregation.as_ref());
+        apply_aggregation_to_definition(&mut definition_json, payload.aggregation.as_ref())?;
         let query_changed = query_from_definition(&definition_json) != current_query;
         let filters_changed = definition_json.get("filters") != old_def_json.get("filters")
             || definition_json.get("filter_mode") != old_def_json.get("filter_mode");
