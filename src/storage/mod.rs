@@ -133,6 +133,35 @@ impl ViewerStore {
         }
     }
 
+    pub async fn update_viewer_name(&self, id: Uuid, name: &str) -> Result<bool, StorageError> {
+        match self {
+            ViewerStore::Postgres(s) => s
+                .update_viewer_name(id, name)
+                .await
+                .map_err(StorageError::Postgres),
+            ViewerStore::Memory(s) => s.update_viewer_name(id, name).await,
+        }
+    }
+
+    pub async fn update_viewer_definition_and_name(
+        &self,
+        id: Uuid,
+        definition_json: &Value,
+        layout_json: &Value,
+        name: &str,
+    ) -> Result<bool, StorageError> {
+        match self {
+            ViewerStore::Postgres(s) => s
+                .update_viewer_definition_and_name(id, definition_json, layout_json, name)
+                .await
+                .map_err(StorageError::Postgres),
+            ViewerStore::Memory(s) => {
+                s.update_viewer_definition_and_name(id, definition_json, layout_json, name)
+                    .await
+            }
+        }
+    }
+
     pub async fn delete_viewer(&self, id: Uuid) -> Result<bool, StorageError> {
         match self {
             ViewerStore::Postgres(s) => s.delete_viewer(id).await.map_err(StorageError::Postgres),

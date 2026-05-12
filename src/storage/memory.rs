@@ -174,6 +174,36 @@ impl MemoryViewerStore {
         }
     }
 
+    pub async fn update_viewer_name(&self, id: Uuid, name: &str) -> Result<bool, StorageError> {
+        let mut guard = self.inner.lock().await;
+        if let Some(def) = guard.definitions.iter_mut().find(|d| d.id == id) {
+            def.name = name.to_string();
+            def.revision += 1;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub async fn update_viewer_definition_and_name(
+        &self,
+        id: Uuid,
+        definition_json: &Value,
+        layout_json: &Value,
+        name: &str,
+    ) -> Result<bool, StorageError> {
+        let mut guard = self.inner.lock().await;
+        if let Some(def) = guard.definitions.iter_mut().find(|d| d.id == id) {
+            def.definition_json = definition_json.clone();
+            def.layout_json = layout_json.clone();
+            def.name = name.to_string();
+            def.revision += 1;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     pub async fn upsert_snapshot(&self, snapshot: &ViewerSnapshotRow) -> Result<(), StorageError> {
         let mut guard = self.inner.lock().await;
         guard.snapshots.insert(snapshot.viewer_id, snapshot.clone());

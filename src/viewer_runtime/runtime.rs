@@ -169,6 +169,25 @@ impl ViewerRuntime {
         Ok(())
     }
 
+    /// Persists the current snapshot for the viewer identified by `id`.
+    /// Returns true if the viewer was found and the snapshot was upserted.
+    pub async fn persist_viewer_snapshot(&self, id: Uuid) -> Result<bool, RuntimeError> {
+        let (_, state) = match self.viewers.iter().find(|(v, _)| v.definition().id == id) {
+            Some(v) => v,
+            None => return Ok(false),
+        };
+        let snapshot = ViewerSnapshotRow {
+            viewer_id: state.viewer_id,
+            revision: state.revision,
+            last_cursor_json: serde_json::to_value(&state.last_cursor)
+                .expect("StreamCursor serialization should never fail"),
+            status: state.status.clone(),
+            generated_at: Utc::now(),
+        };
+        self.viewer_store.upsert_snapshot(&snapshot).await?;
+        Ok(true)
+    }
+
     pub async fn add_viewer(&mut self, definition: ViewerDefinition) -> Result<(), RuntimeError> {
         let viewer_id = definition.id;
         let revision = definition.revision;
@@ -192,6 +211,17 @@ impl ViewerRuntime {
                 // Recompute buckets so a newly-added or modified aggregation
                 // block is reflected in the next API response.
                 recompute_aggregation(state, viewer);
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn update_viewer_name(&mut self, id: Uuid, name: &str) -> bool {
+        for (viewer, state) in &mut self.viewers {
+            if viewer.definition().id == id {
+                viewer.update_name(name);
+                state.revision += 1;
                 return true;
             }
         }

@@ -1393,6 +1393,32 @@ async fn test_patch_viewer_chart_type_to_donut() {
     assert_viewer_chart_type(&app, &viewer_id, "donut").await;
 }
 
+/// Patch viewer name via PATCH /api/viewers/:id -> reflected in subsequent GET (Postgres)
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn test_patch_viewer_name() {
+    let env = setup_viewer_app().await;
+    let app = env.app;
+
+    // Given: a viewer with original name
+    let viewer_id =
+        create_viewer_id(&app, json!({ "name": "Original Name", "signal": "traces" })).await;
+
+    // When: PATCH with a new name
+    let patch_resp = send_json_request(
+        &app,
+        "PATCH",
+        format!("/api/viewers/{viewer_id}"),
+        json!({ "name": "Updated Name" }),
+    )
+    .await;
+    assert_eq!(patch_resp.status(), StatusCode::OK);
+
+    // Then: GET returns the updated name
+    let viewer = fetch_viewer_payload(&app, &viewer_id).await;
+    assert_eq!(viewer["name"], "Updated Name", "name should be updated");
+}
+
 /// Create with invalid chart_type -> 400 BAD REQUEST
 #[tokio::test]
 #[ignore = "requires Docker"]
@@ -5159,6 +5185,75 @@ async fn test_patch_viewer_remove_filters_memory() {
     );
 }
 
+/// Patch viewer name via PATCH /api/viewers/:id -> reflected in subsequent GET
+#[tokio::test]
+async fn test_patch_viewer_name_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // Given: a viewer with original name
+    let viewer_id =
+        create_viewer_id(&app, json!({ "name": "Original Name", "signal": "traces" })).await;
+
+    // When: PATCH with a new name
+    let patch_resp = send_json_request(
+        &app,
+        "PATCH",
+        format!("/api/viewers/{viewer_id}"),
+        json!({ "name": "Updated Name" }),
+    )
+    .await;
+    assert_eq!(patch_resp.status(), StatusCode::OK);
+
+    // Then: GET returns the updated name
+    let viewer = fetch_viewer_payload(&app, &viewer_id).await;
+    assert_eq!(viewer["name"], "Updated Name", "name should be updated");
+}
+
+/// Patch viewer with empty name -> 400 BAD REQUEST
+#[tokio::test]
+async fn test_patch_viewer_name_empty_rejected_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // Given: a viewer with a name
+    let viewer_id = create_viewer_id(&app, json!({ "name": "Original", "signal": "traces" })).await;
+
+    // When: PATCH with empty name
+    let resp = send_json_request(
+        &app,
+        "PATCH",
+        format!("/api/viewers/{viewer_id}"),
+        json!({ "name": "" }),
+    )
+    .await;
+
+    // Then: 400 BAD REQUEST
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// Patch viewer with whitespace-only name -> 400 BAD REQUEST
+#[tokio::test]
+async fn test_patch_viewer_name_whitespace_rejected_memory() {
+    let env = setup_memory_viewer_app().await;
+    let app = env.app;
+
+    // Given: a viewer with a name
+    let viewer_id = create_viewer_id(&app, json!({ "name": "Original", "signal": "traces" })).await;
+
+    // When: PATCH with whitespace-only name
+    let resp = send_json_request(
+        &app,
+        "PATCH",
+        format!("/api/viewers/{viewer_id}"),
+        json!({ "name": "   " }),
+    )
+    .await;
+
+    // Then: 400 BAD REQUEST
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
 /// Create viewer with invalid regex filter -- should return 400
 #[tokio::test]
 async fn test_create_viewer_with_invalid_regex_returns_400_memory() {
@@ -6035,6 +6130,75 @@ async fn test_index_html_contains_query_filter_and_preview_elements() {
     assert!(
         html.contains("id=\"viewer-detail-query-update\""),
         "query edit row should contain update button"
+    );
+}
+
+/// GET / HTML contains viewer detail page elements:
+/// - page-viewer-detail section
+/// - viewer-detail-name-input, chart-select, save/delete/back buttons
+/// - Existing viewer-detail-query-* elements still present
+#[tokio::test]
+async fn test_index_html_contains_viewer_detail_page_elements() {
+    let env = setup_memory_viewer_app().await;
+    let resp = env
+        .app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8(bytes.to_vec()).expect("HTML body should be valid UTF-8");
+
+    // New viewer detail page
+    assert!(
+        html.contains("id=\"page-viewer-detail\""),
+        "HTML should contain page-viewer-detail section"
+    );
+    assert!(
+        html.contains("id=\"viewer-detail-name-input\""),
+        "viewer detail page should contain name input"
+    );
+    assert!(
+        html.contains("id=\"viewer-detail-chart-select\""),
+        "viewer detail page should contain chart select"
+    );
+    assert!(
+        html.contains("id=\"viewer-detail-save-button\""),
+        "viewer detail page should contain save button"
+    );
+    assert!(
+        html.contains("id=\"viewer-detail-delete-button\""),
+        "viewer detail page should contain delete button"
+    );
+    assert!(
+        html.contains("id=\"viewer-detail-back\""),
+        "viewer detail page should contain back button"
+    );
+    assert!(
+        html.contains("id=\"viewer-detail-status-box\""),
+        "viewer detail page should contain status box"
+    );
+
+    // Existing detail elements still present (anti-pattern guard)
+    assert!(
+        html.contains("id=\"viewer-detail-query-row\""),
+        "viewer-detail-query-row should still be present"
+    );
+    assert!(
+        html.contains("id=\"viewer-detail-query-input\""),
+        "viewer-detail-query-input should still be present"
+    );
+    assert!(
+        html.contains("id=\"viewer-detail-query-update\""),
+        "viewer-detail-query-update should still be present"
     );
 }
 
