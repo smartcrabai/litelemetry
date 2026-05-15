@@ -514,7 +514,7 @@ dependencies = [
 [[package]]
 name = "connectrpc"
 version = "0.4.2"
-source = "git+https://github.com/anthropics/connect-rust?rev=da6caaf93f1177d5eba737809222d7e834d2eb37#da6caaf93f1177d5eba737809222d7e834d2eb37"
+source = "git+https://github.com/anthropics/connect-rust?rev=9cbdfb0cb913c1be9cb9abc0db7ce8e8ea43aaf0#9cbdfb0cb913c1be9cb9abc0db7ce8e8ea43aaf0"
 dependencies = [
  "async-compression",
  "axum",
@@ -546,7 +546,7 @@ dependencies = [
 [[package]]
 name = "connectrpc-build"
 version = "0.4.2"
-source = "git+https://github.com/anthropics/connect-rust?rev=da6caaf93f1177d5eba737809222d7e834d2eb37#da6caaf93f1177d5eba737809222d7e834d2eb37"
+source = "git+https://github.com/anthropics/connect-rust?rev=9cbdfb0cb913c1be9cb9abc0db7ce8e8ea43aaf0#9cbdfb0cb913c1be9cb9abc0db7ce8e8ea43aaf0"
 dependencies = [
  "anyhow",
  "buffa",
@@ -558,7 +558,7 @@ dependencies = [
 [[package]]
 name = "connectrpc-codegen"
 version = "0.4.2"
-source = "git+https://github.com/anthropics/connect-rust?rev=da6caaf93f1177d5eba737809222d7e834d2eb37#da6caaf93f1177d5eba737809222d7e834d2eb37"
+source = "git+https://github.com/anthropics/connect-rust?rev=9cbdfb0cb913c1be9cb9abc0db7ce8e8ea43aaf0#9cbdfb0cb913c1be9cb9abc0db7ce8e8ea43aaf0"
 dependencies = [
  "anyhow",
  "buffa",
