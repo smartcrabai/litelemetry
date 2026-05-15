@@ -8569,20 +8569,6 @@ async fn preview_viewer(
     }
     prune_stale_buckets(&mut viewer_state, viewer.lookback_ms(), now);
 
-    let entry_rows = map_entries_to_rows(
-        viewer_state
-            .entries
-            .iter()
-            .rev()
-            .take(VIEWER_ENTRY_PREVIEW_LIMIT),
-    );
-
-    let traces = if signal == Signal::Traces {
-        extract_traces_from_entries(&viewer_state.entries)
-    } else {
-        vec![]
-    };
-
     let def_json = &viewer.definition().definition_json;
     let query = def_json
         .get("query")
@@ -8593,6 +8579,21 @@ async fn preview_viewer(
         .get("filter_mode")
         .and_then(|v| v.as_str())
         .map(str::to_string);
+
+    let entry_rows = map_entries_to_rows(
+        viewer_state
+            .entries
+            .iter()
+            .rev()
+            .take(VIEWER_ENTRY_PREVIEW_LIMIT),
+        query.as_deref(),
+    );
+
+    let traces = if signal == Signal::Traces {
+        extract_traces_from_entries(&viewer_state.entries)
+    } else {
+        vec![]
+    };
 
     Ok(Json(ViewerPreviewResponse {
         signal: signal_name(signal).to_string(),
@@ -10353,11 +10354,14 @@ pub(crate) async fn record_error_groups_from_entry(
 
 fn map_entries_to_rows<'a>(
     entries: impl Iterator<Item = &'a NormalizedEntry>,
+    metric_query: Option<&str>,
 ) -> Vec<ViewerEntryRow> {
+    let query_lower = metric_query.map(|q| q.trim().to_lowercase());
+    let query_lower_ref = query_lower.as_deref().filter(|q| !q.is_empty());
     entries
         .map(|entry| {
             let (metric_name, metric_value, preview) = if entry.signal == Signal::Metrics {
-                let fields = extract_metric_fields(&entry.payload);
+                let fields = extract_metric_fields(&entry.payload, query_lower_ref);
                 let name = fields.as_ref().and_then(|f| f.metric_name.clone());
                 let value = fields
                     .as_ref()
@@ -10408,7 +10412,10 @@ fn viewer_summary(
     let aggregation = definition.definition_json.get("aggregation").cloned();
 
     let entries_for_response = if include_entries {
-        map_entries_to_rows(entries.iter().rev().take(VIEWER_ENTRY_PREVIEW_LIMIT))
+        map_entries_to_rows(
+            entries.iter().rev().take(VIEWER_ENTRY_PREVIEW_LIMIT),
+            query.as_deref(),
+        )
     } else {
         vec![]
     };
@@ -10520,12 +10527,14 @@ struct MetricFields {
     metric_value: Option<String>,
 }
 
-fn extract_metric_fields(payload: &Bytes) -> Option<MetricFields> {
+fn extract_metric_fields(payload: &Bytes, metric_query: Option<&str>) -> Option<MetricFields> {
     let value = payload_as_value(Signal::Metrics, payload)?;
     let resource_metrics = value.get("resourceMetrics")?.as_array()?;
     let service_name = extract_service_name_from_value(Signal::Metrics, &value);
-    let mut metric_name = None;
-    let mut metric_value = None;
+
+    let metric_query = metric_query.filter(|q| !q.is_empty());
+    let mut first_name: Option<String> = None;
+    let mut first_value: Option<String> = None;
 
     for resource_metric in resource_metrics {
         let Some(scope_metrics) = resource_metric
@@ -10544,36 +10553,35 @@ fn extract_metric_fields(payload: &Bytes) -> Option<MetricFields> {
             };
 
             for metric in metrics {
-                if metric_name.is_none() {
-                    metric_name = metric
-                        .get("name")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string);
+                let name = metric
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+
+                if let (Some(query), Some(metric_name)) = (metric_query, name.as_ref())
+                    && metric_name.to_lowercase().contains(query)
+                {
+                    return Some(MetricFields {
+                        service_name,
+                        metric_name: Some(metric_name.clone()),
+                        metric_value: metric_first_value(metric),
+                    });
                 }
 
-                if metric_value.is_none() {
-                    metric_value = metric_first_value(metric);
+                if first_name.is_none() {
+                    first_name = name;
                 }
-
-                if metric_name.is_some() && metric_value.is_some() {
-                    break;
+                if first_value.is_none() {
+                    first_value = metric_first_value(metric);
                 }
             }
-
-            if metric_name.is_some() && metric_value.is_some() {
-                break;
-            }
-        }
-
-        if metric_name.is_some() && metric_value.is_some() {
-            break;
         }
     }
 
     Some(MetricFields {
         service_name,
-        metric_name,
-        metric_value,
+        metric_name: first_name,
+        metric_value: first_value,
     })
 }
 
@@ -10599,7 +10607,7 @@ fn format_metric_preview(fields: &MetricFields) -> Option<String> {
 }
 
 fn structured_metric_preview(payload: &Bytes) -> Option<String> {
-    let fields = extract_metric_fields(payload)?;
+    let fields = extract_metric_fields(payload, None)?;
     format_metric_preview(&fields)
 }
 
@@ -12414,6 +12422,111 @@ mod tests {
         assert!(preview.contains("orders-api"));
         assert!(preview.contains("http.server.requests"));
         assert!(preview.contains("42"));
+    }
+
+    #[test]
+    fn test_extract_metric_fields_prefers_query_match() {
+        let payload = Bytes::from(
+            serde_json::json!({
+                "resourceMetrics": [
+                    {
+                        "resource": {
+                            "attributes": [
+                                { "key": "service.name", "value": { "stringValue": "kubelet" } }
+                            ]
+                        },
+                        "scopeMetrics": [
+                            {
+                                "metrics": [
+                                    {
+                                        "name": "k8s.pod.cpu.usage",
+                                        "gauge": {
+                                            "dataPoints": [{ "asDouble": 0.123 }]
+                                        }
+                                    },
+                                    {
+                                        "name": "k8s.node.cpu.usage",
+                                        "gauge": {
+                                            "dataPoints": [{ "asDouble": 4.567 }]
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            })
+            .to_string(),
+        );
+
+        let fields =
+            extract_metric_fields(&payload, Some("k8s.node.cpu.usage")).expect("fields present");
+        assert_eq!(fields.metric_name.as_deref(), Some("k8s.node.cpu.usage"));
+        assert_eq!(fields.metric_value.as_deref(), Some("4.567"));
+    }
+
+    #[test]
+    fn test_extract_metric_fields_falls_back_to_first_when_no_query_match() {
+        let payload = Bytes::from(
+            serde_json::json!({
+                "resourceMetrics": [
+                    {
+                        "scopeMetrics": [
+                            {
+                                "metrics": [
+                                    {
+                                        "name": "http.server.requests",
+                                        "sum": {
+                                            "dataPoints": [{ "asInt": "42" }]
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            })
+            .to_string(),
+        );
+
+        let fields =
+            extract_metric_fields(&payload, Some("k8s.node.cpu.usage")).expect("fields present");
+        assert_eq!(fields.metric_name.as_deref(), Some("http.server.requests"));
+        assert_eq!(fields.metric_value.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn test_extract_metric_fields_returns_first_when_query_is_none() {
+        let payload = Bytes::from(
+            serde_json::json!({
+                "resourceMetrics": [
+                    {
+                        "scopeMetrics": [
+                            {
+                                "metrics": [
+                                    {
+                                        "name": "k8s.pod.cpu.usage",
+                                        "gauge": {
+                                            "dataPoints": [{ "asDouble": 0.123 }]
+                                        }
+                                    },
+                                    {
+                                        "name": "k8s.node.cpu.usage",
+                                        "gauge": {
+                                            "dataPoints": [{ "asDouble": 4.567 }]
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            })
+            .to_string(),
+        );
+
+        let fields = extract_metric_fields(&payload, None).expect("fields present");
+        assert_eq!(fields.metric_name.as_deref(), Some("k8s.pod.cpu.usage"));
     }
 
     #[test]
