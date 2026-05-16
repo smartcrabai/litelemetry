@@ -130,6 +130,37 @@ impl GroupKey {
                 .unwrap_or_else(|| "unknown".to_string()),
         }
     }
+
+    /// Extracts the group value from a specific `ResourceMetrics` block's
+    /// `resource.attributes`, falling back to the entry-level value when the
+    /// resource has no matching attribute.
+    fn extract_with_resource(self, attrs: Option<&[Value]>, entry: &NormalizedEntry) -> String {
+        let lookup = |key: &str| -> Option<String> {
+            attrs
+                .filter(|slice| !slice.is_empty())
+                .and_then(|slice| attribute_string_value(slice, key))
+        };
+        match self {
+            GroupKey::ServiceName => lookup("service.name")
+                .or_else(|| entry.service_name.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
+            GroupKey::K8sNodeName => lookup("k8s.node.name")
+                .or_else(|| extract_resource_attribute(entry, "k8s.node.name"))
+                .unwrap_or_else(|| "unknown".to_string()),
+            GroupKey::K8sClusterName => lookup("k8s.cluster.name")
+                .or_else(|| extract_resource_attribute(entry, "k8s.cluster.name"))
+                .unwrap_or_else(|| "unknown".to_string()),
+            GroupKey::K8sNamespace => lookup("k8s.namespace.name")
+                .or_else(|| extract_resource_attribute(entry, "k8s.namespace.name"))
+                .unwrap_or_else(|| "unknown".to_string()),
+            GroupKey::K8sPodName => lookup("k8s.pod.name")
+                .or_else(|| extract_resource_attribute(entry, "k8s.pod.name"))
+                .unwrap_or_else(|| "unknown".to_string()),
+            GroupKey::HostName => lookup("host.name")
+                .or_else(|| extract_resource_attribute(entry, "host.name"))
+                .unwrap_or_else(|| "unknown".to_string()),
+        }
+    }
 }
 
 /// Compiled aggregation spec parsed from `definition_json["aggregation"]`.
@@ -201,30 +232,34 @@ pub fn parse_aggregation(
 /// Entries are assumed to be in ascending time order, but the aggregator is
 /// resilient to mild reordering -- buckets are keyed by epoch ms so order does
 /// not affect correctness, only insertion ordering of the output.
+///
+/// When the spec carries a `metric_name` filter, each entry's payload is
+/// expanded into one input per matching data point so that batches bundling
+/// many resources (e.g. a single kubeletstats push carrying `k8s.pod.cpu.usage`
+/// for every pod) contribute every matching pod's value rather than only the
+/// first one. Group keys are then extracted from that data point's owning
+/// `ResourceMetrics` block so series stay aligned with the actual resource.
 pub fn aggregate_entries(spec: &CompiledAggregation, entries: &[NormalizedEntry]) -> Vec<Bucket> {
     // BTreeMap to keep buckets sorted by (bucket_start_ms, group_keys).
     let mut acc: BTreeMap<(i64, Vec<String>), Accumulator> = BTreeMap::new();
 
+    let needs_numeric = spec.func.requires_numeric();
+
     for entry in entries {
         let bucket_start_ms = bucket_start(entry.observed_at.timestamp_millis(), spec.bucket_ms);
-        let group_keys: Vec<String> = spec.group_by.iter().map(|gk| gk.extract(entry)).collect();
 
-        let needs_numeric = spec.func.requires_numeric();
-        let value_opt = if needs_numeric {
-            extract_numeric_value(entry, spec.metric_name.as_deref())
-        } else {
-            None
-        };
+        let inputs = collect_aggregation_inputs(entry, spec);
+        for (group_keys, value_opt) in inputs {
+            // For sum/avg/percentiles, ignore inputs without a numeric value.
+            if needs_numeric && value_opt.is_none() {
+                continue;
+            }
 
-        // For sum/avg/percentiles, ignore entries without a numeric value.
-        if needs_numeric && value_opt.is_none() {
-            continue;
+            let slot = acc
+                .entry((bucket_start_ms, group_keys))
+                .or_insert_with(|| Accumulator::new(spec.func));
+            slot.add(value_opt);
         }
-
-        let slot = acc
-            .entry((bucket_start_ms, group_keys))
-            .or_insert_with(|| Accumulator::new(spec.func));
-        slot.add(value_opt);
     }
 
     acc.into_iter()
@@ -234,6 +269,77 @@ pub fn aggregate_entries(spec: &CompiledAggregation, entries: &[NormalizedEntry]
             value: slot.finalize(spec),
         })
         .collect()
+}
+
+/// Produces the (group_keys, value) inputs an entry contributes to the
+/// aggregator. Most entries produce one input; metric payloads filtered by
+/// `metric_name` produce one per matching data point so each resource in the
+/// batch lands in its own series.
+fn collect_aggregation_inputs(
+    entry: &NormalizedEntry,
+    spec: &CompiledAggregation,
+) -> Vec<(Vec<String>, Option<f64>)> {
+    let needs_numeric = spec.func.requires_numeric();
+    let entry_level_keys =
+        || -> Vec<String> { spec.group_by.iter().map(|gk| gk.extract(entry)).collect() };
+
+    let Some(filter) = spec.metric_name.as_deref() else {
+        let value = if needs_numeric {
+            extract_numeric_value(entry, None)
+        } else {
+            None
+        };
+        return vec![(entry_level_keys(), value)];
+    };
+
+    if entry.signal != Signal::Metrics {
+        return vec![(entry_level_keys(), None)];
+    }
+
+    let Some(payload) = payload_as_value(Signal::Metrics, &entry.payload) else {
+        return vec![(entry_level_keys(), None)];
+    };
+    let Some(resource_metrics) = payload.get("resourceMetrics").and_then(|v| v.as_array()) else {
+        return vec![(entry_level_keys(), None)];
+    };
+
+    let mut inputs: Vec<(Vec<String>, Option<f64>)> = Vec::new();
+    for rm in resource_metrics {
+        let resource_attrs = rm
+            .get("resource")
+            .and_then(|r| r.get("attributes"))
+            .and_then(|v| v.as_array());
+
+        let Some(scope_metrics) = rm.get("scopeMetrics").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for sm in scope_metrics {
+            let Some(metrics) = sm.get("metrics").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            for m in metrics {
+                if m.get("name").and_then(|n| n.as_str()) != Some(filter) {
+                    continue;
+                }
+                let group_keys: Vec<String> = spec
+                    .group_by
+                    .iter()
+                    .map(|gk| gk.extract_with_resource(resource_attrs.map(|v| v.as_slice()), entry))
+                    .collect();
+                let value = if needs_numeric {
+                    first_data_point_value(m)
+                } else {
+                    None
+                };
+                inputs.push((group_keys, value));
+            }
+        }
+    }
+
+    if inputs.is_empty() {
+        return vec![(entry_level_keys(), None)];
+    }
+    inputs
 }
 
 /// Per-bucket accumulator state.
@@ -867,6 +973,94 @@ mod tests {
         assert_eq!(buckets.len(), 1);
         // Without filter, returns first metric value (0.5)
         assert!((buckets[0].value - 0.5).abs() < 1e-9);
+    }
+
+    fn multi_resource_pod_cpu_payload(pods: &[(&str, f64)]) -> Bytes {
+        let resource_metrics: Vec<Value> = pods
+            .iter()
+            .map(|(pod, value)| {
+                json!({
+                    "resource": {
+                        "attributes": [
+                            { "key": "k8s.pod.name", "value": { "stringValue": pod } },
+                            { "key": "k8s.namespace.name", "value": { "stringValue": "default" } }
+                        ]
+                    },
+                    "scopeMetrics": [{
+                        "metrics": [
+                            {
+                                "name": "k8s.pod.cpu.usage",
+                                "gauge": { "dataPoints": [{ "asDouble": value }] }
+                            },
+                            {
+                                "name": "k8s.pod.memory.usage",
+                                "gauge": { "dataPoints": [{ "asDouble": value * 1000.0 }] }
+                            }
+                        ]
+                    }]
+                })
+            })
+            .collect();
+        Bytes::from(json!({ "resourceMetrics": resource_metrics }).to_string())
+    }
+
+    #[test]
+    fn aggregate_emits_one_series_per_matching_resource_metric() {
+        let spec = CompiledAggregation {
+            func: AggFn::Avg,
+            bucket_ms: 60_000,
+            group_by: vec![GroupKey::K8sPodName],
+            metric_name: Some("k8s.pod.cpu.usage".to_string()),
+        };
+        let payload =
+            multi_resource_pod_cpu_payload(&[("pod-a", 0.10), ("pod-b", 0.50), ("pod-c", 1.20)]);
+        let entries = vec![entry(Signal::Metrics, 60_000, None, payload)];
+
+        let buckets = aggregate_entries(&spec, &entries);
+        assert_eq!(buckets.len(), 3, "one bucket per pod");
+
+        let mut by_pod: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+        for b in buckets {
+            assert_eq!(b.group_keys.len(), 1);
+            by_pod.insert(b.group_keys[0].clone(), b.value);
+        }
+        assert!((by_pod["pod-a"] - 0.10).abs() < 1e-9);
+        assert!((by_pod["pod-b"] - 0.50).abs() < 1e-9);
+        assert!((by_pod["pod-c"] - 1.20).abs() < 1e-9);
+    }
+
+    #[test]
+    fn aggregate_sum_metric_name_filter_totals_all_matching_resources() {
+        let spec = CompiledAggregation {
+            func: AggFn::Sum,
+            bucket_ms: 60_000,
+            group_by: vec![],
+            metric_name: Some("k8s.pod.cpu.usage".to_string()),
+        };
+        let payload =
+            multi_resource_pod_cpu_payload(&[("pod-a", 0.10), ("pod-b", 0.50), ("pod-c", 1.40)]);
+        let entries = vec![entry(Signal::Metrics, 60_000, None, payload)];
+
+        let buckets = aggregate_entries(&spec, &entries);
+        assert_eq!(buckets.len(), 1);
+        assert!((buckets[0].value - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn aggregate_count_metric_name_filter_counts_data_points() {
+        let spec = CompiledAggregation {
+            func: AggFn::Count,
+            bucket_ms: 60_000,
+            group_by: vec![],
+            metric_name: Some("k8s.pod.cpu.usage".to_string()),
+        };
+        let payload =
+            multi_resource_pod_cpu_payload(&[("pod-a", 0.10), ("pod-b", 0.20), ("pod-c", 0.30)]);
+        let entries = vec![entry(Signal::Metrics, 60_000, None, payload)];
+
+        let buckets = aggregate_entries(&spec, &entries);
+        assert_eq!(buckets.len(), 1);
+        assert!((buckets[0].value - 3.0).abs() < 1e-9);
     }
 
     #[test]
