@@ -10352,6 +10352,24 @@ pub(crate) async fn record_error_groups_from_entry(
     }
 }
 
+fn make_viewer_entry_row(
+    entry: &NormalizedEntry,
+    service_name: Option<String>,
+    payload_preview: String,
+    metric_name: Option<String>,
+    metric_value: Option<f64>,
+) -> ViewerEntryRow {
+    ViewerEntryRow {
+        observed_at: entry.observed_at,
+        signal: signal_name(entry.signal),
+        service_name,
+        payload_size_bytes: entry.payload.len(),
+        payload_preview,
+        metric_name,
+        metric_value,
+    }
+}
+
 fn map_entries_to_rows<'a>(
     entries: impl Iterator<Item = &'a NormalizedEntry>,
     metric_query: Option<&str>,
@@ -10359,32 +10377,47 @@ fn map_entries_to_rows<'a>(
     let query_lower = metric_query.map(|q| q.trim().to_lowercase());
     let query_lower_ref = query_lower.as_deref().filter(|q| !q.is_empty());
     entries
-        .map(|entry| {
-            let (metric_name, metric_value, preview) = if entry.signal == Signal::Metrics {
-                let fields = extract_metric_fields(&entry.payload, query_lower_ref);
-                let name = fields.as_ref().and_then(|f| f.metric_name.clone());
-                let value = fields
-                    .as_ref()
-                    .and_then(|f| f.metric_value.as_ref().and_then(|s| s.parse::<f64>().ok()));
-                let preview = fields
-                    .as_ref()
-                    .and_then(format_metric_preview)
+        .flat_map(|entry| {
+            if entry.signal != Signal::Metrics {
+                return vec![make_viewer_entry_row(
+                    entry,
+                    entry.service_name.clone(),
+                    payload_preview(entry.signal, &entry.payload),
+                    None,
+                    None,
+                )];
+            }
+            let rows = extract_metric_rows(&entry.payload, query_lower_ref);
+            if rows.is_empty() {
+                return vec![make_viewer_entry_row(
+                    entry,
+                    entry.service_name.clone(),
+                    raw_payload_preview(&entry.payload),
+                    None,
+                    None,
+                )];
+            }
+            rows.into_iter()
+                .map(|row| {
+                    let preview = format_metric_preview(
+                        row.service_name.as_deref(),
+                        Some(row.metric_name.as_str()),
+                        row.metric_value,
+                    )
                     .map(|s| truncate_preview(&s))
                     .unwrap_or_else(|| raw_payload_preview(&entry.payload));
-                (name, value, preview)
-            } else {
-                (None, None, payload_preview(entry.signal, &entry.payload))
-            };
-            ViewerEntryRow {
-                observed_at: entry.observed_at,
-                signal: signal_name(entry.signal),
-                service_name: entry.service_name.clone(),
-                payload_size_bytes: entry.payload.len(),
-                payload_preview: preview,
-                metric_name,
-                metric_value,
-            }
+                    let service_name = row.service_name.or_else(|| entry.service_name.clone());
+                    make_viewer_entry_row(
+                        entry,
+                        service_name,
+                        preview,
+                        Some(row.metric_name),
+                        row.metric_value,
+                    )
+                })
+                .collect()
         })
+        .take(VIEWER_ENTRY_PREVIEW_LIMIT)
         .collect()
 }
 
@@ -10527,6 +10560,74 @@ struct MetricFields {
     metric_value: Option<String>,
 }
 
+/// One row's worth of metric data extracted from an OTLP metrics payload.
+/// `extract_metric_rows` produces one of these per matching metric per
+/// `ResourceMetrics`, so the caller can render every metric carried in a
+/// batched ingest payload instead of just the first one.
+struct MetricRowFields {
+    service_name: Option<String>,
+    metric_name: String,
+    metric_value: Option<f64>,
+}
+
+/// Returns one row per metric in the payload. When `metric_query` is provided,
+/// only metrics whose name contains the query (case-insensitive) are emitted.
+/// `service_name` reflects the owning `ResourceMetrics` block so multiple
+/// services in the same batch are attributed correctly.
+fn extract_metric_rows(payload: &Bytes, metric_query: Option<&str>) -> Vec<MetricRowFields> {
+    let Some(value) = payload_as_value(Signal::Metrics, payload) else {
+        return Vec::new();
+    };
+    let Some(resource_metrics) = value.get("resourceMetrics").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+
+    let metric_query = metric_query.filter(|q| !q.is_empty());
+    let mut rows = Vec::new();
+
+    for resource_metric in resource_metrics {
+        let resource_service_name = resource_metric
+            .get("resource")
+            .and_then(|r| r.get("attributes"))
+            .and_then(serde_json::Value::as_array)
+            .and_then(|attrs| {
+                attribute_string_value(attrs, crate::domain::telemetry::SERVICE_NAME_ATTRIBUTE)
+            });
+
+        let Some(scope_metrics) = resource_metric
+            .get("scopeMetrics")
+            .and_then(serde_json::Value::as_array)
+        else {
+            continue;
+        };
+        for scope_metric in scope_metrics {
+            let Some(metrics) = scope_metric
+                .get("metrics")
+                .and_then(serde_json::Value::as_array)
+            else {
+                continue;
+            };
+            for metric in metrics {
+                let Some(name) = metric.get("name").and_then(serde_json::Value::as_str) else {
+                    continue;
+                };
+                if let Some(q) = metric_query
+                    && !name.to_lowercase().contains(q)
+                {
+                    continue;
+                }
+                rows.push(MetricRowFields {
+                    service_name: resource_service_name.clone(),
+                    metric_name: name.to_string(),
+                    metric_value: metric_first_value(metric).and_then(|s| s.parse::<f64>().ok()),
+                });
+            }
+        }
+    }
+
+    rows
+}
+
 fn extract_metric_fields(payload: &Bytes, metric_query: Option<&str>) -> Option<MetricFields> {
     let value = payload_as_value(Signal::Metrics, payload)?;
     let resource_metrics = value.get("resourceMetrics")?.as_array()?;
@@ -10585,12 +10686,12 @@ fn extract_metric_fields(payload: &Bytes, metric_query: Option<&str>) -> Option<
     })
 }
 
-fn format_metric_preview(fields: &MetricFields) -> Option<String> {
-    match (
-        &fields.service_name,
-        &fields.metric_name,
-        &fields.metric_value,
-    ) {
+fn format_metric_preview(
+    service_name: Option<&str>,
+    metric_name: Option<&str>,
+    metric_value: Option<f64>,
+) -> Option<String> {
+    match (service_name, metric_name, metric_value) {
         (Some(service_name), Some(metric_name), Some(metric_value)) => Some(format!(
             "service={service_name} | metric={metric_name} | value={metric_value} | otlp_json"
         )),
@@ -10608,7 +10709,14 @@ fn format_metric_preview(fields: &MetricFields) -> Option<String> {
 
 fn structured_metric_preview(payload: &Bytes) -> Option<String> {
     let fields = extract_metric_fields(payload, None)?;
-    format_metric_preview(&fields)
+    format_metric_preview(
+        fields.service_name.as_deref(),
+        fields.metric_name.as_deref(),
+        fields
+            .metric_value
+            .as_deref()
+            .and_then(|s| s.parse::<f64>().ok()),
+    )
 }
 
 fn metric_first_value(metric: &serde_json::Value) -> Option<String> {
@@ -12527,6 +12635,147 @@ mod tests {
 
         let fields = extract_metric_fields(&payload, None).expect("fields present");
         assert_eq!(fields.metric_name.as_deref(), Some("k8s.pod.cpu.usage"));
+    }
+
+    #[test]
+    fn test_map_entries_to_rows_expands_multi_metric_payload_when_no_query() {
+        let payload = Bytes::from(
+            serde_json::json!({
+                "resourceMetrics": [
+                    {
+                        "resource": {
+                            "attributes": [
+                                { "key": "service.name", "value": { "stringValue": "checkout" } }
+                            ]
+                        },
+                        "scopeMetrics": [
+                            {
+                                "metrics": [
+                                    { "name": "http.server.duration", "gauge": { "dataPoints": [{ "asDouble": 111.1 }] } },
+                                    { "name": "http.server.requests", "sum":   { "dataPoints": [{ "asInt": "222" }] } }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            })
+            .to_string(),
+        );
+        let entry = NormalizedEntry {
+            signal: Signal::Metrics,
+            observed_at: chrono::Utc::now(),
+            service_name: Some("checkout".to_string()),
+            payload,
+        };
+
+        let rows = map_entries_to_rows(std::iter::once(&entry), None);
+
+        assert_eq!(rows.len(), 2, "expected one row per metric in payload");
+        assert_eq!(rows[0].metric_name.as_deref(), Some("http.server.duration"));
+        assert_eq!(rows[0].metric_value, Some(111.1));
+        assert_eq!(rows[1].metric_name.as_deref(), Some("http.server.requests"));
+        assert_eq!(rows[1].metric_value, Some(222.0));
+    }
+
+    #[test]
+    fn test_map_entries_to_rows_attributes_each_metric_to_its_own_resource() {
+        let payload = Bytes::from(
+            serde_json::json!({
+                "resourceMetrics": [
+                    {
+                        "resource": {
+                            "attributes": [
+                                { "key": "service.name", "value": { "stringValue": "checkout" } }
+                            ]
+                        },
+                        "scopeMetrics": [{ "metrics": [
+                            { "name": "http.server.duration", "gauge": { "dataPoints": [{ "asDouble": 99.0 }] } }
+                        ]}]
+                    },
+                    {
+                        "resource": {
+                            "attributes": [
+                                { "key": "service.name", "value": { "stringValue": "payments" } }
+                            ]
+                        },
+                        "scopeMetrics": [{ "metrics": [
+                            { "name": "payment.amount", "gauge": { "dataPoints": [{ "asDouble": 3333.33 }] } }
+                        ]}]
+                    }
+                ]
+            })
+            .to_string(),
+        );
+        let entry = NormalizedEntry {
+            signal: Signal::Metrics,
+            observed_at: chrono::Utc::now(),
+            service_name: Some("checkout".to_string()),
+            payload,
+        };
+
+        let rows = map_entries_to_rows(std::iter::once(&entry), None);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].metric_name.as_deref(), Some("http.server.duration"));
+        assert_eq!(rows[0].service_name.as_deref(), Some("checkout"));
+        assert_eq!(rows[1].metric_name.as_deref(), Some("payment.amount"));
+        assert_eq!(rows[1].service_name.as_deref(), Some("payments"));
+    }
+
+    #[test]
+    fn test_map_entries_to_rows_caps_total_rows_to_preview_limit() {
+        let mut metrics_json = Vec::with_capacity(VIEWER_ENTRY_PREVIEW_LIMIT + 10);
+        for i in 0..(VIEWER_ENTRY_PREVIEW_LIMIT + 10) {
+            metrics_json.push(serde_json::json!({
+                "name": format!("metric.{i}"),
+                "gauge": { "dataPoints": [{ "asDouble": i as f64 }] }
+            }));
+        }
+        let payload = Bytes::from(
+            serde_json::json!({
+                "resourceMetrics": [{
+                    "scopeMetrics": [{ "metrics": metrics_json }]
+                }]
+            })
+            .to_string(),
+        );
+        let entry = NormalizedEntry {
+            signal: Signal::Metrics,
+            observed_at: chrono::Utc::now(),
+            service_name: None,
+            payload,
+        };
+
+        let rows = map_entries_to_rows(std::iter::once(&entry), None);
+
+        assert_eq!(rows.len(), VIEWER_ENTRY_PREVIEW_LIMIT);
+    }
+
+    #[test]
+    fn test_map_entries_to_rows_filters_by_query() {
+        let payload = Bytes::from(
+            serde_json::json!({
+                "resourceMetrics": [{
+                    "scopeMetrics": [{ "metrics": [
+                        { "name": "http.server.duration", "gauge": { "dataPoints": [{ "asDouble": 1.0 }] } },
+                        { "name": "http.server.requests", "sum":   { "dataPoints": [{ "asInt": "2" }] } }
+                    ]}]
+                }]
+            })
+            .to_string(),
+        );
+        let entry = NormalizedEntry {
+            signal: Signal::Metrics,
+            observed_at: chrono::Utc::now(),
+            service_name: None,
+            payload,
+        };
+
+        let rows = map_entries_to_rows(std::iter::once(&entry), Some("requests"));
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].metric_name.as_deref(), Some("http.server.requests"));
+        assert_eq!(rows[0].metric_value, Some(2.0));
     }
 
     #[test]
