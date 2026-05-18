@@ -43,7 +43,7 @@ features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"]
 version = "0.8"
 
 [build-dependencies]
-connectrpc-build = { git = "https://github.com/anthropics/connect-rust", rev = "bc0d9a775519e2dbc8003d1a8a2dd3b208e93f53" }
+connectrpc-build = { git = "https://github.com/anthropics/connect-rust", rev = "844c90282eca48ffaa4ed101da521ad44a4bdb20" }
 
 [dev-dependencies]
 opentelemetry = "=0.32.0"
