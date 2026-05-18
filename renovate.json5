@@ -3,15 +3,59 @@
     "config:best-practices"
   ],
   dependencyDashboard: false,
+  minimumReleaseAge: "3 days",
+  lockFileMaintenance: {
+    enabled: true,
+    minimumReleaseAge: null,
+    addLabels: [
+      "automerge"
+    ]
+  },
+  vulnerabilityAlerts: {
+    minimumReleaseAge: null,
+    addLabels: [
+      "automerge"
+    ]
+  },
   packageRules: [
     {
       matchUpdateTypes: [
         "minor",
-        "patch",
-        "digest"
+        "patch"
       ],
-      groupName: "all minor, patch, and digest updates",
-      groupSlug: "all-minor-patch-digest-updates",
+      groupName: "all minor and patch updates",
+      groupSlug: "all-minor-and-patch-updates",
+      addLabels: [
+        "automerge"
+      ]
+    },
+    {
+      matchManagers: [
+        "github-actions"
+      ],
+      minimumReleaseAge: "7 days"
+    },
+    {
+      matchManagers: [
+        "github-actions"
+      ],
+      matchUpdateTypes: [
+        "digest",
+        "pinDigest"
+      ],
+      addLabels: [
+        "automerge"
+      ]
+    },
+    {
+      matchManagers: [
+        "dockerfile",
+        "docker-compose"
+      ],
+      matchUpdateTypes: [
+        "digest",
+        "pinDigest"
+      ],
       addLabels: [
         "automerge"
       ]
