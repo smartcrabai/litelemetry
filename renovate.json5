@@ -20,10 +20,12 @@
     {
       matchUpdateTypes: [
         "minor",
-        "patch"
+        "patch",
+        "digest",
+        "pinDigest"
       ],
-      groupName: "all minor and patch updates",
-      groupSlug: "all-minor-and-patch-updates",
+      groupName: "all minor, patch, and digest updates",
+      groupSlug: "all-minor-patch-digest-updates",
       addLabels: [
         "automerge"
       ]
@@ -33,15 +35,6 @@
         "github-actions"
       ],
       minimumReleaseAge: "7 days"
-    },
-    {
-      matchUpdateTypes: [
-        "digest",
-        "pinDigest"
-      ],
-      addLabels: [
-        "automerge"
-      ]
     }
   ]
 }
