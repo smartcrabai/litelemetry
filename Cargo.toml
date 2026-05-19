@@ -6,10 +6,10 @@ version = "0.1.16"
 
 [dependencies]
 axum = { features = ["macros"], version = "0.8" }
-buffa = "0.5"
+buffa = "0.6"
 bytes = "1"
 chrono = { features = ["serde"], version = "0.4" }
-connectrpc = { git = "https://github.com/anthropics/connect-rust", rev = "844c90282eca48ffaa4ed101da521ad44a4bdb20", features = [
+connectrpc = { git = "https://github.com/anthropics/connect-rust", rev = "d6cd2b0f579b36fc0766e2e7c77a1a7c0c28769d", features = [
   "axum",
   "server",
 ] }
@@ -43,7 +43,7 @@ features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"]
 version = "0.8"
 
 [build-dependencies]
-connectrpc-build = { git = "https://github.com/anthropics/connect-rust", rev = "844c90282eca48ffaa4ed101da521ad44a4bdb20" }
+connectrpc-build = { git = "https://github.com/anthropics/connect-rust", rev = "d6cd2b0f579b36fc0766e2e7c77a1a7c0c28769d" }
 
 [dev-dependencies]
 opentelemetry = "=0.32.0"
