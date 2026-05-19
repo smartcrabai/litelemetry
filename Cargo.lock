@@ -347,9 +347,9 @@ dependencies = [
 
 [[package]]
 name = "buffa"
-version = "0.5.2"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7a22fed63b429c4928fd5ed18dcacd3a98d0df1f06cd7cf651b2bbf3dbf0500"
+checksum = "941c714734a660caa93a210c531dec553cc0ef417890409914d24032c94ab840"
 dependencies = [
  "base64",
  "bytes",
@@ -362,9 +362,9 @@ dependencies = [
 
 [[package]]
 name = "buffa-codegen"
-version = "0.5.2"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd9774d97c281d07a61006775c675940371c170ae1b454de0e9c013e0acd19f6"
+checksum = "693ea91be01336fb0084b2e7bb071be7393224c72f737c846471e4013e58c327"
 dependencies = [
  "buffa",
  "buffa-descriptor",
@@ -377,11 +377,13 @@ dependencies = [
 
 [[package]]
 name = "buffa-descriptor"
-version = "0.5.2"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7b942f9242ea5a79c92486460073a0a36cccc314e69fbc2ff08f55467c47b37"
+checksum = "ad8df83adfcb525621f5a96c88e610f90aff1112ec57522d9b48a943df327394"
 dependencies = [
  "buffa",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -513,8 +515,8 @@ dependencies = [
 
 [[package]]
 name = "connectrpc"
-version = "0.4.2"
-source = "git+https://github.com/anthropics/connect-rust?rev=844c90282eca48ffaa4ed101da521ad44a4bdb20#844c90282eca48ffaa4ed101da521ad44a4bdb20"
+version = "0.5.0"
+source = "git+https://github.com/anthropics/connect-rust?rev=d6cd2b0f579b36fc0766e2e7c77a1a7c0c28769d#d6cd2b0f579b36fc0766e2e7c77a1a7c0c28769d"
 dependencies = [
  "async-compression",
  "axum",
@@ -545,8 +547,8 @@ dependencies = [
 
 [[package]]
 name = "connectrpc-build"
-version = "0.4.2"
-source = "git+https://github.com/anthropics/connect-rust?rev=844c90282eca48ffaa4ed101da521ad44a4bdb20#844c90282eca48ffaa4ed101da521ad44a4bdb20"
+version = "0.5.0"
+source = "git+https://github.com/anthropics/connect-rust?rev=d6cd2b0f579b36fc0766e2e7c77a1a7c0c28769d#d6cd2b0f579b36fc0766e2e7c77a1a7c0c28769d"
 dependencies = [
  "anyhow",
  "buffa",
@@ -557,8 +559,8 @@ dependencies = [
 
 [[package]]
 name = "connectrpc-codegen"
-version = "0.4.2"
-source = "git+https://github.com/anthropics/connect-rust?rev=844c90282eca48ffaa4ed101da521ad44a4bdb20#844c90282eca48ffaa4ed101da521ad44a4bdb20"
+version = "0.5.0"
+source = "git+https://github.com/anthropics/connect-rust?rev=d6cd2b0f579b36fc0766e2e7c77a1a7c0c28769d#d6cd2b0f579b36fc0766e2e7c77a1a7c0c28769d"
 dependencies = [
  "anyhow",
  "buffa",
