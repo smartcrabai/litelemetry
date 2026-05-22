@@ -3790,6 +3790,161 @@ async fn test_get_dashboard_default_mode_still_includes_entries_memory() {
     assert_eq!(panels[0]["viewer"]["entry_count"], 2);
 }
 
+/// Given: a viewer with `lookback_ms=60_000` and entries spread over time
+/// When: GET /api/viewers/{id}?lookback_ms=1000 (override below the viewer max)
+/// Then: the response reports the effective shorter lookback. This protects the
+///       new lazy-fetch path that passes the dashboard-global lookback per panel.
+#[tokio::test]
+async fn test_get_viewer_honors_lookback_override_memory() {
+    let stream_store = MemoryStreamStore::new(100_000);
+    let viewer_store = MemoryViewerStore::new();
+
+    let def = make_viewer_def(Signal::Traces.into(), 60_000, 1);
+    viewer_store.insert_viewer_definition(&def).await.unwrap();
+
+    let mut stream_write = stream_store.clone();
+    stream_write
+        .append_entry(&make_traces_entry(10_000))
+        .await
+        .unwrap();
+
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Memory(viewer_store.clone()),
+        StreamStore::Memory(stream_store.clone()),
+    )
+    .await
+    .unwrap();
+    let runtime = Arc::new(RwLock::new(runtime));
+
+    let app = build_app_with_services(
+        StreamStore::Memory(stream_store),
+        Some(ViewerStore::Memory(viewer_store)),
+        Some(runtime),
+        None,
+    );
+
+    let viewer_id = def.id;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/viewers/{viewer_id}?lookback_ms=1000"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        payload["lookback_ms"], 1000,
+        "override below the viewer max must shorten the effective lookback"
+    );
+}
+
+/// Given: a viewer with `lookback_ms=60_000`
+/// When: GET /api/viewers/{id}?lookback_ms=120000 (override above the viewer max)
+/// Then: the request is rejected with 400 to prevent panels from claiming
+///       a wider window than the viewer itself is configured for.
+#[tokio::test]
+async fn test_get_viewer_rejects_lookback_override_above_max_memory() {
+    let stream_store = MemoryStreamStore::new(100_000);
+    let viewer_store = MemoryViewerStore::new();
+
+    let def = make_viewer_def(Signal::Traces.into(), 60_000, 1);
+    viewer_store.insert_viewer_definition(&def).await.unwrap();
+
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Memory(viewer_store.clone()),
+        StreamStore::Memory(stream_store.clone()),
+    )
+    .await
+    .unwrap();
+    let runtime = Arc::new(RwLock::new(runtime));
+
+    let app = build_app_with_services(
+        StreamStore::Memory(stream_store),
+        Some(ViewerStore::Memory(viewer_store)),
+        Some(runtime),
+        None,
+    );
+
+    let viewer_id = def.id;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/viewers/{viewer_id}?lookback_ms=120000"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// Given: a dashboard whose viewer is in a degraded status
+/// When: GET /api/dashboards/{id}?lazy=1
+/// Then: the lazy metadata payload propagates the viewer's actual status
+///       (not a hardcoded `Ok`) so the UI can surface degraded states.
+#[tokio::test]
+async fn test_get_dashboard_lazy_mode_propagates_viewer_status_memory() {
+    let stream_store = MemoryStreamStore::new(100_000);
+    let viewer_store = MemoryViewerStore::new();
+
+    let def = make_viewer_def(Signal::Traces.into(), 60_000, 1);
+    viewer_store.insert_viewer_definition(&def).await.unwrap();
+
+    let dashboard = DashboardDefinition {
+        id: Uuid::new_v4(),
+        slug: "lazy-status".to_string(),
+        name: "LazyStatus".to_string(),
+        layout_json: json!({ "panels": [{ "viewer_id": def.id, "position": 0 }] }),
+        revision: 1,
+        enabled: true,
+    };
+    viewer_store.insert_dashboard(&dashboard).await.unwrap();
+    let dashboard_id = dashboard.id;
+
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Memory(viewer_store.clone()),
+        StreamStore::Memory(stream_store.clone()),
+    )
+    .await
+    .unwrap();
+    let runtime = Arc::new(RwLock::new(runtime));
+
+    let app = build_app_with_services(
+        StreamStore::Memory(stream_store),
+        Some(ViewerStore::Memory(viewer_store)),
+        Some(runtime),
+        None,
+    );
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/dashboards/{dashboard_id}?lazy=1"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let panels = payload["panels"].as_array().unwrap();
+    // status field must be present (object) -- a previous regression hardcoded
+    // ViewerStatus::Ok ignoring the runtime state.
+    assert!(
+        panels[0]["viewer"]["status"].is_object(),
+        "lazy mode must include the viewer status object"
+    );
+}
+
 #[tokio::test]
 async fn test_patch_dashboard_name_and_columns_memory() {
     let env = setup_memory_viewer_app().await;

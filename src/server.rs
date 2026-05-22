@@ -9981,7 +9981,7 @@ async fn get_dashboard(
                 // traces / aggregated_buckets are fetched per-panel via
                 // /api/viewers/{id} when the panel enters the viewport.
                 rt.get_by_id(entry.viewer_id)
-                    .map(|(viewer, _)| viewer_summary_metadata_only(viewer))
+                    .map(|(viewer, state)| viewer_summary_metadata_only(viewer, &state.status))
                     .transpose()
                     .map_err(|error| {
                         tracing::error!("viewer {}: {error}", entry.viewer_id);
@@ -11298,7 +11298,10 @@ fn viewer_summary(
 /// Used by `GET /api/dashboards/{id}?lazy=1` to let the browser render panel
 /// skeletons immediately and lazy-fetch each panel's data via
 /// `/api/viewers/{id}` once it scrolls into view.
-fn viewer_summary_metadata_only(viewer: &CompiledViewer) -> Result<ViewerSummary, &'static str> {
+fn viewer_summary_metadata_only(
+    viewer: &CompiledViewer,
+    status: &ViewerStatus,
+) -> Result<ViewerSummary, &'static str> {
     let definition = viewer.definition();
     let chart_type = chart_type_from_definition(&definition.definition_json)?.to_string();
     let query = definition
@@ -11327,7 +11330,7 @@ fn viewer_summary_metadata_only(viewer: &CompiledViewer) -> Result<ViewerSummary
         refresh_interval_ms: definition.refresh_interval_ms,
         lookback_ms: viewer.lookback_ms(),
         entry_count: 0,
-        status: ViewerStatus::Ok,
+        status: status.clone(),
         entries: Vec::new(),
         traces: Vec::new(),
         aggregated_buckets: Vec::new(),
