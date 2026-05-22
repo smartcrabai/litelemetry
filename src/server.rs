@@ -48,6 +48,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tower_http::compression::CompressionLayer;
 use uuid::Uuid;
 
 /// Maximum body size for OTLP payloads (4 MiB).
@@ -8138,6 +8139,11 @@ pub fn build_app_with_services_full(
         .route("/v1/metrics", post(ingest_metrics))
         .route("/v1/logs", post(ingest_logs))
         .merge(api_routes)
+        // gzip-compress responses (large dashboard JSON payloads benefit the
+        // most). `CompressionLayer` only compresses when the client opts in
+        // via `Accept-Encoding`, so unaware clients (curl, OTLP exporters)
+        // continue to receive uncompressed bodies.
+        .layer(CompressionLayer::new())
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state)
         .fallback_service(connect.into_axum_service())
@@ -8163,7 +8169,7 @@ async fn get_viewer(
         &viewer_state.entries,
         &viewer_state.status,
         viewer.lookback_ms(),
-        true,
+        EntriesMode::Full,
         &viewer_state.aggregated_buckets,
     )
     .map_err(|error| {
@@ -8479,7 +8485,7 @@ async fn list_viewers(
                 &viewer_state.entries,
                 &viewer_state.status,
                 viewer.lookback_ms(),
-                false,
+                EntriesMode::None,
                 &viewer_state.aggregated_buckets,
             )
             .map_err(|error| {
@@ -9579,7 +9585,7 @@ async fn get_dashboard(
                         effective_entries,
                         slice.status,
                         slice.effective_lookback_ms,
-                        true,
+                        EntriesMode::DashboardSlim,
                         slice.aggregated_buckets,
                     )
                 })
@@ -10757,12 +10763,36 @@ fn map_entries_to_rows<'a>(
         .collect()
 }
 
+/// Controls how `viewer_summary` populates the heavy `entries` / `traces`
+/// fields of a [`ViewerSummary`].
+///
+/// Single-viewer endpoints (`/api/viewers/{id}`, `/api/viewers` list) use
+/// [`EntriesMode::Full`] / [`EntriesMode::None`] which preserve the existing
+/// contract. The dashboard endpoint uses [`EntriesMode::DashboardSlim`] to
+/// avoid serializing per-entry rows and trace summaries for viewers that only
+/// render aggregated buckets (chart-only viewers without a trace signal).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EntriesMode {
+    /// Include both raw entry rows and trace summaries (subject to signal
+    /// mask). Used by single-viewer endpoints.
+    Full,
+    /// Omit raw entry rows and trace summaries entirely. Used by list
+    /// endpoints that only need viewer metadata + status.
+    None,
+    /// Include raw entry rows only when the viewer actually renders them
+    /// (table chart) or carries trace data; otherwise omit them. Trace
+    /// summaries are still included when the viewer's signal mask contains
+    /// traces. Used by the dashboard endpoint to slim down the JSON payload
+    /// for chart-only viewers.
+    DashboardSlim,
+}
+
 fn viewer_summary(
     viewer: &CompiledViewer,
     entries: &[NormalizedEntry],
     status: &ViewerStatus,
     effective_lookback_ms: i64,
-    include_entries: bool,
+    entries_mode: EntriesMode,
     aggregated_buckets: &[crate::viewer_runtime::aggregator::Bucket],
 ) -> Result<ViewerSummary, &'static str> {
     let definition = viewer.definition();
@@ -10780,7 +10810,22 @@ fn viewer_summary(
         .map(str::to_string);
     let aggregation = definition.definition_json.get("aggregation").cloned();
 
-    let entries_for_response = if include_entries {
+    let has_traces_signal = definition.signal_mask.contains(Signal::Traces);
+    let include_entry_rows = match entries_mode {
+        EntriesMode::Full => true,
+        EntriesMode::None => false,
+        // Chart-only viewers (non-table chart, no Traces signal) get an empty
+        // entries array on the dashboard since the frontend renders them from
+        // `aggregated_buckets` only. Table viewers and viewers that surface
+        // trace data still need the raw rows.
+        EntriesMode::DashboardSlim => chart_type == "table" || has_traces_signal,
+    };
+    let include_trace_summaries = match entries_mode {
+        EntriesMode::Full | EntriesMode::DashboardSlim => has_traces_signal,
+        EntriesMode::None => false,
+    };
+
+    let entries_for_response = if include_entry_rows {
         map_entries_to_rows(
             entries.iter().rev().take(VIEWER_ENTRY_PREVIEW_LIMIT),
             query.as_deref(),
@@ -10804,7 +10849,7 @@ fn viewer_summary(
         entry_count: entries.len(),
         status: status.clone(),
         entries: entries_for_response,
-        traces: if include_entries && definition.signal_mask.contains(Signal::Traces) {
+        traces: if include_trace_summaries {
             extract_traces_from_entries(entries)
         } else {
             vec![]

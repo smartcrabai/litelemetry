@@ -33,6 +33,7 @@ sha2 = "0.11"
 snap = "1"
 thiserror = "2"
 tokio = { features = ["full"], version = "1" }
+tower-http = { version = "0.6.11", features = ["compression-gzip"] }
 tracing = "0.1"
 tracing-subscriber = { features = ["env-filter"], version = "0.3" }
 uuid = { features = ["v4", "serde"], version = "1" }
