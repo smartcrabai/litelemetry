@@ -443,7 +443,9 @@ mod tests {
     async fn empty_runtime() -> ViewerRuntime {
         let stream_store = StreamStore::Memory(MemoryStreamStore::new(1_000));
         let viewer_store = ViewerStore::Memory(MemoryViewerStore::new());
-        ViewerRuntime::build(viewer_store, stream_store).await.unwrap()
+        ViewerRuntime::build(viewer_store, stream_store)
+            .await
+            .unwrap()
     }
 
     fn assert_index_matches_viewers(runtime: &ViewerRuntime) {
@@ -492,9 +494,11 @@ mod tests {
         let (viewer, _) = runtime.get_by_id(a).unwrap();
         assert_eq!(viewer.definition().name, "renamed");
 
-        assert!(
-            runtime.update_viewer_definition(a, json!({ "kind": "table", "signal": "traces" }), json!({}))
-        );
+        assert!(runtime.update_viewer_definition(
+            a,
+            json!({ "kind": "table", "signal": "traces" }),
+            json!({})
+        ));
 
         assert!(
             runtime

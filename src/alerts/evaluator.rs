@@ -139,7 +139,7 @@ impl AlertRuntime {
         let metric = match &alert.condition {
             AlertCondition::Threshold { metric, .. } => *metric,
         };
-        let runtime = self.viewer_runtime.lock().await;
+        let runtime = self.viewer_runtime.read().await;
         let (_, state) = runtime.get_by_id(alert.viewer_id)?;
         Some(measure_metric(metric, state.entries.len()))
     }

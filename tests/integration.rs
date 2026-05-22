@@ -29,7 +29,7 @@ use serde_json::json;
 use std::sync::Arc;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::{postgres::Postgres, redis::Redis};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -83,7 +83,7 @@ async fn setup_viewer_app() -> ViewerTestEnv {
     )
     .await
     .unwrap();
-    let runtime = Arc::new(Mutex::new(runtime));
+    let runtime = Arc::new(RwLock::new(runtime));
 
     let app = build_app_with_services_full(
         StreamStore::Redis(redis),
@@ -1830,7 +1830,7 @@ async fn setup_memory_viewer_app() -> MemoryViewerTestEnv {
     )
     .await
     .unwrap();
-    let runtime = Arc::new(Mutex::new(runtime));
+    let runtime = Arc::new(RwLock::new(runtime));
 
     let app = build_app_with_services(
         StreamStore::Memory(stream_store.clone()),
@@ -2516,7 +2516,7 @@ async fn test_get_viewer_by_id_defaults_missing_chart_type_to_table_memory() {
     )
     .await
     .unwrap();
-    let runtime = Arc::new(Mutex::new(runtime));
+    let runtime = Arc::new(RwLock::new(runtime));
 
     let app = build_app_with_services(
         StreamStore::Memory(stream_store),
@@ -3058,7 +3058,7 @@ async fn test_get_dashboard_defaults_missing_columns_to_two_memory() {
     )
     .await
     .unwrap();
-    let runtime = Arc::new(Mutex::new(runtime));
+    let runtime = Arc::new(RwLock::new(runtime));
 
     let app = build_app_with_services(
         StreamStore::Memory(stream_store),
@@ -3279,7 +3279,7 @@ async fn test_get_dashboard_with_lookback_ms_filters_entries_memory() {
     )
     .await
     .unwrap();
-    let runtime = Arc::new(Mutex::new(runtime));
+    let runtime = Arc::new(RwLock::new(runtime));
 
     let app = build_app_with_services(
         StreamStore::Memory(stream_store),
@@ -3333,7 +3333,7 @@ async fn test_get_dashboard_with_invalid_lookback_ms_returns_400_memory() {
     )
     .await
     .unwrap();
-    let runtime = Arc::new(Mutex::new(runtime));
+    let runtime = Arc::new(RwLock::new(runtime));
 
     let app = build_app_with_services(
         StreamStore::Memory(stream_store),
@@ -3422,7 +3422,7 @@ async fn test_get_dashboard_omits_entries_for_chart_only_viewer_memory() {
     )
     .await
     .unwrap();
-    let runtime = Arc::new(Mutex::new(runtime));
+    let runtime = Arc::new(RwLock::new(runtime));
 
     let app = build_app_with_services(
         StreamStore::Memory(stream_store),
@@ -3519,7 +3519,7 @@ async fn test_get_dashboard_rejects_lookback_ms_above_dashboard_limit_memory() {
     )
     .await
     .unwrap();
-    let runtime = Arc::new(Mutex::new(runtime));
+    let runtime = Arc::new(RwLock::new(runtime));
 
     let app = build_app_with_services(
         StreamStore::Memory(stream_store),
@@ -3588,7 +3588,7 @@ async fn test_get_dashboard_without_lookback_ms_uses_viewer_default_memory() {
     )
     .await
     .unwrap();
-    let runtime = Arc::new(Mutex::new(runtime));
+    let runtime = Arc::new(RwLock::new(runtime));
 
     let app = build_app_with_services(
         StreamStore::Memory(stream_store),
@@ -4458,7 +4458,7 @@ async fn test_get_dashboard_legacy_layout_without_spans_defaults_to_one_memory()
     )
     .await
     .unwrap();
-    let runtime = Arc::new(Mutex::new(runtime));
+    let runtime = Arc::new(RwLock::new(runtime));
 
     let app = build_app_with_services(
         StreamStore::Memory(stream_store),
@@ -6372,7 +6372,7 @@ async fn test_list_services_returns_unique_service_names_memory() {
     )
     .await
     .unwrap();
-    let runtime = Arc::new(Mutex::new(runtime));
+    let runtime = Arc::new(RwLock::new(runtime));
 
     let app = build_app_with_services(
         StreamStore::Memory(stream_store),
@@ -6452,7 +6452,7 @@ async fn test_get_dashboard_with_service_name_filter_memory() {
     )
     .await
     .unwrap();
-    let runtime = Arc::new(Mutex::new(runtime));
+    let runtime = Arc::new(RwLock::new(runtime));
 
     let app = build_app_with_services(
         StreamStore::Memory(stream_store),
@@ -6522,7 +6522,7 @@ async fn test_get_dashboard_with_query_filter_matches_service_name_memory() {
     )
     .await
     .unwrap();
-    let runtime = Arc::new(Mutex::new(runtime));
+    let runtime = Arc::new(RwLock::new(runtime));
 
     let app = build_app_with_services(
         StreamStore::Memory(stream_store),
@@ -6604,7 +6604,7 @@ async fn test_get_dashboard_with_query_filter_matches_payload_text_memory() {
     )
     .await
     .unwrap();
-    let runtime = Arc::new(Mutex::new(runtime));
+    let runtime = Arc::new(RwLock::new(runtime));
 
     let app = build_app_with_services(
         StreamStore::Memory(stream_store),
@@ -7907,7 +7907,7 @@ async fn test_alert_runtime_breach_when_threshold_exceeded() {
     )
     .await
     .unwrap();
-    let runtime = Arc::new(Mutex::new(runtime));
+    let runtime = Arc::new(RwLock::new(runtime));
 
     // 5. Insert an alert with `count > 0` => should breach.
     let alert_id = Uuid::new_v4();
@@ -7982,7 +7982,7 @@ async fn test_alert_api_crud_round_trip() {
     )
     .await
     .unwrap();
-    let runtime = Arc::new(Mutex::new(runtime));
+    let runtime = Arc::new(RwLock::new(runtime));
 
     let app = build_app_with_services(
         StreamStore::Redis(redis),
@@ -8795,7 +8795,7 @@ async fn setup_slo_app() -> ViewerTestEnv {
     )
     .await
     .unwrap();
-    let runtime = Arc::new(Mutex::new(runtime));
+    let runtime = Arc::new(RwLock::new(runtime));
 
     let slo_store = SloStore::Postgres(PostgresSloStore::new(pg.pool()));
     let app = build_app_with_services_full(
