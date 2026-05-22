@@ -8159,11 +8159,7 @@ async fn get_viewer(
 ) -> Result<Json<ViewerSummary>, StatusCode> {
     let runtime = state.require_viewer_runtime()?.lock().await;
 
-    let (viewer, viewer_state) = runtime
-        .viewers()
-        .iter()
-        .find(|(viewer, _)| viewer.definition().id == id)
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let (viewer, viewer_state) = runtime.get_by_id(id).ok_or(StatusCode::NOT_FOUND)?;
     let mut summary = viewer_summary(
         viewer,
         &viewer_state.entries,
@@ -8307,9 +8303,7 @@ async fn list_exemplars(
 
     // Locate the metric viewer.
     let (metric_viewer, metric_state) = runtime
-        .viewers()
-        .iter()
-        .find(|(v, _)| v.definition().id == params.metric_viewer_id)
+        .get_by_id(params.metric_viewer_id)
         .ok_or(StatusCode::NOT_FOUND)?;
 
     if !metric_viewer
@@ -8392,9 +8386,7 @@ async fn evaluate_anomaly(
 ) -> Result<Json<crate::anomaly::DetectorResult>, StatusCode> {
     let runtime = state.require_viewer_runtime()?.lock().await;
     let (_, viewer_state) = runtime
-        .viewers()
-        .iter()
-        .find(|(viewer, _)| viewer.definition().id == payload.viewer_id)
+        .get_by_id(payload.viewer_id)
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let now = Utc::now();
@@ -8719,11 +8711,7 @@ async fn patch_viewer(
         new_name,
     ) = {
         let rt = runtime.lock().await;
-        let (viewer, _) = rt
-            .viewers()
-            .iter()
-            .find(|(viewer, _)| viewer.definition().id == id)
-            .ok_or(StatusCode::NOT_FOUND)?;
+        let (viewer, _) = rt.get_by_id(id).ok_or(StatusCode::NOT_FOUND)?;
 
         let current_kind = chart_type_from_definition(&viewer.definition().definition_json)
             .map_err(|error| {
@@ -9541,9 +9529,7 @@ async fn get_dashboard(
         let max_lookback_ms = panel_entries
             .iter()
             .filter_map(|entry| {
-                rt.viewers()
-                    .iter()
-                    .find(|(viewer, _)| viewer.definition().id == entry.viewer_id)
+                rt.get_by_id(entry.viewer_id)
                     .map(|(viewer, _)| viewer.lookback_ms())
             })
             .min();
@@ -11758,11 +11744,7 @@ async fn collect_slo_entries(
         return Ok(Vec::new());
     };
     let runtime = state.require_viewer_runtime()?.lock().await;
-    let Some((_, viewer_state)) = runtime
-        .viewers()
-        .iter()
-        .find(|(viewer, _)| viewer.definition().id == viewer_id)
-    else {
+    let Some((_, viewer_state)) = runtime.get_by_id(viewer_id) else {
         // Bound viewer was deleted: treat as no entries (budget = 100% / 0 total).
         return Ok(Vec::new());
     };
