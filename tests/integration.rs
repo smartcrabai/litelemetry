@@ -121,6 +121,17 @@ fn make_viewer_def(signal_mask: SignalMask, lookback_ms: i64, revision: i64) -> 
     }
 }
 
+fn make_viewer_def_with_chart_kind(
+    signal_mask: SignalMask,
+    lookback_ms: i64,
+    revision: i64,
+    chart_kind: &str,
+) -> ViewerDefinition {
+    let mut def = make_viewer_def(signal_mask, lookback_ms, revision);
+    def.definition_json = json!({ "kind": chart_kind });
+    def
+}
+
 fn make_traces_entry(age_ms: i64) -> NormalizedEntry {
     NormalizedEntry {
         signal: Signal::Traces,
@@ -135,6 +146,15 @@ fn make_traces_entry_with_service(age_ms: i64, service_name: &str) -> Normalized
         signal: Signal::Traces,
         observed_at: Utc::now() - Duration::milliseconds(age_ms),
         service_name: Some(service_name.to_string()),
+        payload: Bytes::from_static(b"\x0a\x01\x02"),
+    }
+}
+
+fn make_metrics_entry(age_ms: i64) -> NormalizedEntry {
+    NormalizedEntry {
+        signal: Signal::Metrics,
+        observed_at: Utc::now() - Duration::milliseconds(age_ms),
+        service_name: Some("test-svc".to_string()),
         payload: Bytes::from_static(b"\x0a\x01\x02"),
     }
 }
@@ -3352,6 +3372,125 @@ async fn test_get_dashboard_with_invalid_lookback_ms_returns_400_memory() {
         resp.status(),
         StatusCode::BAD_REQUEST,
         "negative lookback_ms should be rejected"
+    );
+}
+
+/// Dashboard responses omit `entries` and `traces` for chart-only viewers
+/// (non-table chart kind, no trace signal) to keep the JSON payload small.
+/// The single-viewer endpoint `/api/viewers/{id}` still returns the full
+/// `entries` array so detail views remain unaffected.
+#[tokio::test]
+async fn test_get_dashboard_omits_entries_for_chart_only_viewer_memory() {
+    let stream_store = MemoryStreamStore::new(100_000);
+    let viewer_store = MemoryViewerStore::new();
+
+    // Chart-only metrics viewer (kind="line", signal_mask=Metrics) -- its
+    // `entries` array should be empty in dashboard responses because the
+    // frontend renders charts purely from `aggregated_buckets`.
+    let chart_def = make_viewer_def_with_chart_kind(Signal::Metrics.into(), 60_000, 1, "line");
+    viewer_store
+        .insert_viewer_definition(&chart_def)
+        .await
+        .unwrap();
+    let chart_viewer_id = chart_def.id;
+
+    // Append a couple of metric entries so the runtime has non-empty state.
+    let mut stream_write = stream_store.clone();
+    stream_write
+        .append_entry(&make_metrics_entry(10_000))
+        .await
+        .unwrap();
+    stream_write
+        .append_entry(&make_metrics_entry(5_000))
+        .await
+        .unwrap();
+
+    let dashboard = DashboardDefinition {
+        id: Uuid::new_v4(),
+        slug: "test-slim".to_string(),
+        name: "Test Slim".to_string(),
+        layout_json: json!({ "panels": [{ "viewer_id": chart_viewer_id, "position": 0 }] }),
+        revision: 1,
+        enabled: true,
+    };
+    viewer_store.insert_dashboard(&dashboard).await.unwrap();
+    let dashboard_id = dashboard.id;
+
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Memory(viewer_store.clone()),
+        StreamStore::Memory(stream_store.clone()),
+    )
+    .await
+    .unwrap();
+    let runtime = Arc::new(Mutex::new(runtime));
+
+    let app = build_app_with_services(
+        StreamStore::Memory(stream_store),
+        Some(ViewerStore::Memory(viewer_store)),
+        Some(runtime),
+        None,
+    );
+
+    // Dashboard response: entries / traces should be empty for chart viewer.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/dashboards/{dashboard_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let panels = payload["panels"].as_array().unwrap();
+    assert_eq!(panels.len(), 1);
+    let viewer = &panels[0]["viewer"];
+    assert_eq!(viewer["chart_type"], "line");
+    assert_eq!(
+        viewer["entries"].as_array().map(Vec::len),
+        Some(0),
+        "dashboard should omit entry rows for chart-only viewers"
+    );
+    // `traces` is `skip_serializing_if = "Vec::is_empty"` -- it must be absent
+    // or empty for non-trace viewers.
+    assert!(
+        viewer
+            .get("traces")
+            .is_none_or(|t| t.as_array().is_some_and(|a| a.is_empty())),
+        "dashboard should omit trace summaries for non-trace viewers (got {:?})",
+        viewer.get("traces")
+    );
+    assert!(
+        viewer["entry_count"].as_u64().unwrap_or(0) > 0,
+        "entry_count should still reflect the underlying viewer state"
+    );
+
+    // Single-viewer endpoint must keep returning the full entries array so
+    // detail views are unaffected by the dashboard slim-down.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/viewers/{chart_viewer_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["chart_type"], "line");
+    let entries = payload["entries"].as_array().unwrap();
+    assert!(
+        !entries.is_empty(),
+        "single-viewer endpoint should still return entry rows"
     );
 }
 
