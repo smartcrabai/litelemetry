@@ -4502,7 +4502,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       let currentDashboardId = null;
       let cachedServiceNames = [];
       let filterValDatalistSeq = 0;
-      let dashboardPanelCharts = [];
+      let dashboardPanelCharts = new Map();
       const DASHBOARD_REFRESH_OFF_VALUE = 'off';
       let dashboardRefreshIntervalMs = 30000;
       let dashboardRefreshRequest = null;
@@ -4882,7 +4882,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       });
 
       function resizeDashboardPanelCharts() {
-        for (const chart of dashboardPanelCharts) {
+        for (const chart of dashboardPanelCharts.values()) {
           try { chart.resize(); } catch (_) {}
         }
       }
@@ -4891,7 +4891,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         document.body.classList.toggle('fullscreen', enabled);
         dashboardFullscreenButton.textContent = enabled ? 'X' : '[ ]';
         dashboardFullscreenButton.setAttribute('aria-label', enabled ? 'Exit fullscreen' : 'Enter fullscreen');
-        if (dashboardPanelCharts.length) {
+        if (dashboardPanelCharts.size) {
           requestAnimationFrame(() => requestAnimationFrame(resizeDashboardPanelCharts));
         }
       }
@@ -6037,10 +6037,33 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       // --- Dashboard detail ------------------------------------------------
 
       function destroyPanelCharts() {
-        for (const c of dashboardPanelCharts) {
+        for (const c of dashboardPanelCharts.values()) {
           try { c.destroy(); } catch (_) {}
         }
-        dashboardPanelCharts = [];
+        dashboardPanelCharts.clear();
+      }
+
+      // Compute a signature describing the visual shape of a panel. When the
+      // signature matches between an existing panel DOM node and an incoming
+      // payload, we can update the panel in-place rather than rebuilding it.
+      function computePanelSignature(panel) {
+        if (!panel.viewer) return 'missing';
+        const v = panel.viewer;
+        const chartType = readViewerChartType(v);
+        const signals = Array.isArray(v.signals) ? [...v.signals].sort().join(',') : '';
+        const isTraces = Array.isArray(v.signals) && v.signals.includes('traces');
+        const supportsMetricCharts = viewerSupportsMetricCharts(v);
+        let kind;
+        if (chartType === 'billboard' && supportsMetricCharts) {
+          kind = 'billboard';
+        } else if (chartType !== 'table' && supportsMetricCharts && v.entries.length) {
+          kind = isCircularChartType(chartType) ? `circular:${chartType}` : `chart:${chartType}`;
+        } else if (isTraces && v.traces && v.traces.length) {
+          kind = 'trace_table';
+        } else {
+          kind = 'entries_table';
+        }
+        return `${kind}|${signals}|${v.name}`;
       }
 
       async function loadDashboard(id, { refresh = false } = {}) {
@@ -6074,20 +6097,70 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           const sorted = [...data.panels].sort((a, b) => a.position - b.position);
           const columns = readDashboardColumns(data.columns);
 
-          destroyPanelCharts();
-          dashboardGrid.replaceChildren();
           dashboardTitle.textContent = data.name;
           dashboardSettingsButton.hidden = false;
           dashboardFullscreenButton.hidden = false;
           dashboardGrid.style.setProperty('--dash-cols', String(columns));
 
+          // Diff existing DOM against the new panel list. We index existing
+          // children by viewer_id (placeholder/empty/error nodes are ignored
+          // and dropped). Empty-state and error placeholders use the
+          // `data-dashboard-placeholder` attribute so they are also discarded.
+          const existingByViewerId = new Map();
+          const leftovers = [];
+          for (const child of Array.from(dashboardGrid.children)) {
+            const vid = child.dataset ? child.dataset.viewerId : null;
+            if (vid && !existingByViewerId.has(vid)) {
+              existingByViewerId.set(vid, child);
+            } else {
+              leftovers.push(child);
+            }
+          }
+          for (const node of leftovers) {
+            node.remove();
+          }
+
+          const newViewerIds = new Set(sorted.map(p => p.viewer_id));
+          for (const [vid, node] of existingByViewerId) {
+            if (!newViewerIds.has(vid)) {
+              const chart = dashboardPanelCharts.get(vid);
+              if (chart) {
+                try { chart.destroy(); } catch (_) {}
+                dashboardPanelCharts.delete(vid);
+              }
+              node.remove();
+              existingByViewerId.delete(vid);
+            }
+          }
+
+          // Walk the sorted panels and either update-in-place or build a new
+          // panel element. Reordering is handled by appendChild, which moves
+          // existing nodes rather than duplicating them.
           for (const panel of sorted) {
-            dashboardGrid.appendChild(buildPanelEl(panel));
+            const existing = existingByViewerId.get(panel.viewer_id);
+            const nextSignature = computePanelSignature(panel);
+            let node;
+            if (existing && existing.dataset.panelSignature === nextSignature) {
+              updatePanelEl(existing, panel);
+              node = existing;
+            } else {
+              if (existing) {
+                const chart = dashboardPanelCharts.get(panel.viewer_id);
+                if (chart) {
+                  try { chart.destroy(); } catch (_) {}
+                  dashboardPanelCharts.delete(panel.viewer_id);
+                }
+                existing.remove();
+              }
+              node = buildPanelEl(panel);
+            }
+            dashboardGrid.appendChild(node);
           }
 
           if (!sorted.length) {
             const empty = document.createElement('div');
             empty.className = 'dashboard-panel';
+            empty.dataset.dashboardPlaceholder = 'empty';
             empty.innerHTML = '<p class="dashboard-panel-empty">No viewers in this dashboard yet. Use Settings to add viewers.</p>';
             dashboardGrid.appendChild(empty);
           }
@@ -6116,6 +6189,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
             setDashboardLastUpdated(null);
             const errEl = document.createElement('div');
             errEl.className = 'dashboard-panel';
+            errEl.dataset.dashboardPlaceholder = 'error';
             const msgEl = document.createElement('p');
             msgEl.className = 'dashboard-panel-empty';
             msgEl.textContent = `Failed to load: ${err.message}`;
@@ -6127,18 +6201,25 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         return false;
       }
 
+      // Build a fresh panel DOM node, including chart canvas / billboard host
+      // / data table. Returned node carries `data-viewer-id` and
+      // `data-panel-signature` so subsequent refreshes can update it in place.
       function buildPanelEl(panel) {
         const div = document.createElement('div');
         div.className = 'dashboard-panel';
+        div.dataset.viewerId = panel.viewer_id;
+        div.dataset.panelSignature = computePanelSignature(panel);
 
         const title = document.createElement('h4');
         title.className = 'dashboard-panel-title';
+        title.dataset.role = 'panel-title';
 
         if (!panel.viewer) {
           title.textContent = truncateId(panel.viewer_id);
           div.appendChild(title);
           const msg = document.createElement('p');
           msg.className = 'dashboard-panel-empty';
+          msg.dataset.role = 'panel-missing-msg';
           msg.textContent = 'Viewer not found.';
           div.appendChild(msg);
           return div;
@@ -6174,14 +6255,16 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         if (chartType === 'billboard' && supportsMetricCharts) {
           const host = document.createElement('div');
           host.classList.add('dashboard-panel-media');
+          host.dataset.role = 'panel-billboard';
           div.appendChild(host);
           renderBillboard(v.entries, v.lookback_ms, host, { compact: true });
         } else if (chartType !== 'table' && supportsMetricCharts && v.entries.length) {
           const canvas = document.createElement('canvas');
           canvas.classList.add('dashboard-panel-media');
+          canvas.dataset.role = 'panel-canvas';
           div.appendChild(canvas);
           const chart = renderPanelChart(chartType, v.entries, v.lookback_ms, canvas);
-          if (chart) dashboardPanelCharts.push(chart);
+          if (chart) dashboardPanelCharts.set(panel.viewer_id, chart);
         } else if (isTraces && v.traces && v.traces.length) {
           renderPanelTraceTable(div, v.traces);
         } else {
@@ -6189,6 +6272,82 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         }
 
         return div;
+      }
+
+      // Update an existing panel DOM node whose signature matches the incoming
+      // payload. The caller guarantees `existing.dataset.panelSignature ===
+      // computePanelSignature(panel)`, so only the data parts of the node
+      // need to be refreshed.
+      function updatePanelEl(existing, panel) {
+        if (!panel.viewer) return;
+        const v = panel.viewer;
+
+        // Title may already match but keep it in sync (signature includes
+        // viewer name, so this is mostly a no-op).
+        const title = existing.querySelector('[data-role="panel-title"]');
+        if (title) title.textContent = v.name;
+
+        const chartType = readViewerChartType(v);
+        const isTraces = v.signals.includes('traces');
+        const supportsMetricCharts = viewerSupportsMetricCharts(v);
+
+        if (chartType === 'billboard' && supportsMetricCharts) {
+          const host = existing.querySelector('[data-role="panel-billboard"]');
+          if (host) renderBillboard(v.entries, v.lookback_ms, host, { compact: true });
+          return;
+        }
+
+        if (chartType !== 'table' && supportsMetricCharts && v.entries.length) {
+          const chart = dashboardPanelCharts.get(panel.viewer_id);
+          if (chart) {
+            if (isCircularChartType(chartType)) {
+              const next = buildCircularChartConfig(chartType, v.entries, {
+                boxWidth: 10,
+                font: { size: 10 },
+              });
+              if (next) {
+                chart.data = next.data;
+                chart.options = next.options;
+                chart.update('none');
+                return;
+              }
+            } else {
+              const data = buildChartData(v.entries, v.lookback_ms, chartType);
+              if (data.datasets.length) {
+                chart.data = data;
+                chart.update('none');
+                return;
+              }
+            }
+          }
+          // Fall back to a full canvas rebuild if the existing chart could
+          // not be updated (e.g. previously empty -> now has data).
+          const canvas = existing.querySelector('[data-role="panel-canvas"]');
+          if (canvas) {
+            const existingChart = dashboardPanelCharts.get(panel.viewer_id);
+            if (existingChart) {
+              try { existingChart.destroy(); } catch (_) {}
+              dashboardPanelCharts.delete(panel.viewer_id);
+            }
+            const fresh = renderPanelChart(chartType, v.entries, v.lookback_ms, canvas);
+            if (fresh) dashboardPanelCharts.set(panel.viewer_id, fresh);
+          }
+          return;
+        }
+
+        if (isTraces && v.traces && v.traces.length) {
+          // Replace the scrollable table region in-place.
+          const scroll = existing.querySelector('.dashboard-panel-scroll');
+          if (scroll) scroll.remove();
+          renderPanelTraceTable(existing, v.traces);
+          return;
+        }
+
+        const scroll = existing.querySelector('.dashboard-panel-scroll');
+        const emptyMsg = existing.querySelector('p.dashboard-panel-empty');
+        if (scroll) scroll.remove();
+        if (emptyMsg) emptyMsg.remove();
+        renderPanelEntriesTable(existing, v.entries);
       }
 
       function renderPanelChart(chartType, entries, lookbackMs, canvas) {
