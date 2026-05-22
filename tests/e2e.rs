@@ -22,7 +22,7 @@ use opentelemetry_sdk::trace::SdkTracerProvider;
 use std::sync::Arc;
 use testcontainers::{ContainerAsync, runners::AsyncRunner};
 use testcontainers_modules::redis::Redis;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tokio::{
     net::{TcpListener, TcpStream},
     task,
@@ -470,7 +470,7 @@ impl MemoryTestApp {
         )
         .await
         .unwrap();
-        let runtime = Arc::new(Mutex::new(runtime));
+        let runtime = Arc::new(RwLock::new(runtime));
         let app = build_app_with_services(
             StreamStore::Memory(stream_store.clone()),
             Some(ViewerStore::Memory(viewer_store)),

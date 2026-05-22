@@ -47,7 +47,7 @@ use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tower_http::compression::CompressionLayer;
 use uuid::Uuid;
 
@@ -7625,7 +7625,7 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
 /// Axum shared state
 ///
-/// StreamStore is Clone-able, so it does not need to be wrapped in Arc<Mutex<>>.
+/// StreamStore is Clone-able, so it does not need to be wrapped in Arc<RwLock<>>.
 /// Axum clones State for each request.
 #[derive(Clone)]
 pub struct AppState {
@@ -7645,7 +7645,7 @@ pub struct AppState {
     pub api_keys_enabled: bool,
 }
 
-pub type SharedViewerRuntime = Arc<Mutex<ViewerRuntime>>;
+pub type SharedViewerRuntime = Arc<RwLock<ViewerRuntime>>;
 
 impl AppState {
     fn require_viewer_runtime(&self) -> Result<&SharedViewerRuntime, StatusCode> {
@@ -8157,13 +8157,9 @@ async fn get_viewer(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ViewerSummary>, StatusCode> {
-    let runtime = state.require_viewer_runtime()?.lock().await;
+    let runtime = state.require_viewer_runtime()?.read().await;
 
-    let (viewer, viewer_state) = runtime
-        .viewers()
-        .iter()
-        .find(|(viewer, _)| viewer.definition().id == id)
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let (viewer, viewer_state) = runtime.get_by_id(id).ok_or(StatusCode::NOT_FOUND)?;
     let mut summary = viewer_summary(
         viewer,
         &viewer_state.entries,
@@ -8241,7 +8237,7 @@ async fn healthz() -> &'static str {
 async fn list_services(
     State(state): State<AppState>,
 ) -> Result<Json<ServicesResponse>, StatusCode> {
-    let runtime = state.require_viewer_runtime()?.lock().await;
+    let runtime = state.require_viewer_runtime()?.read().await;
     let services = runtime.collect_service_names();
     Ok(Json(ServicesResponse { services }))
 }
@@ -8303,13 +8299,11 @@ async fn list_exemplars(
     State(state): State<AppState>,
     Query(params): Query<ExemplarsQuery>,
 ) -> Result<Json<ExemplarsResponse>, StatusCode> {
-    let runtime = state.require_viewer_runtime()?.lock().await;
+    let runtime = state.require_viewer_runtime()?.read().await;
 
     // Locate the metric viewer.
     let (metric_viewer, metric_state) = runtime
-        .viewers()
-        .iter()
-        .find(|(v, _)| v.definition().id == params.metric_viewer_id)
+        .get_by_id(params.metric_viewer_id)
         .ok_or(StatusCode::NOT_FOUND)?;
 
     if !metric_viewer
@@ -8390,11 +8384,9 @@ async fn evaluate_anomaly(
     State(state): State<AppState>,
     Json(payload): Json<EvaluateAnomalyRequest>,
 ) -> Result<Json<crate::anomaly::DetectorResult>, StatusCode> {
-    let runtime = state.require_viewer_runtime()?.lock().await;
+    let runtime = state.require_viewer_runtime()?.read().await;
     let (_, viewer_state) = runtime
-        .viewers()
-        .iter()
-        .find(|(viewer, _)| viewer.definition().id == payload.viewer_id)
+        .get_by_id(payload.viewer_id)
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let now = Utc::now();
@@ -8474,7 +8466,7 @@ async fn list_error_groups(
 async fn list_viewers(
     State(state): State<AppState>,
 ) -> Result<Json<ViewerListResponse>, StatusCode> {
-    let runtime = state.require_viewer_runtime()?.lock().await;
+    let runtime = state.require_viewer_runtime()?.read().await;
 
     let viewers = runtime
         .viewers()
@@ -8586,7 +8578,7 @@ async fn provision_viewer(
         })?;
 
     runtime
-        .lock()
+        .write()
         .await
         .add_viewer(definition)
         .await
@@ -8606,7 +8598,7 @@ async fn unprovision_viewer(
     if let Err(e) = viewer_store.delete_viewer(id).await {
         tracing::error!("unprovision_viewer: delete_viewer failed: {e}");
     } else {
-        runtime.lock().await.remove_viewer(id);
+        runtime.write().await.remove_viewer(id);
     }
 }
 
@@ -8718,12 +8710,8 @@ async fn patch_viewer(
         name_changed,
         new_name,
     ) = {
-        let rt = runtime.lock().await;
-        let (viewer, _) = rt
-            .viewers()
-            .iter()
-            .find(|(viewer, _)| viewer.definition().id == id)
-            .ok_or(StatusCode::NOT_FOUND)?;
+        let rt = runtime.read().await;
+        let (viewer, _) = rt.get_by_id(id).ok_or(StatusCode::NOT_FOUND)?;
 
         let current_kind = chart_type_from_definition(&viewer.definition().definition_json)
             .map_err(|error| {
@@ -8835,7 +8823,7 @@ async fn patch_viewer(
         }
     }
 
-    let mut rt = runtime.lock().await;
+    let mut rt = runtime.write().await;
     if matcher_changed {
         rt.rebuild_viewer(id, definition_json, layout_json)
             .await
@@ -9537,13 +9525,11 @@ async fn get_dashboard(
 
     // Fetch viewer data for panels from ViewerRuntime (empty if runtime is unavailable)
     let (panels, max_lookback_ms) = if let Some(runtime) = state.viewer_runtime.as_ref() {
-        let rt = runtime.lock().await;
+        let rt = runtime.read().await;
         let max_lookback_ms = panel_entries
             .iter()
             .filter_map(|entry| {
-                rt.viewers()
-                    .iter()
-                    .find(|(viewer, _)| viewer.definition().id == entry.viewer_id)
+                rt.get_by_id(entry.viewer_id)
                     .map(|(viewer, _)| viewer.lookback_ms())
             })
             .min();
@@ -9732,7 +9718,7 @@ async fn delete_viewer(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    runtime.lock().await.remove_viewer(id);
+    runtime.write().await.remove_viewer(id);
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -9922,7 +9908,7 @@ async fn import_dashboard(
         })?;
 
         if let Some(runtime) = state.viewer_runtime.as_ref() {
-            runtime.lock().await.add_viewer(def).await.map_err(|e| {
+            runtime.write().await.add_viewer(def).await.map_err(|e| {
                 tracing::error!("runtime.add_viewer: {e}");
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
@@ -10415,7 +10401,7 @@ async fn collect_traces_entries(
     lookback_ms: i64,
 ) -> Vec<NormalizedEntry> {
     let cutoff = Utc::now() - chrono::Duration::milliseconds(lookback_ms);
-    let runtime = runtime.lock().await;
+    let runtime = runtime.read().await;
 
     let mut seen: HashSet<(*const u8, usize, i64)> = HashSet::new();
     let mut out: Vec<NormalizedEntry> = Vec::new();
@@ -11757,12 +11743,8 @@ async fn collect_slo_entries(
     let Some(viewer_id) = viewer_id else {
         return Ok(Vec::new());
     };
-    let runtime = state.require_viewer_runtime()?.lock().await;
-    let Some((_, viewer_state)) = runtime
-        .viewers()
-        .iter()
-        .find(|(viewer, _)| viewer.definition().id == viewer_id)
-    else {
+    let runtime = state.require_viewer_runtime()?.read().await;
+    let Some((_, viewer_state)) = runtime.get_by_id(viewer_id) else {
         // Bound viewer was deleted: treat as no entries (budget = 100% / 0 total).
         return Ok(Vec::new());
     };

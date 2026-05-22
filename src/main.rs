@@ -17,7 +17,7 @@ use litelemetry::storage::{StreamStore, ViewerStore};
 use litelemetry::viewer_runtime::runtime::ViewerRuntime;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 const DEFAULT_HTTP_PORT: u16 = 8080;
 const DEFAULT_VIEWER_RUNTIME_POLL_MS: u64 = 1_000;
@@ -241,7 +241,7 @@ async fn build_and_spawn_viewer_runtime(
     let runtime = ViewerRuntime::build(viewer_store, stream_store)
         .await
         .expect("failed to build viewer runtime");
-    let runtime = std::sync::Arc::new(Mutex::new(runtime));
+    let runtime = std::sync::Arc::new(RwLock::new(runtime));
     spawn_viewer_runtime(runtime.clone(), poll_ms);
     tracing::info!(
         "viewer runtime started with {} ms polling interval",
@@ -274,7 +274,7 @@ fn spawn_viewer_runtime(runtime: SharedViewerRuntime, poll_ms: u64) {
 
         loop {
             interval.tick().await;
-            if let Err(e) = runtime.lock().await.apply_diff_batch().await {
+            if let Err(e) = runtime.write().await.apply_diff_batch().await {
                 tracing::error!("viewer runtime diff batch failed: {e}");
             }
         }

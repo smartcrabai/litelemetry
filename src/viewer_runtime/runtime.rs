@@ -28,6 +28,9 @@ pub enum RuntimeError {
 /// - `apply_diff_batch()` fetches diffs from the stream and fans them out to all viewers.
 pub struct ViewerRuntime {
     viewers: Vec<(CompiledViewer, ViewerState)>,
+    /// Maps viewer id -> index into `viewers`, kept in sync on every mutation.
+    /// Lets `get_by_id` lookups stay O(1) instead of O(N).
+    viewer_index: HashMap<Uuid, usize>,
     stream_store: StreamStore,
     viewer_store: ViewerStore,
 }
@@ -117,8 +120,15 @@ impl ViewerRuntime {
             recompute_aggregation(state, viewer);
         }
 
+        let viewer_index = viewers
+            .iter()
+            .enumerate()
+            .map(|(idx, (v, _))| (v.definition().id, idx))
+            .collect();
+
         Ok(Self {
             viewers,
+            viewer_index,
             stream_store,
             viewer_store,
         })
@@ -172,7 +182,7 @@ impl ViewerRuntime {
     /// Persists the current snapshot for the viewer identified by `id`.
     /// Returns true if the viewer was found and the snapshot was upserted.
     pub async fn persist_viewer_snapshot(&self, id: Uuid) -> Result<bool, RuntimeError> {
-        let (_, state) = match self.viewers.iter().find(|(v, _)| v.definition().id == id) {
+        let (_, state) = match self.get_by_id(id) {
             Some(v) => v,
             None => return Ok(false),
         };
@@ -194,7 +204,9 @@ impl ViewerRuntime {
         let viewer = compile(definition)?;
         let mut state = ViewerState::new(viewer_id, revision);
         populate_state_from_stream(&mut self.stream_store, &viewer, &mut state).await?;
+        let idx = self.viewers.len();
         self.viewers.push((viewer, state));
+        self.viewer_index.insert(viewer_id, idx);
         Ok(())
     }
 
@@ -204,28 +216,26 @@ impl ViewerRuntime {
         definition_json: Value,
         layout_json: Value,
     ) -> bool {
-        for (viewer, state) in &mut self.viewers {
-            if viewer.definition().id == id {
-                viewer.update_definition_json(definition_json, layout_json);
-                state.revision += 1;
-                // Recompute buckets so a newly-added or modified aggregation
-                // block is reflected in the next API response.
-                recompute_aggregation(state, viewer);
-                return true;
-            }
-        }
-        false
+        let Some(&idx) = self.viewer_index.get(&id) else {
+            return false;
+        };
+        let (viewer, state) = &mut self.viewers[idx];
+        viewer.update_definition_json(definition_json, layout_json);
+        state.revision += 1;
+        // Recompute buckets so a newly-added or modified aggregation
+        // block is reflected in the next API response.
+        recompute_aggregation(state, viewer);
+        true
     }
 
     pub fn update_viewer_name(&mut self, id: Uuid, name: &str) -> bool {
-        for (viewer, state) in &mut self.viewers {
-            if viewer.definition().id == id {
-                viewer.update_name(name);
-                state.revision += 1;
-                return true;
-            }
-        }
-        false
+        let Some(&idx) = self.viewer_index.get(&id) else {
+            return false;
+        };
+        let (viewer, state) = &mut self.viewers[idx];
+        viewer.update_name(name);
+        state.revision += 1;
+        true
     }
 
     /// Rebuilds a viewer's state from scratch using the updated definition_json/layout_json.
@@ -238,13 +248,8 @@ impl ViewerRuntime {
         definition_json: Value,
         layout_json: Value,
     ) -> Result<bool, RuntimeError> {
-        let idx = match self
-            .viewers
-            .iter()
-            .position(|(v, _)| v.definition().id == id)
-        {
-            Some(i) => i,
-            None => return Ok(false),
+        let Some(&idx) = self.viewer_index.get(&id) else {
+            return Ok(false);
         };
 
         let mut updated_def = self.viewers[idx].0.definition().clone();
@@ -255,16 +260,34 @@ impl ViewerRuntime {
         let viewer = compile(updated_def)?;
         let mut state = ViewerState::new(viewer.definition().id, viewer.definition().revision);
         populate_state_from_stream(&mut self.stream_store, &viewer, &mut state).await?;
+        // The viewer id is invariant across rebuilds, so the index entry stays valid.
         self.viewers[idx] = (viewer, state);
         Ok(true)
     }
 
     pub fn remove_viewer(&mut self, id: Uuid) {
-        self.viewers.retain(|(v, _)| v.definition().id != id);
+        let Some(idx) = self.viewer_index.remove(&id) else {
+            return;
+        };
+        // `swap_remove` is O(1); patch the moved entry's index back into the map.
+        let last_idx = self.viewers.len() - 1;
+        self.viewers.swap_remove(idx);
+        if idx != last_idx {
+            let moved_id = self.viewers[idx].0.definition().id;
+            self.viewer_index.insert(moved_id, idx);
+        }
     }
 
     pub fn viewers(&self) -> &[(CompiledViewer, ViewerState)] {
         &self.viewers
+    }
+
+    /// O(1) lookup of a viewer + its state by id. Returns `None` when no
+    /// viewer with that id is currently registered with the runtime.
+    pub fn get_by_id(&self, id: Uuid) -> Option<(&CompiledViewer, &ViewerState)> {
+        let &idx = self.viewer_index.get(&id)?;
+        let (viewer, state) = &self.viewers[idx];
+        Some((viewer, state))
     }
 
     pub fn collect_service_names(&self) -> Vec<String> {
@@ -285,10 +308,7 @@ impl ViewerRuntime {
         lookback_override: Option<i64>,
         now: DateTime<Utc>,
     ) -> Option<DashboardViewerSlice<'a>> {
-        let (viewer, state) = self
-            .viewers
-            .iter()
-            .find(|(v, _)| v.definition().id == *viewer_id)?;
+        let (viewer, state) = self.get_by_id(*viewer_id)?;
         let effective_lookback = lookback_override.unwrap_or(viewer.lookback_ms());
         let start_idx = lookback_start_index(&state.entries, effective_lookback, now);
         let filtered_entries = &state.entries[start_idx..];
@@ -387,6 +407,8 @@ async fn fan_out_signal_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::memory::{MemoryStreamStore, MemoryViewerStore};
+    use serde_json::json;
 
     #[test]
     fn test_sanitize_stream_cursor_clears_only_invalid_ids() {
@@ -401,5 +423,90 @@ mod tests {
         assert_eq!(sanitized.traces.as_deref(), Some("1710000000000-1"));
         assert_eq!(sanitized.metrics, None);
         assert_eq!(sanitized.logs.as_deref(), Some("1710000000000-2"));
+    }
+
+    fn sample_definition(id: Uuid, name: &str) -> ViewerDefinition {
+        ViewerDefinition {
+            id,
+            slug: format!("slug-{name}"),
+            name: name.to_string(),
+            refresh_interval_ms: 1_000,
+            lookback_ms: 60_000,
+            signal_mask: Signal::Traces.into(),
+            definition_json: json!({ "kind": "table", "signal": "traces" }),
+            layout_json: json!({}),
+            revision: 1,
+            enabled: true,
+        }
+    }
+
+    async fn empty_runtime() -> ViewerRuntime {
+        let stream_store = StreamStore::Memory(MemoryStreamStore::new(1_000));
+        let viewer_store = ViewerStore::Memory(MemoryViewerStore::new());
+        ViewerRuntime::build(viewer_store, stream_store)
+            .await
+            .unwrap()
+    }
+
+    fn assert_index_matches_viewers(runtime: &ViewerRuntime) {
+        assert_eq!(runtime.viewer_index.len(), runtime.viewers.len());
+        for (idx, (viewer, _)) in runtime.viewers.iter().enumerate() {
+            let id = viewer.definition().id;
+            assert_eq!(runtime.viewer_index.get(&id).copied(), Some(idx));
+        }
+    }
+
+    #[tokio::test]
+    async fn viewer_index_tracks_add_and_remove() {
+        let mut runtime = empty_runtime().await;
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let c = Uuid::new_v4();
+
+        runtime.add_viewer(sample_definition(a, "a")).await.unwrap();
+        runtime.add_viewer(sample_definition(b, "b")).await.unwrap();
+        runtime.add_viewer(sample_definition(c, "c")).await.unwrap();
+        assert_index_matches_viewers(&runtime);
+
+        // Remove the middle viewer -> triggers swap_remove path.
+        runtime.remove_viewer(b);
+        assert!(runtime.get_by_id(b).is_none());
+        assert!(runtime.get_by_id(a).is_some());
+        assert!(runtime.get_by_id(c).is_some());
+        assert_index_matches_viewers(&runtime);
+
+        // Remove the last viewer (no swap needed).
+        runtime.remove_viewer(c);
+        assert_index_matches_viewers(&runtime);
+
+        // Removing an unknown id should be a no-op.
+        runtime.remove_viewer(Uuid::new_v4());
+        assert_index_matches_viewers(&runtime);
+    }
+
+    #[tokio::test]
+    async fn viewer_index_lookup_is_consistent_after_updates() {
+        let mut runtime = empty_runtime().await;
+        let a = Uuid::new_v4();
+        runtime.add_viewer(sample_definition(a, "a")).await.unwrap();
+
+        assert!(runtime.update_viewer_name(a, "renamed"));
+        let (viewer, _) = runtime.get_by_id(a).unwrap();
+        assert_eq!(viewer.definition().name, "renamed");
+
+        assert!(runtime.update_viewer_definition(
+            a,
+            json!({ "kind": "table", "signal": "traces" }),
+            json!({})
+        ));
+
+        assert!(
+            runtime
+                .rebuild_viewer(a, json!({ "kind": "table", "signal": "traces" }), json!({}))
+                .await
+                .unwrap()
+        );
+        assert_index_matches_viewers(&runtime);
+        assert!(runtime.get_by_id(a).is_some());
     }
 }
