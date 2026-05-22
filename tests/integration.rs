@@ -3627,6 +3627,169 @@ async fn test_get_dashboard_without_lookback_ms_uses_viewer_default_memory() {
     );
 }
 
+/// Given: a dashboard with a viewer that has entries
+/// When: GET /api/dashboards/{id}?lazy=1
+/// Then: panel viewer payload contains metadata (name, signals, chart_type,
+///       lookback_ms, refresh_interval_ms, etc.) but no entries/traces/buckets,
+///       and the dashboard-level `max_lookback_ms` is still computed.
+#[tokio::test]
+async fn test_get_dashboard_lazy_mode_returns_metadata_only_memory() {
+    let stream_store = MemoryStreamStore::new(100_000);
+    let viewer_store = MemoryViewerStore::new();
+
+    let def = make_viewer_def(Signal::Traces.into(), 60_000, 1);
+    viewer_store.insert_viewer_definition(&def).await.unwrap();
+
+    let mut stream_write = stream_store.clone();
+    stream_write
+        .append_entry(&make_traces_entry(10_000))
+        .await
+        .unwrap();
+    stream_write
+        .append_entry(&make_traces_entry(20_000))
+        .await
+        .unwrap();
+
+    let dashboard = DashboardDefinition {
+        id: Uuid::new_v4(),
+        slug: "lazy-mode".to_string(),
+        name: "Lazy".to_string(),
+        layout_json: json!({ "panels": [{ "viewer_id": def.id, "position": 0 }] }),
+        revision: 1,
+        enabled: true,
+    };
+    viewer_store.insert_dashboard(&dashboard).await.unwrap();
+    let dashboard_id = dashboard.id;
+
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Memory(viewer_store.clone()),
+        StreamStore::Memory(stream_store.clone()),
+    )
+    .await
+    .unwrap();
+    let runtime = Arc::new(RwLock::new(runtime));
+
+    let app = build_app_with_services(
+        StreamStore::Memory(stream_store),
+        Some(ViewerStore::Memory(viewer_store)),
+        Some(runtime),
+        None,
+    );
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/dashboards/{dashboard_id}?lazy=1"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(
+        payload["max_lookback_ms"], 60_000,
+        "lazy mode must still expose the dashboard-wide lookback ceiling"
+    );
+    let panels = payload["panels"].as_array().unwrap();
+    assert_eq!(panels.len(), 1);
+    let viewer = &panels[0]["viewer"];
+    // Metadata must be present so the browser can skeleton-render the panel.
+    assert_eq!(viewer["name"], def.name);
+    assert_eq!(viewer["chart_type"], "table");
+    assert_eq!(viewer["lookback_ms"], 60_000);
+    assert!(viewer["signals"].is_array());
+    // But the payload-heavy fields must be empty in lazy mode.
+    assert_eq!(viewer["entry_count"], 0);
+    assert!(
+        viewer["entries"].as_array().unwrap().is_empty(),
+        "lazy mode must omit per-entry rows"
+    );
+    assert!(
+        viewer
+            .get("traces")
+            .map(|t| t.as_array().map(|a| a.is_empty()).unwrap_or(true))
+            .unwrap_or(true),
+        "lazy mode must omit traces"
+    );
+    assert!(
+        viewer
+            .get("aggregated_buckets")
+            .map(|t| t.as_array().map(|a| a.is_empty()).unwrap_or(true))
+            .unwrap_or(true),
+        "lazy mode must omit aggregated buckets"
+    );
+}
+
+/// Given: a dashboard with a viewer that has entries
+/// When: GET /api/dashboards/{id} (without lazy)
+/// Then: existing behavior is preserved -- entries are populated as before.
+#[tokio::test]
+async fn test_get_dashboard_default_mode_still_includes_entries_memory() {
+    let stream_store = MemoryStreamStore::new(100_000);
+    let viewer_store = MemoryViewerStore::new();
+
+    let def = make_viewer_def(Signal::Traces.into(), 60_000, 1);
+    viewer_store.insert_viewer_definition(&def).await.unwrap();
+
+    let mut stream_write = stream_store.clone();
+    stream_write
+        .append_entry(&make_traces_entry(10_000))
+        .await
+        .unwrap();
+    stream_write
+        .append_entry(&make_traces_entry(20_000))
+        .await
+        .unwrap();
+
+    let dashboard = DashboardDefinition {
+        id: Uuid::new_v4(),
+        slug: "eager".to_string(),
+        name: "Eager".to_string(),
+        layout_json: json!({ "panels": [{ "viewer_id": def.id, "position": 0 }] }),
+        revision: 1,
+        enabled: true,
+    };
+    viewer_store.insert_dashboard(&dashboard).await.unwrap();
+    let dashboard_id = dashboard.id;
+
+    let runtime = ViewerRuntime::build(
+        ViewerStore::Memory(viewer_store.clone()),
+        StreamStore::Memory(stream_store.clone()),
+    )
+    .await
+    .unwrap();
+    let runtime = Arc::new(RwLock::new(runtime));
+
+    let app = build_app_with_services(
+        StreamStore::Memory(stream_store),
+        Some(ViewerStore::Memory(viewer_store)),
+        Some(runtime),
+        None,
+    );
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/dashboards/{dashboard_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let panels = payload["panels"].as_array().unwrap();
+    assert_eq!(panels[0]["viewer"]["entry_count"], 2);
+}
+
 #[tokio::test]
 async fn test_patch_dashboard_name_and_columns_memory() {
     let env = setup_memory_viewer_app().await;
