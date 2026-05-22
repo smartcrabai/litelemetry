@@ -6066,20 +6066,235 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         return `${kind}|${signals}|${v.name}`;
       }
 
+      // --- Lazy-load registry for dashboard panels -------------------------
+      //
+      // Panels start as skeletons; their viewer payload is fetched only when
+      // they enter the viewport (via IntersectionObserver). On refresh we
+      // re-fetch *only* the panels that are currently in view so off-screen
+      // panels keep their existing render until the user scrolls to them.
+      let dashboardLazyPanels = []; // [{ panel, panelEl, body, chart, fetchPromise, fetched, visible }]
+      let dashboardLazyObserver = null;
+      let dashboardLazyLoadSeq = 0;
+
+      function teardownDashboardLazyObserver() {
+        if (dashboardLazyObserver) {
+          try { dashboardLazyObserver.disconnect(); } catch (_) {}
+          dashboardLazyObserver = null;
+        }
+        for (const reg of dashboardLazyPanels) {
+          if (reg.chart) {
+            try { reg.chart.destroy(); } catch (_) {}
+            reg.chart = null;
+          }
+        }
+        dashboardLazyPanels = [];
+      }
+
+      function buildLazyViewerFetchUrl(viewerId) {
+        const url = new URL(`/api/viewers/${viewerId}`, window.location.origin);
+        const params = new URLSearchParams();
+        if (dashboardLookbackMs) params.set('lookback_ms', String(dashboardLookbackMs));
+        if (dashboardServiceFilter.length) params.set('service_name', dashboardServiceFilter.join(','));
+        if (dashboardQueryFilter) params.set('query', dashboardQueryFilter);
+        const qs = params.toString();
+        if (qs) url.search = qs;
+        return url.toString();
+      }
+
+      async function fetchPanelData(reg, { force = false } = {}) {
+        if (!reg || (reg.fetchPromise && !force)) return reg ? reg.fetchPromise : null;
+        const loadSeq = dashboardLazyLoadSeq;
+        const viewerId = reg.panel.viewer_id;
+        const promise = (async () => {
+          try {
+            const resp = await fetch(buildLazyViewerFetchUrl(viewerId), {
+              headers: { accept: 'application/json' },
+            });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const viewer = await resp.json();
+            // Drop if a new dashboard load has started in the meantime, or if
+            // the panel was removed from the DOM (settings update etc.).
+            if (loadSeq !== dashboardLazyLoadSeq || !reg.panelEl.isConnected) return;
+            renderPanelBody(reg, viewer);
+            reg.fetched = true;
+          } catch (err) {
+            if (loadSeq !== dashboardLazyLoadSeq || !reg.panelEl.isConnected) return;
+            renderPanelError(reg, err);
+          } finally {
+            reg.fetchPromise = null;
+          }
+        })();
+        reg.fetchPromise = promise;
+        return promise;
+      }
+
+      function renderPanelError(reg, err) {
+        if (reg.chart) {
+          try { reg.chart.destroy(); } catch (_) {}
+          reg.chart = null;
+        }
+        const body = reg.body;
+        body.replaceChildren();
+        const msg = document.createElement('p');
+        msg.className = 'dashboard-panel-empty';
+        msg.dataset.lazyState = 'error';
+        msg.textContent = `Failed to load: ${err.message || err}`;
+        body.appendChild(msg);
+      }
+
+      function renderPanelBody(reg, viewer) {
+        // Update the cached panel payload so subsequent diff updates can
+        // compare signatures against the latest viewer state.
+        reg.panel.viewer = viewer;
+        const nextSignature = computePanelSignature(reg.panel);
+        const prevSignature = reg.panelEl.dataset.panelSignature;
+        const body = reg.body;
+
+        // Diff-update path: panel was previously rendered with the same
+        // visual shape -> reuse existing chart/table DOM and only swap data.
+        // This is the PR #134 in-place update flow.
+        if (reg.fetched && prevSignature && prevSignature === nextSignature && viewer) {
+          updatePanelEl(reg.panelEl, reg.panel);
+          body.dataset.lazyState = 'loaded';
+          return;
+        }
+
+        // Full rebuild path: signature changed (or this is the first fetch
+        // for a skeleton panel). Destroy any existing chart instance and
+        // re-render from scratch with the role attributes that
+        // `updatePanelEl` depends on for future diff updates.
+        if (reg.chart) {
+          try { reg.chart.destroy(); } catch (_) {}
+          reg.chart = null;
+        }
+        // Clean up any chart that may have been registered globally for this
+        // viewer (e.g. on signature change or after a previous full rebuild).
+        const prevChart = dashboardPanelCharts.get(reg.panel.viewer_id);
+        if (prevChart) {
+          try { prevChart.destroy(); } catch (_) {}
+          dashboardPanelCharts.delete(reg.panel.viewer_id);
+        }
+        body.replaceChildren();
+        body.dataset.lazyState = 'loaded';
+        reg.panelEl.dataset.panelSignature = nextSignature;
+
+        if (!viewer) {
+          const msg = document.createElement('p');
+          msg.className = 'dashboard-panel-empty';
+          msg.textContent = 'Viewer not found.';
+          body.appendChild(msg);
+          return;
+        }
+
+        const chartType = readViewerChartType(viewer);
+        const isTraces = viewer.signals.includes('traces');
+        const supportsMetricCharts = viewerSupportsMetricCharts(viewer);
+
+        if (chartType === 'billboard' && supportsMetricCharts) {
+          const host = document.createElement('div');
+          host.classList.add('dashboard-panel-media');
+          host.dataset.role = 'panel-billboard';
+          body.appendChild(host);
+          renderBillboard(viewer.entries, viewer.lookback_ms, host, { compact: true });
+        } else if (chartType !== 'table' && supportsMetricCharts && viewer.entries.length) {
+          const canvas = document.createElement('canvas');
+          canvas.classList.add('dashboard-panel-media');
+          canvas.dataset.role = 'panel-canvas';
+          body.appendChild(canvas);
+          const chart = renderPanelChart(chartType, viewer.entries, viewer.lookback_ms, canvas);
+          if (chart) {
+            reg.chart = chart;
+            dashboardPanelCharts.set(reg.panel.viewer_id, chart);
+          }
+        } else if (isTraces && viewer.traces && viewer.traces.length) {
+          renderPanelTraceTable(body, viewer.traces);
+        } else {
+          renderPanelEntriesTable(body, viewer.entries);
+        }
+      }
+
+      function ensureDashboardLazyObserver() {
+        if (dashboardLazyObserver || typeof IntersectionObserver === 'undefined') {
+          return dashboardLazyObserver;
+        }
+        dashboardLazyObserver = new IntersectionObserver((entries) => {
+          for (const entry of entries) {
+            const reg = dashboardLazyPanels.find(r => r.panelEl === entry.target);
+            if (!reg) continue;
+            reg.visible = entry.isIntersecting;
+            if (entry.isIntersecting && !reg.fetched && !reg.fetchPromise) {
+              fetchPanelData(reg);
+            }
+          }
+        }, { rootMargin: '200px 0px' });
+        return dashboardLazyObserver;
+      }
+
+      function refreshVisibleDashboardPanels() {
+        for (const reg of dashboardLazyPanels) {
+          if (reg.visible) {
+            fetchPanelData(reg, { force: true });
+          }
+        }
+      }
+
       async function loadDashboard(id, { refresh = false } = {}) {
         const seq = ++dashboardLoadRequestSeq;
 
-        if (!refresh) {
-          destroyPanelCharts();
-          dashboardGrid.replaceChildren();
-          dashboardTitle.textContent = 'Loading...';
-          dashboardSettingsButton.hidden = true;
-          dashboardFullscreenButton.hidden = true;
+        if (refresh) {
+          // Refresh path: re-fetch only the panels currently in viewport
+          // without rebuilding the grid. The dashboard meta still needs a
+          // round-trip in case the panel layout itself changed.
+          try {
+            const url = new URL(`/api/dashboards/${id}`, window.location.origin);
+            const params = new URLSearchParams();
+            params.set('lazy', '1');
+            if (dashboardLookbackMs) params.set('lookback_ms', String(dashboardLookbackMs));
+            if (dashboardServiceFilter.length) params.set('service_name', dashboardServiceFilter.join(','));
+            if (dashboardQueryFilter) params.set('query', dashboardQueryFilter);
+            url.search = params.toString();
+            const resp = await fetch(url.toString(), { headers: { accept: 'application/json' } });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const data = await resp.json();
+            if (seq !== dashboardLoadRequestSeq || currentDashboardId !== id) return false;
+            dashboardMaxLookbackMs = data.max_lookback_ms ?? null;
+            syncDashboardRangeControls();
+
+            // If the set of panel viewer_ids changed, fall through to a full rebuild.
+            const incomingIds = data.panels
+              .slice()
+              .sort((a, b) => a.position - b.position)
+              .map(p => p.viewer_id)
+              .join(',');
+            const currentIds = dashboardLazyPanels.map(r => r.panel.viewer_id).join(',');
+            if (incomingIds !== currentIds) {
+              // Layout changed; rebuild from scratch.
+              return loadDashboard(id, { refresh: false });
+            }
+
+            refreshVisibleDashboardPanels();
+            setDashboardLastUpdated(new Date());
+            updateDashboardRefreshControls();
+            return true;
+          } catch (err) {
+            if (seq !== dashboardLoadRequestSeq || currentDashboardId !== id) return false;
+            // Silent on refresh errors -- the next tick will retry.
+            return false;
+          }
         }
+
+        // Full (non-refresh) load: skeleton the grid, then lazy-fetch each panel.
+        destroyPanelCharts();
+        teardownDashboardLazyObserver();
+        dashboardGrid.replaceChildren();
+        dashboardTitle.textContent = 'Loading...';
+        dashboardSettingsButton.hidden = true;
+        dashboardFullscreenButton.hidden = true;
 
         try {
           const url = new URL(`/api/dashboards/${id}`, window.location.origin);
           const params = new URLSearchParams();
+          params.set('lazy', '1');
           if (dashboardLookbackMs) params.set('lookback_ms', String(dashboardLookbackMs));
           if (dashboardServiceFilter.length) params.set('service_name', dashboardServiceFilter.join(','));
           if (dashboardQueryFilter) params.set('query', dashboardQueryFilter);
@@ -6097,64 +6312,36 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           const sorted = [...data.panels].sort((a, b) => a.position - b.position);
           const columns = readDashboardColumns(data.columns);
 
+          // Bump the lazy-load seq so any in-flight fetches from the previous load are dropped.
+          dashboardLazyLoadSeq++;
           dashboardTitle.textContent = data.name;
           dashboardSettingsButton.hidden = false;
           dashboardFullscreenButton.hidden = false;
           dashboardGrid.style.setProperty('--dash-cols', String(columns));
 
-          // Diff existing DOM against the new panel list. We index existing
-          // children by viewer_id (placeholder/empty/error nodes are ignored
-          // and dropped). Empty-state and error placeholders use the
-          // `data-dashboard-placeholder` attribute so they are also discarded.
-          const existingByViewerId = new Map();
-          const leftovers = [];
-          for (const child of Array.from(dashboardGrid.children)) {
-            const vid = child.dataset ? child.dataset.viewerId : null;
-            if (vid && !existingByViewerId.has(vid)) {
-              existingByViewerId.set(vid, child);
-            } else {
-              leftovers.push(child);
-            }
-          }
-          for (const node of leftovers) {
-            node.remove();
-          }
+          // Full-rebuild path: the grid was cleared above. We rebuild every
+          // panel as a skeleton and register it with the lazy-load observer.
+          // The in-place diff/update logic (PR #134) is used by the
+          // refresh path (`refreshVisibleDashboardPanels`) so that visible
+          // panels are updated without re-creating their chart instances.
+          const observer = ensureDashboardLazyObserver();
 
-          const newViewerIds = new Set(sorted.map(p => p.viewer_id));
-          for (const [vid, node] of existingByViewerId) {
-            if (!newViewerIds.has(vid)) {
-              const chart = dashboardPanelCharts.get(vid);
-              if (chart) {
-                try { chart.destroy(); } catch (_) {}
-                dashboardPanelCharts.delete(vid);
-              }
-              node.remove();
-              existingByViewerId.delete(vid);
-            }
-          }
-
-          // Walk the sorted panels and either update-in-place or build a new
-          // panel element. Reordering is handled by appendChild, which moves
-          // existing nodes rather than duplicating them.
           for (const panel of sorted) {
-            const existing = existingByViewerId.get(panel.viewer_id);
-            const nextSignature = computePanelSignature(panel);
-            let node;
-            if (existing && existing.dataset.panelSignature === nextSignature) {
-              updatePanelEl(existing, panel);
-              node = existing;
+            const { el: panelEl, body, reg } = buildPanelEl(panel);
+            dashboardGrid.appendChild(panelEl);
+            dashboardLazyPanels.push(reg);
+            if (observer) {
+              observer.observe(panelEl);
             } else {
-              if (existing) {
-                const chart = dashboardPanelCharts.get(panel.viewer_id);
-                if (chart) {
-                  try { chart.destroy(); } catch (_) {}
-                  dashboardPanelCharts.delete(panel.viewer_id);
-                }
-                existing.remove();
-              }
-              node = buildPanelEl(panel);
+              // Fallback for environments without IntersectionObserver:
+              // eagerly fetch every panel so the dashboard still works.
+              fetchPanelData(reg);
             }
-            dashboardGrid.appendChild(node);
+            // No-viewer (deleted/missing) panels render their final state up-front;
+            // skip observing them since there's nothing to lazy-fetch.
+            if (!panel.viewer && observer) {
+              observer.unobserve(panelEl);
+            }
           }
 
           if (!sorted.length) {
@@ -6201,18 +6388,24 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         return false;
       }
 
-      // Build a fresh panel DOM node, including chart canvas / billboard host
-      // / data table. Returned node carries `data-viewer-id` and
-      // `data-panel-signature` so subsequent refreshes can update it in place.
+      // Builds the panel shell with title + skeleton body. The body is filled
+      // in lazily by `fetchPanelData` once the panel scrolls into view.
+      // Returns `{ el, body, reg }` so callers can register the lazy-load entry.
+      // The element carries `data-viewer-id` and `data-panel-signature` so
+      // subsequent refreshes can update it in place via `updatePanelEl`.
       function buildPanelEl(panel) {
         const div = document.createElement('div');
         div.className = 'dashboard-panel';
         div.dataset.viewerId = panel.viewer_id;
         div.dataset.panelSignature = computePanelSignature(panel);
+        div.dataset.lazyPanel = '1';
 
         const title = document.createElement('h4');
         title.className = 'dashboard-panel-title';
         title.dataset.role = 'panel-title';
+
+        const body = document.createElement('div');
+        body.className = 'dashboard-panel-body';
 
         if (!panel.viewer) {
           title.textContent = truncateId(panel.viewer_id);
@@ -6221,13 +6414,25 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
           msg.className = 'dashboard-panel-empty';
           msg.dataset.role = 'panel-missing-msg';
           msg.textContent = 'Viewer not found.';
-          div.appendChild(msg);
-          return div;
+          body.appendChild(msg);
+          div.appendChild(body);
+          // Even for a missing viewer we return a `reg` entry so refresh logic
+          // can treat the panel uniformly, but mark it as already-fetched.
+          const reg = { panel, panelEl: div, body, chart: null, fetchPromise: null, fetched: true, visible: false };
+          return { el: div, body, reg };
         }
 
         const v = panel.viewer;
         title.textContent = v.name;
         div.appendChild(title);
+        div.appendChild(body);
+
+        // Initial skeleton state: lightweight "Loading..." placeholder.
+        const skeleton = document.createElement('p');
+        skeleton.className = 'dashboard-panel-empty';
+        skeleton.dataset.lazyState = 'pending';
+        skeleton.textContent = 'Loading...';
+        body.appendChild(skeleton);
 
         div.style.cursor = 'pointer';
         div.setAttribute('role', 'button');
@@ -6248,30 +6453,16 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         div.addEventListener('click', handlePanelClick);
         div.addEventListener('keydown', handlePanelKeydown);
 
-        const chartType = readViewerChartType(v);
-        const isTraces = v.signals.includes('traces');
-        const supportsMetricCharts = viewerSupportsMetricCharts(v);
-
-        if (chartType === 'billboard' && supportsMetricCharts) {
-          const host = document.createElement('div');
-          host.classList.add('dashboard-panel-media');
-          host.dataset.role = 'panel-billboard';
-          div.appendChild(host);
-          renderBillboard(v.entries, v.lookback_ms, host, { compact: true });
-        } else if (chartType !== 'table' && supportsMetricCharts && v.entries.length) {
-          const canvas = document.createElement('canvas');
-          canvas.classList.add('dashboard-panel-media');
-          canvas.dataset.role = 'panel-canvas';
-          div.appendChild(canvas);
-          const chart = renderPanelChart(chartType, v.entries, v.lookback_ms, canvas);
-          if (chart) dashboardPanelCharts.set(panel.viewer_id, chart);
-        } else if (isTraces && v.traces && v.traces.length) {
-          renderPanelTraceTable(div, v.traces);
-        } else {
-          renderPanelEntriesTable(div, v.entries);
-        }
-
-        return div;
+        const reg = {
+          panel,
+          panelEl: div,
+          body,
+          chart: null,
+          fetchPromise: null,
+          fetched: false,
+          visible: false,
+        };
+        return { el: div, body, reg };
       }
 
       // Update an existing panel DOM node whose signature matches the incoming
@@ -6286,6 +6477,11 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         // viewer name, so this is mostly a no-op).
         const title = existing.querySelector('[data-role="panel-title"]');
         if (title) title.textContent = v.name;
+
+        // The trace/entries tables live inside the panel body (.dashboard-panel-body)
+        // when produced by the lazy-load path; fall back to `existing` for legacy
+        // panels that don't wrap content in a body element.
+        const bodyContainer = existing.querySelector('.dashboard-panel-body') || existing;
 
         const chartType = readViewerChartType(v);
         const isTraces = v.signals.includes('traces');
@@ -6337,17 +6533,17 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
 
         if (isTraces && v.traces && v.traces.length) {
           // Replace the scrollable table region in-place.
-          const scroll = existing.querySelector('.dashboard-panel-scroll');
+          const scroll = bodyContainer.querySelector('.dashboard-panel-scroll');
           if (scroll) scroll.remove();
-          renderPanelTraceTable(existing, v.traces);
+          renderPanelTraceTable(bodyContainer, v.traces);
           return;
         }
 
-        const scroll = existing.querySelector('.dashboard-panel-scroll');
-        const emptyMsg = existing.querySelector('p.dashboard-panel-empty');
+        const scroll = bodyContainer.querySelector('.dashboard-panel-scroll');
+        const emptyMsg = bodyContainer.querySelector('p.dashboard-panel-empty');
         if (scroll) scroll.remove();
         if (emptyMsg) emptyMsg.remove();
-        renderPanelEntriesTable(existing, v.entries);
+        renderPanelEntriesTable(bodyContainer, v.entries);
       }
 
       function renderPanelChart(chartType, entries, lookbackMs, canvas) {
@@ -8315,22 +8511,82 @@ async fn index() -> Html<&'static str> {
 async fn get_viewer(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    Query(query): Query<DashboardFilterQuery>,
 ) -> Result<Json<ViewerSummary>, StatusCode> {
+    let lookback_override = if let Some(ms) = query.lookback_ms {
+        if ms <= 0 {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        Some(ms)
+    } else {
+        None
+    };
+    let global_service_names = query.parse_service_names();
+    let global_query = query.parse_query();
+    let has_filters = !global_service_names.is_empty() || global_query.is_some();
+    let has_overrides = lookback_override.is_some() || has_filters;
+
     let runtime = state.require_viewer_runtime()?.read().await;
 
     let (viewer, viewer_state) = runtime.get_by_id(id).ok_or(StatusCode::NOT_FOUND)?;
-    let mut summary = viewer_summary(
-        viewer,
-        &viewer_state.entries,
-        &viewer_state.status,
-        viewer.lookback_ms(),
-        EntriesMode::Full,
-        &viewer_state.aggregated_buckets,
-    )
-    .map_err(|error| {
-        tracing::error!("viewer {id}: {error}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+
+    if let Some(ms) = lookback_override
+        && ms > viewer.lookback_ms()
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let mut summary = if has_overrides {
+        // Build the slice through ViewerRuntime so lookback overrides and
+        // dashboard-global filters apply consistently with `/api/dashboards/{id}`.
+        let now = chrono::Utc::now();
+        let slice = runtime
+            .get_dashboard_viewer(&id, lookback_override, now)
+            .ok_or(StatusCode::NOT_FOUND)?;
+        let filtered: Vec<NormalizedEntry>;
+        let effective_entries: &[NormalizedEntry] = if has_filters {
+            filtered = slice
+                .entries
+                .iter()
+                .filter(|e| {
+                    matches_dashboard_global_filter(
+                        e,
+                        &global_service_names,
+                        global_query.as_deref(),
+                    )
+                })
+                .cloned()
+                .collect();
+            &filtered
+        } else {
+            slice.entries
+        };
+        viewer_summary(
+            slice.viewer,
+            effective_entries,
+            slice.status,
+            slice.effective_lookback_ms,
+            EntriesMode::Full,
+            slice.aggregated_buckets,
+        )
+        .map_err(|error| {
+            tracing::error!("viewer {id}: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+    } else {
+        viewer_summary(
+            viewer,
+            &viewer_state.entries,
+            &viewer_state.status,
+            viewer.lookback_ms(),
+            EntriesMode::Full,
+            &viewer_state.aggregated_buckets,
+        )
+        .map_err(|error| {
+            tracing::error!("viewer {id}: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+    };
 
     // Opportunistically attach exemplars for metric viewers. Failures stay non-fatal --
     // the field stays empty.
@@ -9595,6 +9851,11 @@ struct DashboardFilterQuery {
     lookback_ms: Option<i64>,
     service_name: Option<String>,
     query: Option<String>,
+    /// When `lazy=1` (or any truthy value), the dashboard endpoint returns
+    /// viewer metadata only (no `entries` / `traces` / `aggregated_buckets` /
+    /// `exemplars`). The browser then lazily fetches each panel's full payload
+    /// via `/api/viewers/{id}` as the panel enters the viewport.
+    lazy: Option<String>,
 }
 
 impl DashboardFilterQuery {
@@ -9616,6 +9877,16 @@ impl DashboardFilterQuery {
             .as_ref()
             .map(|q| q.trim().to_lowercase())
             .filter(|q| !q.is_empty())
+    }
+
+    fn is_lazy(&self) -> bool {
+        match self.lazy.as_deref() {
+            Some(v) => {
+                let v = v.trim().to_ascii_lowercase();
+                matches!(v.as_str(), "1" | "true" | "yes" | "on")
+            }
+            None => false,
+        }
     }
 }
 
@@ -9663,6 +9934,7 @@ async fn get_dashboard(
 
     let global_service_names = query.parse_service_names();
     let global_query = query.parse_query();
+    let lazy = query.is_lazy();
 
     let store = state.require_viewer_store()?;
 
@@ -9703,42 +9975,55 @@ async fn get_dashboard(
         let mut panels = Vec::with_capacity(panel_entries.len());
 
         for entry in panel_entries {
-            let viewer = rt
-                .get_dashboard_viewer(&entry.viewer_id, lookback_override, now)
-                .map(|slice| {
-                    let filtered: Vec<NormalizedEntry>;
-                    let effective_entries: &[NormalizedEntry] =
-                        if global_service_names.is_empty() && global_query.is_none() {
-                            slice.entries
-                        } else {
-                            filtered = slice
-                                .entries
-                                .iter()
-                                .filter(|e| {
-                                    matches_dashboard_global_filter(
-                                        e,
-                                        &global_service_names,
-                                        global_query.as_deref(),
-                                    )
-                                })
-                                .cloned()
-                                .collect();
-                            &filtered
-                        };
-                    viewer_summary(
-                        slice.viewer,
-                        effective_entries,
-                        slice.status,
-                        slice.effective_lookback_ms,
-                        EntriesMode::DashboardSlim,
-                        slice.aggregated_buckets,
-                    )
-                })
-                .transpose()
-                .map_err(|error| {
-                    tracing::error!("viewer {}: {error}", entry.viewer_id);
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?;
+            let viewer = if lazy {
+                // Lazy mode: only return viewer metadata so the browser can
+                // skeleton-render panels immediately. The actual entries /
+                // traces / aggregated_buckets are fetched per-panel via
+                // /api/viewers/{id} when the panel enters the viewport.
+                rt.get_by_id(entry.viewer_id)
+                    .map(|(viewer, state)| viewer_summary_metadata_only(viewer, &state.status))
+                    .transpose()
+                    .map_err(|error| {
+                        tracing::error!("viewer {}: {error}", entry.viewer_id);
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?
+            } else {
+                rt.get_dashboard_viewer(&entry.viewer_id, lookback_override, now)
+                    .map(|slice| {
+                        let filtered: Vec<NormalizedEntry>;
+                        let effective_entries: &[NormalizedEntry] =
+                            if global_service_names.is_empty() && global_query.is_none() {
+                                slice.entries
+                            } else {
+                                filtered = slice
+                                    .entries
+                                    .iter()
+                                    .filter(|e| {
+                                        matches_dashboard_global_filter(
+                                            e,
+                                            &global_service_names,
+                                            global_query.as_deref(),
+                                        )
+                                    })
+                                    .cloned()
+                                    .collect();
+                                &filtered
+                            };
+                        viewer_summary(
+                            slice.viewer,
+                            effective_entries,
+                            slice.status,
+                            slice.effective_lookback_ms,
+                            EntriesMode::DashboardSlim,
+                            slice.aggregated_buckets,
+                        )
+                    })
+                    .transpose()
+                    .map_err(|error| {
+                        tracing::error!("viewer {}: {error}", entry.viewer_id);
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?
+            };
             panels.push(DashboardPanel {
                 viewer_id: entry.viewer_id,
                 position: entry.position,
@@ -11001,6 +11286,54 @@ fn viewer_summary(
         },
         aggregated_buckets: aggregated_buckets.to_vec(),
         // populated by callers that have access to trace entries from other viewers
+        exemplars: Vec::new(),
+    })
+}
+
+/// Build a [`ViewerSummary`] that contains only metadata (name, signals,
+/// chart_type, lookback, filters, query, aggregation, refresh_interval). The
+/// per-entry payload fields (`entries`, `traces`, `aggregated_buckets`,
+/// `exemplars`) are intentionally left empty so the response stays cheap.
+///
+/// Used by `GET /api/dashboards/{id}?lazy=1` to let the browser render panel
+/// skeletons immediately and lazy-fetch each panel's data via
+/// `/api/viewers/{id}` once it scrolls into view.
+fn viewer_summary_metadata_only(
+    viewer: &CompiledViewer,
+    status: &ViewerStatus,
+) -> Result<ViewerSummary, &'static str> {
+    let definition = viewer.definition();
+    let chart_type = chart_type_from_definition(&definition.definition_json)?.to_string();
+    let query = definition
+        .definition_json
+        .get("query")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let filters = definition.definition_json.get("filters").cloned();
+    let filter_mode = definition
+        .definition_json
+        .get("filter_mode")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let aggregation = definition.definition_json.get("aggregation").cloned();
+
+    Ok(ViewerSummary {
+        id: definition.id,
+        slug: definition.slug.clone(),
+        name: definition.name.clone(),
+        signals: signal_mask_labels(definition.signal_mask),
+        chart_type,
+        query,
+        filters,
+        filter_mode,
+        aggregation,
+        refresh_interval_ms: definition.refresh_interval_ms,
+        lookback_ms: viewer.lookback_ms(),
+        entry_count: 0,
+        status: status.clone(),
+        entries: Vec::new(),
+        traces: Vec::new(),
+        aggregated_buckets: Vec::new(),
         exemplars: Vec::new(),
     })
 }
