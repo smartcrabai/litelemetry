@@ -12,6 +12,7 @@ use crate::viewer_runtime::state::{StreamCursor, ViewerState};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap};
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -21,6 +22,77 @@ pub enum RuntimeError {
     Storage(#[from] StorageError),
     #[error("compile error: {0}")]
     Compile(#[from] CompileError),
+}
+
+/// Quiet ticks emit `tick_ms` at debug; ticks above this threshold escalate to info.
+/// Polling tick latency is the primary suspect for read-lock starvation, so anything
+/// over ~half a second is worth surfacing without users having to flip log levels.
+const APPLY_DIFF_BATCH_INFO_THRESHOLD_MS: u64 = 500;
+
+/// RAII guard that emits one structured log line per `apply_diff_batch` call,
+/// regardless of whether the function returns Ok or propagates an error via `?`.
+/// Each field is populated as the function progresses; on early-return paths
+/// `outcome` stays `"error"` and partial timings are still reported.
+struct ApplyDiffBatchMetrics {
+    tick_start: Instant,
+    redis_elapsed: Duration,
+    fan_out_cpu_elapsed: Duration,
+    aggregation_elapsed: Duration,
+    snapshot_elapsed: Duration,
+    snapshots_upserted: usize,
+    viewer_count: usize,
+    outcome: &'static str,
+}
+
+impl ApplyDiffBatchMetrics {
+    fn new() -> Self {
+        Self {
+            tick_start: Instant::now(),
+            redis_elapsed: Duration::ZERO,
+            fan_out_cpu_elapsed: Duration::ZERO,
+            aggregation_elapsed: Duration::ZERO,
+            snapshot_elapsed: Duration::ZERO,
+            snapshots_upserted: 0,
+            viewer_count: 0,
+            outcome: "error",
+        }
+    }
+}
+
+impl Drop for ApplyDiffBatchMetrics {
+    fn drop(&mut self) {
+        let tick_ms = self.tick_start.elapsed().as_millis() as u64;
+        let redis_ms = self.redis_elapsed.as_millis() as u64;
+        let fan_out_cpu_ms = self.fan_out_cpu_elapsed.as_millis() as u64;
+        let aggregation_ms = self.aggregation_elapsed.as_millis() as u64;
+        let snapshot_ms = self.snapshot_elapsed.as_millis() as u64;
+        // Errors always escalate so failures aren't silently buried at debug.
+        if tick_ms >= APPLY_DIFF_BATCH_INFO_THRESHOLD_MS || self.outcome != "ok" {
+            tracing::info!(
+                tick_ms,
+                redis_ms,
+                fan_out_cpu_ms,
+                aggregation_ms,
+                snapshot_ms,
+                snapshots_upserted = self.snapshots_upserted,
+                viewer_count = self.viewer_count,
+                outcome = self.outcome,
+                "apply_diff_batch"
+            );
+        } else {
+            tracing::debug!(
+                tick_ms,
+                redis_ms,
+                fan_out_cpu_ms,
+                aggregation_ms,
+                snapshot_ms,
+                snapshots_upserted = self.snapshots_upserted,
+                viewer_count = self.viewer_count,
+                outcome = self.outcome,
+                "apply_diff_batch"
+            );
+        }
+    }
 }
 
 /// In-memory runtime for viewers.
@@ -108,10 +180,12 @@ impl ViewerRuntime {
             viewers.push((viewer, state));
         }
 
-        // Read the stream once per signal and fan out to all viewers
+        // Read the stream once per signal and fan out to all viewers.
+        // Drain stats are discarded -- this path only runs at startup and has no
+        // tick-level summary log to fold the timings into.
         let now = Utc::now();
         for signal in Signal::all() {
-            fan_out_signal_entries(&mut viewers, &mut stream_store, signal, now).await?;
+            let _ = fan_out_signal_entries(&mut viewers, &mut stream_store, signal, now).await?;
         }
 
         // Prune entries that exceed the lookback window, then recompute aggregations
@@ -140,6 +214,7 @@ impl ViewerRuntime {
     /// Upserts snapshots to the store after updating.
     pub async fn apply_diff_batch(&mut self) -> Result<(), RuntimeError> {
         let now = Utc::now();
+        let mut metrics = ApplyDiffBatchMetrics::new();
 
         // Capture cursor state beforehand to detect changes
         let prev_cursors: Vec<StreamCursor> = self
@@ -148,17 +223,25 @@ impl ViewerRuntime {
             .map(|(_, s)| s.last_cursor.clone())
             .collect();
 
+        let mut drain_total = DrainStats::default();
         for signal in Signal::all() {
-            fan_out_signal_entries(&mut self.viewers, &mut self.stream_store, signal, now).await?;
+            drain_total +=
+                fan_out_signal_entries(&mut self.viewers, &mut self.stream_store, signal, now)
+                    .await?;
         }
+        metrics.redis_elapsed = drain_total.redis_elapsed;
+        metrics.fan_out_cpu_elapsed = drain_total.cpu_elapsed;
 
         // Prune entries that exceed the lookback window, then recompute aggregations
+        let aggregation_start = Instant::now();
         for (viewer, state) in &mut self.viewers {
             prune_stale_buckets(state, viewer.lookback_ms(), now);
             recompute_aggregation(state, viewer);
         }
+        metrics.aggregation_elapsed = aggregation_start.elapsed();
 
         // Upsert snapshots only for viewers whose cursor advanced (failures are retried in the next batch)
+        let snapshot_start = Instant::now();
         for (i, (_, state)) in self.viewers.iter().enumerate() {
             if state.last_cursor == prev_cursors[i] {
                 continue;
@@ -171,10 +254,16 @@ impl ViewerRuntime {
                 status: state.status.clone(),
                 generated_at: now,
             };
-            if let Err(e) = self.viewer_store.upsert_snapshot(&snapshot).await {
-                tracing::error!("viewer {}: snapshot upsert failed: {e}", state.viewer_id);
+            match self.viewer_store.upsert_snapshot(&snapshot).await {
+                Ok(()) => metrics.snapshots_upserted += 1,
+                Err(e) => {
+                    tracing::error!("viewer {}: snapshot upsert failed: {e}", state.viewer_id);
+                }
             }
         }
+        metrics.snapshot_elapsed = snapshot_start.elapsed();
+        metrics.viewer_count = self.viewers.len();
+        metrics.outcome = "ok";
 
         Ok(())
     }
@@ -357,6 +446,24 @@ pub(crate) const MAX_ENTRIES_PER_FAN_OUT_CALL: usize = 100_000;
 #[cfg(test)]
 pub(crate) const MAX_ENTRIES_PER_FAN_OUT_CALL: usize = 50;
 
+/// Time accounting collected while draining a Redis stream.
+///
+/// `redis_elapsed` covers only the `read_entries_since` awaits; `cpu_elapsed`
+/// covers the per-chunk `apply` callback dispatch. Bookkeeping between chunks
+/// (cursor updates, consumed counter) is negligible and left out of both.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct DrainStats {
+    pub redis_elapsed: Duration,
+    pub cpu_elapsed: Duration,
+}
+
+impl std::ops::AddAssign for DrainStats {
+    fn add_assign(&mut self, other: Self) {
+        self.redis_elapsed += other.redis_elapsed;
+        self.cpu_elapsed += other.cpu_elapsed;
+    }
+}
+
 /// Drains `signal`'s stream from `start_cursor` in `STREAM_READ_CHUNK_SIZE` chunks,
 /// invoking `apply` on every entry.
 ///
@@ -374,12 +481,13 @@ async fn drain_signal_entries<F>(
     start_cursor: Option<String>,
     max_total: Option<usize>,
     mut apply: F,
-) -> Result<(), RuntimeError>
+) -> Result<DrainStats, RuntimeError>
 where
     F: FnMut(String, NormalizedEntry),
 {
     let mut cursor = start_cursor;
     let mut consumed: usize = 0;
+    let mut stats = DrainStats::default();
     loop {
         let chunk_count = match max_total {
             Some(max) => {
@@ -390,19 +498,25 @@ where
             }
             None => STREAM_READ_CHUNK_SIZE,
         };
+        let redis_start = Instant::now();
         let entries = stream_store
             .read_entries_since(signal, cursor.as_deref(), chunk_count)
             .await?;
+        stats.redis_elapsed += redis_start.elapsed();
         if entries.is_empty() {
             break;
         }
+        // Measure CPU work for the whole chunk so the per-entry overhead of
+        // calling `Instant::now()` does not show up in the reported `cpu_elapsed`.
+        let cpu_start = Instant::now();
         for (entry_id, entry) in entries {
             consumed += 1;
             cursor = Some(entry_id.clone());
             apply(entry_id, entry);
         }
+        stats.cpu_elapsed += cpu_start.elapsed();
     }
-    Ok(())
+    Ok(stats)
 }
 
 /// Returns `true` when an entry observed at `observed_at` is already older than the
@@ -424,7 +538,10 @@ async fn populate_state_from_stream(
         if !viewer.matches_signal(signal) {
             continue;
         }
-        drain_signal_entries(stream_store, signal, None, None, |entry_id, entry| {
+        // Drain stats are discarded here -- this path runs during initialization
+        // and add_viewer/rebuild_viewer, where there is no tick-level summary log
+        // to fold the timings into.
+        let _ = drain_signal_entries(stream_store, signal, None, None, |entry_id, entry| {
             // Skip entries already outside lookback so state.entries does not balloon
             // when the stream history far exceeds lookback. The cursor still advances
             // so the next call resumes past these entries.
@@ -452,9 +569,9 @@ async fn fan_out_signal_entries(
     stream_store: &mut StreamStore,
     signal: Signal,
     now: DateTime<Utc>,
-) -> Result<(), RuntimeError> {
+) -> Result<DrainStats, RuntimeError> {
     if !viewers.iter().any(|(v, _)| v.matches_signal(signal)) {
-        return Ok(());
+        return Ok(DrainStats::default());
     }
 
     // Use the oldest cursor among all viewers (= the one requiring the most entries to be read).
