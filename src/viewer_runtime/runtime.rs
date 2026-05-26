@@ -111,7 +111,7 @@ impl ViewerRuntime {
         // Read the stream once per signal and fan out to all viewers
         let now = Utc::now();
         for signal in Signal::all() {
-            fan_out_signal_entries(&mut viewers, &mut stream_store, signal).await?;
+            fan_out_signal_entries(&mut viewers, &mut stream_store, signal, now).await?;
         }
 
         // Prune entries that exceed the lookback window, then recompute aggregations
@@ -149,7 +149,7 @@ impl ViewerRuntime {
             .collect();
 
         for signal in Signal::all() {
-            fan_out_signal_entries(&mut self.viewers, &mut self.stream_store, signal).await?;
+            fan_out_signal_entries(&mut self.viewers, &mut self.stream_store, signal, now).await?;
         }
 
         // Prune entries that exceed the lookback window, then recompute aggregations
@@ -331,6 +331,86 @@ pub struct DashboardViewerSlice<'a> {
     pub aggregated_buckets: &'a [crate::viewer_runtime::aggregator::Bucket],
 }
 
+/// Maximum number of entries fetched in a single XREAD when catching up the stream.
+///
+/// Streams can hold entries with multi-hundred-KB payloads, so a single XREAD that grabs
+/// e.g. 100_000 entries can produce a multi-GB response and trip Redis/Dragonfly response
+/// timeouts or output buffer limits. We instead read in bounded chunks and loop until the
+/// stream is drained, so each round-trip stays comfortably within client/server limits.
+#[cfg(not(test))]
+pub(crate) const STREAM_READ_CHUNK_SIZE: usize = 500;
+/// Tests use a small chunk size so any single-shot regression in the chunked loop is
+/// detected — production-size data inserted with this smaller chunk forces multiple
+/// XREAD iterations.
+#[cfg(test)]
+pub(crate) const STREAM_READ_CHUNK_SIZE: usize = 17;
+
+/// Upper bound on the total entries `fan_out_signal_entries` consumes in a single call.
+///
+/// `apply_diff_batch` holds the runtime write lock while calling fan-out, and producers
+/// may sustain XADD rates that match the chunked drain rate. Without an upper bound the
+/// drain loop can either (a) hold the lock for minutes while catching up a large backlog,
+/// or (b) never terminate when ingest ≥ drain. Catching up more than this many entries
+/// per signal is intentionally spread across multiple polling ticks.
+#[cfg(not(test))]
+pub(crate) const MAX_ENTRIES_PER_FAN_OUT_CALL: usize = 100_000;
+#[cfg(test)]
+pub(crate) const MAX_ENTRIES_PER_FAN_OUT_CALL: usize = 50;
+
+/// Drains `signal`'s stream from `start_cursor` in `STREAM_READ_CHUNK_SIZE` chunks,
+/// invoking `apply` on every entry.
+///
+/// Termination conditions:
+/// - the next XREAD returns an empty batch (stream is exhausted), or
+/// - the optional `max_total` cap is reached.
+///
+/// Importantly, the loop does NOT terminate on a "short read" (`entries.len() < chunk`):
+/// `parse_xread_reply` silently drops malformed entries, so a short read does not imply
+/// the stream is exhausted. Using `is_empty()` as the only termination signal keeps the
+/// loop correct in the face of skipped entries.
+async fn drain_signal_entries<F>(
+    stream_store: &mut StreamStore,
+    signal: Signal,
+    start_cursor: Option<String>,
+    max_total: Option<usize>,
+    mut apply: F,
+) -> Result<(), RuntimeError>
+where
+    F: FnMut(String, NormalizedEntry),
+{
+    let mut cursor = start_cursor;
+    let mut consumed: usize = 0;
+    loop {
+        let chunk_count = match max_total {
+            Some(max) => {
+                if consumed >= max {
+                    break;
+                }
+                (max - consumed).min(STREAM_READ_CHUNK_SIZE)
+            }
+            None => STREAM_READ_CHUNK_SIZE,
+        };
+        let entries = stream_store
+            .read_entries_since(signal, cursor.as_deref(), chunk_count)
+            .await?;
+        if entries.is_empty() {
+            break;
+        }
+        for (entry_id, entry) in entries {
+            consumed += 1;
+            cursor = Some(entry_id.clone());
+            apply(entry_id, entry);
+        }
+    }
+    Ok(())
+}
+
+/// Returns `true` when an entry observed at `observed_at` is already older than the
+/// viewer's lookback window and would be pruned away immediately after being applied.
+fn is_outside_lookback(now: DateTime<Utc>, observed_at: DateTime<Utc>, lookback_ms: i64) -> bool {
+    (now - observed_at).num_milliseconds() > lookback_ms
+}
+
 /// Scans the stream for all signals the viewer cares about, applies matching entries to
 /// `state`, and prunes stale buckets.  Used by both `add_viewer` and `rebuild_viewer`.
 async fn populate_state_from_stream(
@@ -339,28 +419,39 @@ async fn populate_state_from_stream(
     state: &mut ViewerState,
 ) -> Result<(), RuntimeError> {
     let now = Utc::now();
+    let lookback_ms = viewer.lookback_ms();
     for signal in Signal::all() {
         if !viewer.matches_signal(signal) {
             continue;
         }
-        let entries = stream_store
-            .read_entries_since(signal, None, 100_000)
-            .await?;
-        for (entry_id, entry) in entries {
+        drain_signal_entries(stream_store, signal, None, None, |entry_id, entry| {
+            // Skip entries already outside lookback so state.entries does not balloon
+            // when the stream history far exceeds lookback. The cursor still advances
+            // so the next call resumes past these entries.
+            if is_outside_lookback(now, entry.observed_at, lookback_ms) {
+                state.last_cursor.set(signal, entry_id);
+                return;
+            }
             apply_entry(state, viewer, entry);
             state.last_cursor.set(signal, entry_id);
-        }
+        })
+        .await?;
     }
-    prune_stale_buckets(state, viewer.lookback_ms(), now);
+    // Re-capture `now` for prune — the drain loop above may have run for a while.
+    prune_stale_buckets(state, lookback_ms, Utc::now());
     recompute_aggregation(state, viewer);
     Ok(())
 }
 
-/// Reads the stream once for the specified signal and fans out entries to all viewers.
+/// Reads the stream for the specified signal in bounded chunks and fans entries out to
+/// all viewers. Capped at `MAX_ENTRIES_PER_FAN_OUT_CALL` entries per call so the polling
+/// loop's write lock never stays held longer than that much work, and so that producers
+/// out-pacing the drain cannot starve the loop's termination.
 async fn fan_out_signal_entries(
     viewers: &mut [(CompiledViewer, ViewerState)],
     stream_store: &mut StreamStore,
     signal: Signal,
+    now: DateTime<Utc>,
 ) -> Result<(), RuntimeError> {
     if !viewers.iter().any(|(v, _)| v.matches_signal(signal)) {
         return Ok(());
@@ -381,27 +472,34 @@ async fn fan_out_signal_entries(
         .flatten()
         .map(str::to_string);
 
-    let entries = stream_store
-        .read_entries_since(signal, min_cursor.as_deref(), 100_000)
-        .await?;
-
-    for (entry_id, entry) in &entries {
-        for (viewer, state) in viewers.iter_mut() {
-            if !viewer.matches_signal(signal) {
-                continue;
+    drain_signal_entries(
+        stream_store,
+        signal,
+        min_cursor,
+        Some(MAX_ENTRIES_PER_FAN_OUT_CALL),
+        |entry_id, entry| {
+            for (viewer, state) in viewers.iter_mut() {
+                if !viewer.matches_signal(signal) {
+                    continue;
+                }
+                // Only apply entries that come after the viewer's own cursor
+                if let Some(vc) = state.last_cursor.get(signal)
+                    && !cmp_stream_id(entry_id.as_str(), vc).is_gt()
+                {
+                    continue;
+                }
+                // Skip entries already outside this viewer's lookback so state.entries
+                // does not balloon when one viewer's stale cursor drags `min_cursor` far back.
+                if is_outside_lookback(now, entry.observed_at, viewer.lookback_ms()) {
+                    state.last_cursor.set(signal, entry_id.clone());
+                    continue;
+                }
+                apply_entry(state, viewer, entry.clone());
+                state.last_cursor.set(signal, entry_id.clone());
             }
-            // Only apply entries that come after the viewer's own cursor
-            if let Some(vc) = state.last_cursor.get(signal)
-                && !cmp_stream_id(entry_id, vc).is_gt()
-            {
-                continue;
-            }
-            apply_entry(state, viewer, entry.clone());
-            state.last_cursor.set(signal, entry_id.clone());
-        }
-    }
-
-    Ok(())
+        },
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -482,6 +580,200 @@ mod tests {
         // Removing an unknown id should be a no-op.
         runtime.remove_viewer(Uuid::new_v4());
         assert_index_matches_viewers(&runtime);
+    }
+
+    /// Inserts `count` synthetic trace entries with strictly ascending `observed_at`
+    /// (matching the reducer's ascending-time precondition) and returns the inserted
+    /// stream ids in order.
+    async fn seed_traces(
+        stream_store: &mut MemoryStreamStore,
+        now: DateTime<Utc>,
+        count: usize,
+    ) -> Vec<String> {
+        use bytes::Bytes;
+        let mut ids = Vec::with_capacity(count);
+        for i in 0..count {
+            let id = stream_store
+                .append_entry(&NormalizedEntry {
+                    signal: Signal::Traces,
+                    // i=0 -> oldest, i=count-1 -> newest. Stay inside the test
+                    // viewer's lookback window so entries survive prune.
+                    observed_at: now - chrono::Duration::milliseconds((count - 1 - i) as i64),
+                    service_name: Some(format!("svc-{i}")),
+                    payload: Bytes::from_static(b"{}"),
+                })
+                .await
+                .unwrap();
+            ids.push(id);
+        }
+        ids
+    }
+
+    #[tokio::test]
+    async fn build_drains_streams_via_chunked_reads() {
+        use crate::storage::memory::MemoryStreamStore;
+
+        // Insert more entries than STREAM_READ_CHUNK_SIZE but fewer than
+        // MAX_ENTRIES_PER_FAN_OUT_CALL so build() can consume them all in one go.
+        // With cfg(test) the chunk size is small (17) and the cap is 50; pick a
+        // total that requires multiple chunks but stays under the cap.
+        let total_entries = MAX_ENTRIES_PER_FAN_OUT_CALL;
+        assert!(total_entries > STREAM_READ_CHUNK_SIZE);
+        let mut stream_store = MemoryStreamStore::new(total_entries * 2);
+        let now = Utc::now();
+        let ids = seed_traces(&mut stream_store, now, total_entries).await;
+
+        let viewer_store = MemoryViewerStore::new();
+        let def_id = Uuid::new_v4();
+        let mut def = sample_definition(def_id, "drain");
+        def.lookback_ms = 24 * 60 * 60 * 1000; // 1 day so nothing gets pruned
+        viewer_store.insert_viewer_definition(&def).await.unwrap();
+
+        let runtime = ViewerRuntime::build(
+            ViewerStore::Memory(viewer_store),
+            StreamStore::Memory(stream_store),
+        )
+        .await
+        .unwrap();
+
+        let (_, state) = runtime.get_by_id(def_id).unwrap();
+        assert_eq!(state.entries.len(), total_entries);
+        // The cursor must point at the LAST inserted entry — a single-shot read
+        // (STREAM_READ_CHUNK_SIZE worth of entries only) would leave it earlier.
+        assert_eq!(
+            state.last_cursor.get(Signal::Traces),
+            Some(ids.last().unwrap().as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn add_viewer_drains_streams_via_chunked_reads() {
+        use crate::storage::memory::MemoryStreamStore;
+
+        // add_viewer's path through populate_state_from_stream has NO cap, so
+        // exercising > STREAM_READ_CHUNK_SIZE is enough to verify chunked drain.
+        let total_entries = STREAM_READ_CHUNK_SIZE * 3 + 5;
+        let mut stream_store = MemoryStreamStore::new(total_entries * 2);
+        let now = Utc::now();
+        let ids = seed_traces(&mut stream_store, now, total_entries).await;
+
+        let viewer_store = ViewerStore::Memory(MemoryViewerStore::new());
+        let mut runtime = ViewerRuntime::build(viewer_store, StreamStore::Memory(stream_store))
+            .await
+            .unwrap();
+
+        let def_id = Uuid::new_v4();
+        let mut def = sample_definition(def_id, "drain-add");
+        def.lookback_ms = 24 * 60 * 60 * 1000;
+        runtime.add_viewer(def).await.unwrap();
+
+        let (_, state) = runtime.get_by_id(def_id).unwrap();
+        assert_eq!(state.entries.len(), total_entries);
+        assert_eq!(
+            state.last_cursor.get(Signal::Traces),
+            Some(ids.last().unwrap().as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn fan_out_caps_entries_per_call_and_resumes_next_tick() {
+        use crate::storage::memory::MemoryStreamStore;
+
+        // More entries than MAX_ENTRIES_PER_FAN_OUT_CALL: a single
+        // apply_diff_batch tick must NOT drain the whole stream — instead it
+        // should stop at the cap and the next tick continues.
+        let total_entries = MAX_ENTRIES_PER_FAN_OUT_CALL * 2 + 3;
+        let mut stream_store = MemoryStreamStore::new(total_entries * 2);
+        let now = Utc::now();
+        let ids = seed_traces(&mut stream_store, now, total_entries).await;
+
+        let viewer_store = MemoryViewerStore::new();
+        let def_id = Uuid::new_v4();
+        let mut def = sample_definition(def_id, "cap");
+        def.lookback_ms = 24 * 60 * 60 * 1000;
+        viewer_store.insert_viewer_definition(&def).await.unwrap();
+
+        let mut runtime = ViewerRuntime::build(
+            ViewerStore::Memory(viewer_store),
+            StreamStore::Memory(stream_store),
+        )
+        .await
+        .unwrap();
+
+        // After build (which itself runs fan_out), the runtime has drained at
+        // most MAX_ENTRIES_PER_FAN_OUT_CALL entries.
+        let consumed_after_build = runtime.get_by_id(def_id).unwrap().1.entries.len();
+        assert_eq!(consumed_after_build, MAX_ENTRIES_PER_FAN_OUT_CALL);
+        assert_eq!(
+            runtime
+                .get_by_id(def_id)
+                .unwrap()
+                .1
+                .last_cursor
+                .get(Signal::Traces),
+            Some(ids[MAX_ENTRIES_PER_FAN_OUT_CALL - 1].as_str())
+        );
+
+        // A second tick drains another cap's worth.
+        runtime.apply_diff_batch().await.unwrap();
+        let consumed_after_second = runtime.get_by_id(def_id).unwrap().1.entries.len();
+        assert_eq!(consumed_after_second, 2 * MAX_ENTRIES_PER_FAN_OUT_CALL);
+
+        // A third tick drains the remainder.
+        runtime.apply_diff_batch().await.unwrap();
+        let (_, state) = runtime.get_by_id(def_id).unwrap();
+        assert_eq!(state.entries.len(), total_entries);
+        assert_eq!(
+            state.last_cursor.get(Signal::Traces),
+            Some(ids.last().unwrap().as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn populate_state_skips_entries_outside_lookback_to_bound_memory() {
+        use crate::storage::memory::MemoryStreamStore;
+        use bytes::Bytes;
+
+        let now = Utc::now();
+        let mut stream_store = MemoryStreamStore::new(200);
+        // 50 ancient entries (older than lookback) then 30 recent ones.
+        for i in 0..50 {
+            stream_store
+                .append_entry(&NormalizedEntry {
+                    signal: Signal::Traces,
+                    observed_at: now - chrono::Duration::hours(24) - chrono::Duration::seconds(i),
+                    service_name: None,
+                    payload: Bytes::from_static(b"{}"),
+                })
+                .await
+                .unwrap();
+        }
+        for i in 0..30 {
+            stream_store
+                .append_entry(&NormalizedEntry {
+                    signal: Signal::Traces,
+                    observed_at: now - chrono::Duration::seconds(i),
+                    service_name: None,
+                    payload: Bytes::from_static(b"{}"),
+                })
+                .await
+                .unwrap();
+        }
+
+        let viewer_store = ViewerStore::Memory(MemoryViewerStore::new());
+        let mut runtime = ViewerRuntime::build(viewer_store, StreamStore::Memory(stream_store))
+            .await
+            .unwrap();
+
+        let def_id = Uuid::new_v4();
+        let mut def = sample_definition(def_id, "lookback");
+        def.lookback_ms = 60_000; // 1 minute - excludes all the ancient entries
+        runtime.add_viewer(def).await.unwrap();
+
+        let (_, state) = runtime.get_by_id(def_id).unwrap();
+        // Only the 30 recent entries are kept; the 50 ancient ones never enter
+        // state.entries (they would have ballooned memory before being pruned).
+        assert_eq!(state.entries.len(), 30);
     }
 
     #[tokio::test]
