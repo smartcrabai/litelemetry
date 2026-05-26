@@ -47,6 +47,7 @@ use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tower_http::compression::CompressionLayer;
 use uuid::Uuid;
@@ -8508,13 +8509,101 @@ async fn index() -> Html<&'static str> {
     Html(VIEWER_PAGE)
 }
 
+/// Quiet `/api/viewers/{id}` calls log at debug; anything slower escalates to info.
+/// This endpoint is fanned out by the dashboard for every visible panel, so logging
+/// every fast call would dominate the log stream. The threshold targets the regime
+/// where a user would actually perceive latency.
+const GET_VIEWER_INFO_THRESHOLD_MS: u64 = 100;
+
+/// RAII guard that emits one structured log line per `get_viewer` call, regardless
+/// of whether the function returns Ok or returns early via `?`. Fields are filled
+/// in as the handler progresses; on early-return paths `outcome` records the HTTP
+/// status reason and partial timings (e.g. `lock_wait_ms`) are still reported.
+struct GetViewerMetrics {
+    viewer_id: Uuid,
+    lock_start: Instant,
+    lock_wait_elapsed: Duration,
+    process_start: Option<Instant>,
+    process_elapsed: Duration,
+    exemplar_elapsed: Duration,
+    entry_count: usize,
+    has_metrics: bool,
+    outcome: &'static str,
+}
+
+impl GetViewerMetrics {
+    fn new(viewer_id: Uuid) -> Self {
+        Self {
+            viewer_id,
+            lock_start: Instant::now(),
+            lock_wait_elapsed: Duration::ZERO,
+            process_start: None,
+            process_elapsed: Duration::ZERO,
+            exemplar_elapsed: Duration::ZERO,
+            entry_count: 0,
+            has_metrics: false,
+            outcome: "early_return",
+        }
+    }
+
+    fn mark_lock_acquired(&mut self) {
+        self.lock_wait_elapsed = self.lock_start.elapsed();
+        self.process_start = Some(Instant::now());
+    }
+}
+
+impl Drop for GetViewerMetrics {
+    fn drop(&mut self) {
+        // If the handler returned before mark_lock_acquired, `process_start` is None
+        // and `process_elapsed` stays 0; if it ran past lock acquisition but before
+        // explicitly recording `process_elapsed`, fall back to "now minus process_start".
+        let process_ms = if self.process_elapsed != Duration::ZERO {
+            self.process_elapsed.as_millis() as u64
+        } else if let Some(start) = self.process_start {
+            start.elapsed().as_millis() as u64
+        } else {
+            0
+        };
+        let lock_wait_ms = self.lock_wait_elapsed.as_millis() as u64;
+        let exemplar_ms = self.exemplar_elapsed.as_millis() as u64;
+        let total_ms = lock_wait_ms + process_ms;
+        // Errors and slow calls escalate; quiet successes stay at debug.
+        if total_ms >= GET_VIEWER_INFO_THRESHOLD_MS || self.outcome != "ok" {
+            tracing::info!(
+                viewer_id = %self.viewer_id,
+                lock_wait_ms,
+                process_ms,
+                exemplar_ms,
+                entry_count = self.entry_count,
+                has_metrics = self.has_metrics,
+                outcome = self.outcome,
+                "get_viewer"
+            );
+        } else {
+            tracing::debug!(
+                viewer_id = %self.viewer_id,
+                lock_wait_ms,
+                process_ms,
+                exemplar_ms,
+                entry_count = self.entry_count,
+                has_metrics = self.has_metrics,
+                outcome = self.outcome,
+                "get_viewer"
+            );
+        }
+    }
+}
+
 async fn get_viewer(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Query(query): Query<DashboardFilterQuery>,
 ) -> Result<Json<ViewerSummary>, StatusCode> {
+    let mut metrics = GetViewerMetrics::new(id);
+
     let lookback_override = if let Some(ms) = query.lookback_ms {
         if ms <= 0 {
+            metrics.outcome = "bad_request";
             return Err(StatusCode::BAD_REQUEST);
         }
         Some(ms)
@@ -8526,13 +8615,21 @@ async fn get_viewer(
     let has_filters = !global_service_names.is_empty() || global_query.is_some();
     let has_overrides = lookback_override.is_some() || has_filters;
 
-    let runtime = state.require_viewer_runtime()?.read().await;
+    let runtime_arc = state.require_viewer_runtime().inspect_err(|_| {
+        metrics.outcome = "runtime_unavailable";
+    })?;
+    let runtime = runtime_arc.read().await;
+    metrics.mark_lock_acquired();
 
-    let (viewer, viewer_state) = runtime.get_by_id(id).ok_or(StatusCode::NOT_FOUND)?;
+    let (viewer, viewer_state) = runtime.get_by_id(id).ok_or_else(|| {
+        metrics.outcome = "not_found";
+        StatusCode::NOT_FOUND
+    })?;
 
     if let Some(ms) = lookback_override
         && ms > viewer.lookback_ms()
     {
+        metrics.outcome = "bad_request";
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -8542,7 +8639,10 @@ async fn get_viewer(
         let now = chrono::Utc::now();
         let slice = runtime
             .get_dashboard_viewer(&id, lookback_override, now)
-            .ok_or(StatusCode::NOT_FOUND)?;
+            .ok_or_else(|| {
+                metrics.outcome = "not_found";
+                StatusCode::NOT_FOUND
+            })?;
         let filtered: Vec<NormalizedEntry>;
         let effective_entries: &[NormalizedEntry] = if has_filters {
             filtered = slice
@@ -8571,6 +8671,7 @@ async fn get_viewer(
         )
         .map_err(|error| {
             tracing::error!("viewer {id}: {error}");
+            metrics.outcome = "internal_error";
             StatusCode::INTERNAL_SERVER_ERROR
         })?
     } else {
@@ -8584,13 +8685,16 @@ async fn get_viewer(
         )
         .map_err(|error| {
             tracing::error!("viewer {id}: {error}");
+            metrics.outcome = "internal_error";
             StatusCode::INTERNAL_SERVER_ERROR
         })?
     };
 
     // Opportunistically attach exemplars for metric viewers. Failures stay non-fatal --
     // the field stays empty.
-    if viewer.definition().signal_mask.contains(Signal::Metrics) {
+    metrics.has_metrics = viewer.definition().signal_mask.contains(Signal::Metrics);
+    if metrics.has_metrics {
+        let exemplar_start = Instant::now();
         match exemplar_buckets_for_metric_viewer(
             &runtime,
             viewer_state,
@@ -8601,7 +8705,14 @@ async fn get_viewer(
             Ok(buckets) => summary.exemplars = flatten_exemplar_buckets(buckets),
             Err(e) => tracing::warn!("get_viewer {id}: exemplars failed: {e}"),
         }
+        metrics.exemplar_elapsed = exemplar_start.elapsed();
     }
+
+    metrics.entry_count = summary.entry_count;
+    if let Some(start) = metrics.process_start {
+        metrics.process_elapsed = start.elapsed();
+    }
+    metrics.outcome = "ok";
 
     Ok(Json(summary))
 }
