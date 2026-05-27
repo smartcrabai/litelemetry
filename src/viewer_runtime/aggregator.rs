@@ -21,6 +21,7 @@ use crate::apm::bucket_start;
 use crate::domain::telemetry::{NormalizedEntry, Signal};
 use crate::ingest::otlp_http::attribute_string_value;
 use crate::ingest::otlp_pb::payload_as_value;
+use crate::viewer_runtime::compiler::LazyDecoded;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -279,7 +280,8 @@ pub fn aggregate_entries(spec: &CompiledAggregation, entries: &[NormalizedEntry]
     for entry in entries {
         let bucket_start_ms = bucket_start(entry.observed_at.timestamp_millis(), spec.bucket_ms);
 
-        let inputs = collect_aggregation_inputs(entry, spec);
+        let mut decoded = LazyDecoded::new(entry.signal, &entry.payload);
+        let inputs = collect_aggregation_inputs(entry, spec, &mut decoded);
         for (group_keys, value_opt) in inputs {
             // For sum/avg/percentiles, ignore inputs without a numeric value.
             if needs_numeric && value_opt.is_none() {
@@ -306,34 +308,41 @@ pub fn aggregate_entries(spec: &CompiledAggregation, entries: &[NormalizedEntry]
 /// aggregator. Most entries produce one input; metric payloads filtered by
 /// `metric_name` produce one per matching data point so each resource in the
 /// batch lands in its own series.
+///
+/// `decoded` is the entry's payload decoded as its own signal (shared with
+/// query/filter matching via [`LazyDecoded`]). It is only consumed for metric
+/// entries -- for non-metric entries the aggregation contributes no numeric
+/// value and resolves resource-derived keys to "unknown", matching the previous
+/// behaviour, so the (non-metric) decode is never read here.
 fn collect_aggregation_inputs(
     entry: &NormalizedEntry,
     spec: &CompiledAggregation,
+    decoded: &mut LazyDecoded,
 ) -> Vec<(Vec<String>, Option<f64>)> {
     let needs_numeric = spec.func.requires_numeric();
     let entry_level_keys =
         || -> Vec<String> { spec.group_by.iter().map(|gk| gk.extract(entry)).collect() };
 
     let Some(filter) = spec.metric_name.as_deref() else {
-        // No metric_name filter: the entry contributes exactly one input. Decode
-        // the metric payload at most once and reuse it for both the numeric value
-        // and any resource-derived group keys (service_name comes from the entry,
-        // not the payload). This replaces the previous code path that decoded once
-        // per numeric value plus once per non-service group_by key.
-        let needs_decode = entry.signal == Signal::Metrics
-            && (needs_numeric || spec.group_by.iter().any(|gk| *gk != GroupKey::ServiceName));
-        let decoded = if needs_decode {
-            payload_as_value(Signal::Metrics, &entry.payload)
+        // No metric_name filter: the entry contributes exactly one input. Reuse
+        // the shared decode for both the numeric value and any resource-derived
+        // group keys (service_name comes from the entry, not the payload). Only
+        // touch the decode when a metric entry actually needs it, so count-by-
+        // service-name still does no decoding.
+        let metrics_value: Option<&Value> = if entry.signal == Signal::Metrics
+            && (needs_numeric || spec.group_by.iter().any(|gk| *gk != GroupKey::ServiceName))
+        {
+            decoded.get()
         } else {
             None
         };
         let group_keys: Vec<String> = spec
             .group_by
             .iter()
-            .map(|gk| gk.extract_from_decoded(decoded.as_ref(), entry))
+            .map(|gk| gk.extract_from_decoded(metrics_value, entry))
             .collect();
         let value = if needs_numeric {
-            decoded.as_ref().and_then(numeric_value_from_metrics_value)
+            metrics_value.and_then(numeric_value_from_metrics_value)
         } else {
             None
         };
@@ -344,7 +353,7 @@ fn collect_aggregation_inputs(
         return vec![(entry_level_keys(), None)];
     }
 
-    let Some(payload) = payload_as_value(Signal::Metrics, &entry.payload) else {
+    let Some(payload) = decoded.get() else {
         return vec![(entry_level_keys(), None)];
     };
     let Some(resource_metrics) = payload.get("resourceMetrics").and_then(|v| v.as_array()) else {
@@ -663,22 +672,24 @@ impl AggregationState {
 
     /// Builds state by folding `entries` in order. Used when there is no
     /// running state to maintain incrementally (initial load with pre-existing
-    /// entries, or after a spec change).
+    /// entries, or after a spec change). Each entry is decoded at most once.
     pub fn from_entries(spec: CompiledAggregation, entries: &[NormalizedEntry]) -> Self {
         let mut state = Self::new(spec);
         for entry in entries {
-            state.add_entry(entry);
+            let mut decoded = LazyDecoded::new(entry.signal, &entry.payload);
+            state.add_entry(entry, &mut decoded);
         }
         state
     }
 
-    /// Decodes the entry once, records its contribution, and folds it into the
-    /// running accumulators.
-    pub fn add_entry(&mut self, entry: &NormalizedEntry) {
+    /// Records the entry's contribution and folds it into the running
+    /// accumulators, reusing `decoded` so a metric payload already decoded for
+    /// query/filter matching (or a previous viewer) is not decoded again.
+    pub(crate) fn add_entry(&mut self, entry: &NormalizedEntry, decoded: &mut LazyDecoded) {
         let bucket_start_ms =
             bucket_start(entry.observed_at.timestamp_millis(), self.spec.bucket_ms);
         let needs_numeric = self.spec.func.requires_numeric();
-        let inputs = collect_aggregation_inputs(entry, &self.spec);
+        let inputs = collect_aggregation_inputs(entry, &self.spec, decoded);
 
         let mut added = Vec::with_capacity(inputs.len());
         for (group_keys, value) in inputs {

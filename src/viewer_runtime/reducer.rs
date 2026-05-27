@@ -1,6 +1,6 @@
 use crate::domain::telemetry::NormalizedEntry;
 use crate::viewer_runtime::aggregator::AggregationState;
-use crate::viewer_runtime::compiler::CompiledViewer;
+use crate::viewer_runtime::compiler::{CompiledViewer, LazyDecoded};
 use crate::viewer_runtime::state::ViewerState;
 use chrono::{DateTime, Utc};
 
@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 /// - If they match, adds the entry to state.entries.
 ///
 /// For viewers with an aggregation block, the entry's contribution is also
-/// folded into `state.agg_state` here (decoding the payload exactly once), so
+/// folded into `state.agg_state` here (decoding the payload at most once), so
 /// the per-tick [`recompute_aggregation`] becomes a cheap finalize instead of a
 /// full re-decode + re-aggregate of every entry.
 ///
@@ -20,15 +20,42 @@ use chrono::{DateTime, Utc};
 /// Note: this does **not** materialize `state.aggregated_buckets` -- callers
 /// invoke [`recompute_aggregation`] once per refresh batch (after pruning) so
 /// that buckets reflect a consistent post-prune view of the entries.
+///
+/// This decodes the payload independently. When fanning one entry out to many
+/// viewers, prefer [`apply_entry_lazy`] with a shared [`LazyDecoded`] so the
+/// decode is shared across viewers.
 pub fn apply_entry(state: &mut ViewerState, viewer: &CompiledViewer, entry: NormalizedEntry) {
-    if viewer.matches_signal(entry.signal) && viewer.matches_entry(&entry) {
+    let keep = {
+        let mut decoded = LazyDecoded::new(entry.signal, &entry.payload);
+        apply_entry_lazy(state, viewer, &entry, &mut decoded)
+    };
+    if keep {
+        state.entries.push(entry);
+    }
+}
+
+/// Core of [`apply_entry`] that reuses a caller-owned [`LazyDecoded`] so a
+/// payload decoded for one viewer (matching or aggregation) is not decoded again
+/// for the next. Folds the entry into `state.agg_state` when it matches and
+/// returns whether the caller should push the entry into `state.entries`. The
+/// caller owns the push so the `decoded` borrow of the entry can be released
+/// first.
+pub(crate) fn apply_entry_lazy(
+    state: &mut ViewerState,
+    viewer: &CompiledViewer,
+    entry: &NormalizedEntry,
+    decoded: &mut LazyDecoded,
+) -> bool {
+    if viewer.matches_signal(entry.signal) && viewer.matches_entry_lazy(entry, decoded) {
         if let Some(spec) = viewer.aggregation() {
             state
                 .agg_state
                 .get_or_insert_with(|| AggregationState::new(spec.clone()))
-                .add_entry(&entry);
+                .add_entry(entry, decoded);
         }
-        state.entries.push(entry);
+        true
+    } else {
+        false
     }
 }
 
@@ -375,5 +402,89 @@ mod tests {
         // Then: the boundary entry is removed and only 1 recent entry remains
         assert_eq!(pruned, 1);
         assert_eq!(state.entries.len(), 1);
+    }
+
+    // --- apply_entry_lazy: shared decode across viewers ---------------------
+
+    fn compile_with_definition(
+        signal_mask: crate::domain::telemetry::SignalMask,
+        definition_json: serde_json::Value,
+    ) -> CompiledViewer {
+        compile(ViewerDefinition {
+            id: Uuid::new_v4(),
+            slug: "test".to_string(),
+            name: "Test".to_string(),
+            refresh_interval_ms: 5_000,
+            lookback_ms: 60_000,
+            signal_mask,
+            definition_json,
+            layout_json: json!({}),
+            revision: 1,
+            enabled: true,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn apply_entry_lazy_shares_one_decode_across_viewers() {
+        // A single metric entry fanned out to two viewers that both need the
+        // decoded payload: one matches a query against the metric name, the other
+        // sums its value. Sharing one LazyDecoded across both must yield the same
+        // results as decoding independently.
+        let payload = Bytes::from(
+            json!({
+                "resourceMetrics": [{
+                    "scopeMetrics": [{
+                        "metrics": [{
+                            "name": "checkout_latency",
+                            "sum": { "dataPoints": [{ "asInt": "5" }] }
+                        }]
+                    }]
+                }]
+            })
+            .to_string(),
+        );
+        let entry = NormalizedEntry {
+            signal: Signal::Metrics,
+            observed_at: Utc::now(),
+            service_name: Some("checkout".to_string()),
+            payload,
+        };
+
+        // Query matches the metric name in the payload (service_name "checkout"
+        // does not contain the query, so payload text must be consulted).
+        let viewer_query =
+            make_compiled_viewer_with_query(Signal::Metrics.into(), "checkout_latency");
+        let viewer_sum = compile_with_definition(
+            Signal::Metrics.into(),
+            json!({ "aggregation": { "fn": "sum", "bucket_ms": 60_000 } }),
+        );
+
+        let mut state_query = make_state();
+        let mut state_sum = make_state();
+
+        // Mirror fan_out: one LazyDecoded shared across both viewers.
+        let mut decoded = LazyDecoded::new(entry.signal, &entry.payload);
+        let keep_query = apply_entry_lazy(&mut state_query, &viewer_query, &entry, &mut decoded);
+        let keep_sum = apply_entry_lazy(&mut state_sum, &viewer_sum, &entry, &mut decoded);
+        assert!(keep_query, "query viewer must match on payload metric name");
+        assert!(keep_sum, "aggregation viewer matches all");
+        state_query.entries.push(entry.clone());
+        state_sum.entries.push(entry.clone());
+
+        // Query viewer kept the entry; sum viewer aggregated the value 5.
+        assert_eq!(state_query.entries.len(), 1);
+        recompute_aggregation(&mut state_sum, &viewer_sum);
+        assert_eq!(state_sum.aggregated_buckets.len(), 1);
+        assert_eq!(state_sum.aggregated_buckets[0].value, 5.0);
+
+        // Independent decode (fresh apply_entry) must produce identical state.
+        let mut state_sum_independent = make_state();
+        apply_entry(&mut state_sum_independent, &viewer_sum, entry.clone());
+        recompute_aggregation(&mut state_sum_independent, &viewer_sum);
+        assert_eq!(
+            state_sum_independent.aggregated_buckets, state_sum.aggregated_buckets,
+            "shared-decode result must equal independent-decode result"
+        );
     }
 }

@@ -6,6 +6,42 @@ use bytes::Bytes;
 use serde_json::Value;
 use thiserror::Error;
 
+/// Decodes an entry's OTLP payload to JSON at most once, caching the result.
+///
+/// A single entry is fanned out to every matching viewer each tick, and each
+/// viewer may need the decoded payload for query/filter matching and/or
+/// aggregation. Previously every such use re-decoded the payload. `LazyDecoded`
+/// is created once per entry in the fan-out loop and shared across all viewers
+/// (and across matching + aggregation within a viewer), so a payload is decoded
+/// at most once per entry per tick regardless of how many viewers consume it.
+///
+/// The cache is `Option<Option<Value>>`: the outer `Option` records whether the
+/// decode has been attempted, the inner one is the decode result (`None` when
+/// the payload is not valid OTLP for `signal`).
+pub(crate) struct LazyDecoded<'a> {
+    signal: Signal,
+    payload: &'a Bytes,
+    cache: Option<Option<Value>>,
+}
+
+impl<'a> LazyDecoded<'a> {
+    pub(crate) fn new(signal: Signal, payload: &'a Bytes) -> Self {
+        Self {
+            signal,
+            payload,
+            cache: None,
+        }
+    }
+
+    /// Returns the decoded payload, decoding (once) on first call. `None` when
+    /// the payload is not valid OTLP for the entry's signal.
+    pub(crate) fn get(&mut self) -> Option<&Value> {
+        self.cache
+            .get_or_insert_with(|| payload_as_value(self.signal, self.payload))
+            .as_ref()
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum CompileError {
     #[error("signal_mask has no valid signals: viewer must watch at least one signal")]
@@ -88,11 +124,29 @@ impl CompiledViewer {
     ///   1. If `filters` is non-empty: evaluate using `filter_mode` (And/Or).
     ///   2. Else if `query` is set: case-insensitive substring match.
     ///   3. Otherwise: match-all (returns true).
+    ///
+    /// Decodes the payload at most once internally. Hot paths that fan one entry
+    /// out to many viewers should use [`matches_entry_lazy`](Self::matches_entry_lazy)
+    /// with a shared [`LazyDecoded`] so the decode is shared across viewers too.
     pub fn matches_entry(&self, entry: &NormalizedEntry) -> bool {
+        let mut decoded = LazyDecoded::new(entry.signal, &entry.payload);
+        self.matches_entry_lazy(entry, &mut decoded)
+    }
+
+    /// Like [`matches_entry`](Self::matches_entry) but reuses a caller-owned
+    /// [`LazyDecoded`], so a payload decoded for one viewer (or for aggregation)
+    /// is not decoded again for the next. Semantics are identical, including the
+    /// short-circuit that only decodes when a query fails to match on
+    /// `service_name`.
+    pub(crate) fn matches_entry_lazy(
+        &self,
+        entry: &NormalizedEntry,
+        decoded: &mut LazyDecoded,
+    ) -> bool {
         if let Some(filters) = &self.filters {
             return match self.filter_mode {
-                FilterMode::And => filters.iter().all(|f| eval_filter(f, entry)),
-                FilterMode::Or => filters.iter().any(|f| eval_filter(f, entry)),
+                FilterMode::And => filters.iter().all(|f| eval_filter(f, entry, decoded)),
+                FilterMode::Or => filters.iter().any(|f| eval_filter(f, entry, decoded)),
             };
         }
         let Some(query) = &self.query else {
@@ -103,7 +157,10 @@ impl CompiledViewer {
         {
             return true;
         }
-        if let Some(payload_text) = extract_searchable_payload_text(entry.signal, &entry.payload) {
+        if let Some(payload_text) = decoded
+            .get()
+            .and_then(|v| searchable_text_from_value(entry.signal, v))
+        {
             return payload_text.to_lowercase().contains(query.as_str());
         }
         false
@@ -168,23 +225,34 @@ pub fn query_from_definition(definition_json: &Value) -> Option<String> {
     }
 }
 
-fn extract_field_text(field: &FilterField, entry: &NormalizedEntry) -> Option<String> {
+fn extract_field_text(
+    field: &FilterField,
+    entry: &NormalizedEntry,
+    decoded: &mut LazyDecoded,
+) -> Option<String> {
     match field {
         FilterField::ServiceName => entry.service_name.clone(),
-        FilterField::Payload => extract_searchable_payload_text(entry.signal, &entry.payload),
+        FilterField::Payload => decoded
+            .get()
+            .and_then(|v| searchable_text_from_value(entry.signal, v)),
     }
 }
 
-/// Evaluates a single compiled filter against an entry.
-fn eval_filter(filter: &CompiledFilter, entry: &NormalizedEntry) -> bool {
+/// Evaluates a single compiled filter against an entry, reusing `decoded` so the
+/// payload is decoded at most once across all filters and the aggregation step.
+fn eval_filter(
+    filter: &CompiledFilter,
+    entry: &NormalizedEntry,
+    decoded: &mut LazyDecoded,
+) -> bool {
     match &filter.matcher {
-        FilterMatcher::Eq(value) => extract_field_text(&filter.field, entry)
+        FilterMatcher::Eq(value) => extract_field_text(&filter.field, entry, decoded)
             .map(|t| t.to_lowercase() == *value)
             .unwrap_or(false),
-        FilterMatcher::Contains(value) => extract_field_text(&filter.field, entry)
+        FilterMatcher::Contains(value) => extract_field_text(&filter.field, entry, decoded)
             .map(|t| t.to_lowercase().contains(value.as_str()))
             .unwrap_or(false),
-        FilterMatcher::Regex(re) => extract_field_text(&filter.field, entry)
+        FilterMatcher::Regex(re) => extract_field_text(&filter.field, entry, decoded)
             .map(|t| re.is_match(&t))
             .unwrap_or(false),
     }
@@ -194,6 +262,14 @@ fn eval_filter(filter: &CompiledFilter, entry: &NormalizedEntry) -> bool {
 /// Returns None if the payload is not parseable or contains no relevant fields.
 pub(crate) fn extract_searchable_payload_text(signal: Signal, payload: &Bytes) -> Option<String> {
     let value: Value = payload_as_value(signal, payload)?;
+    searchable_text_from_value(signal, &value)
+}
+
+/// Searchable-text extraction over an already-decoded payload. Split out from
+/// [`extract_searchable_payload_text`] so the hot fan-out path can decode an
+/// entry once (see [`LazyDecoded`]) and share it across query/filter matching
+/// and aggregation. Behaviour is identical to the previous inline version.
+pub(crate) fn searchable_text_from_value(signal: Signal, value: &Value) -> Option<String> {
     match signal {
         Signal::Traces => {
             let resource_spans = value.get("resourceSpans")?.as_array()?;

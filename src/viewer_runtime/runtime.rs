@@ -4,9 +4,9 @@ use crate::domain::viewer::ViewerStatus;
 use crate::storage::postgres::ViewerSnapshotRow;
 use crate::storage::redis::{cmp_stream_id, parse_stream_id};
 use crate::storage::{StorageError, StreamStore, ViewerStore};
-use crate::viewer_runtime::compiler::{CompileError, CompiledViewer, compile};
+use crate::viewer_runtime::compiler::{CompileError, CompiledViewer, LazyDecoded, compile};
 use crate::viewer_runtime::reducer::{
-    apply_entry, lookback_start_index, prune_stale_buckets, recompute_aggregation,
+    apply_entry, apply_entry_lazy, lookback_start_index, prune_stale_buckets, recompute_aggregation,
 };
 use crate::viewer_runtime::state::{StreamCursor, ViewerState};
 use chrono::{DateTime, Utc};
@@ -599,6 +599,10 @@ async fn fan_out_signal_entries(
         min_cursor,
         Some(MAX_ENTRIES_PER_FAN_OUT_CALL),
         |entry_id, entry| {
+            // Decode this entry's payload at most once and share it across every
+            // viewer it fans out to (and across matching + aggregation within a
+            // viewer), instead of decoding once per matching viewer.
+            let mut decoded = LazyDecoded::new(entry.signal, &entry.payload);
             for (viewer, state) in viewers.iter_mut() {
                 if !viewer.matches_signal(signal) {
                     continue;
@@ -615,7 +619,9 @@ async fn fan_out_signal_entries(
                     state.last_cursor.set(signal, entry_id.clone());
                     continue;
                 }
-                apply_entry(state, viewer, entry.clone());
+                if apply_entry_lazy(state, viewer, &entry, &mut decoded) {
+                    state.entries.push(entry.clone());
+                }
                 state.last_cursor.set(signal, entry_id.clone());
             }
         },
