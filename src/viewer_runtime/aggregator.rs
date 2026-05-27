@@ -227,7 +227,12 @@ pub fn parse_aggregation(
     }))
 }
 
-/// Computes aggregated buckets over the supplied entries.
+/// Computes aggregated buckets over the supplied entries in a single pass.
+///
+/// The runtime hot path no longer calls this -- it maintains an
+/// [`AggregationState`] incrementally instead. This full-recompute form is
+/// retained as the reference implementation that the incremental path is tested
+/// against (see `assert_incremental_matches_full`); keep the two in sync.
 ///
 /// Entries are assumed to be in ascending time order, but the aggregator is
 /// resilient to mild reordering -- buckets are keyed by epoch ms so order does
@@ -410,6 +415,276 @@ fn percentile(samples: &mut [f64], p: f64) -> f64 {
     let rank = (p * n).ceil().max(1.0) as usize;
     let idx = rank.saturating_sub(1).min(samples.len() - 1);
     samples[idx]
+}
+
+// ---------------------------------------------------------------------------
+// Incremental aggregation
+//
+// `aggregate_entries` above rebuilds every bucket from scratch. On the polling
+// hot path that meant re-decoding *every* entry's OTLP payload on *every* tick,
+// which dominated tick latency in production. `AggregationState` instead keeps
+// a running per-(bucket, group) accumulator: an entry's contribution is decoded
+// when it is ingested (`add_entry`) and subtracted again when it falls out of
+// the lookback window (`remove_oldest`). `finalize` then just reads the
+// accumulators, with no payload decoding. This turns per-tick decode cost from
+// O(all live entries) into O(entries ingested this tick).
+//
+// `add_entry` still delegates to `collect_aggregation_inputs`, which may decode
+// the payload more than once per entry (once for the numeric value and once per
+// resource-derived group_by key). Folding those into a single decode is a
+// further optimization left for later; the dominant per-tick cost is already
+// gone because decoding no longer scales with accumulated history.
+//
+// The output matches `aggregate_entries` for the same set of live entries
+// (verified by the equivalence tests below), with two caveats that do not arise
+// for real dashboard data: (a) `sum`/`avg` can differ by a last-ULP amount from
+// repeated add/subtract, and (b) percentile sample ordering uses `f64::total_cmp`
+// rather than the slice version's `partial_cmp`, so NaN samples would order
+// differently -- but OTLP numeric values decoded from JSON are never NaN.
+// ---------------------------------------------------------------------------
+
+/// Total-order wrapper around `f64` so samples can be kept in a `BTreeMap`.
+/// Uses `f64::total_cmp`, which orders NaN deterministically.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TotalF64(f64);
+
+impl Eq for TotalF64 {}
+
+impl PartialOrd for TotalF64 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TotalF64 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.total_cmp(&other.0)
+    }
+}
+
+/// Multiset of samples supporting add, remove, and nearest-rank percentile.
+/// Backs the percentile accumulators so a pruned entry's sample can be removed
+/// without an O(n) scan, while reproducing `percentile()`'s nearest-rank result.
+#[derive(Debug, Clone, Default)]
+struct SampleMultiset {
+    counts: BTreeMap<TotalF64, u64>,
+    total: u64,
+}
+
+impl SampleMultiset {
+    fn insert(&mut self, v: f64) {
+        *self.counts.entry(TotalF64(v)).or_insert(0) += 1;
+        self.total += 1;
+    }
+
+    fn remove(&mut self, v: f64) {
+        // Callers only remove values they previously inserted (each removal is
+        // paired with an `EntryContribution` recorded at insert time), so the
+        // key must be present and `total` must stay equal to the sum of counts.
+        // The debug_assert guards that invariant in tests without costing release
+        // builds; saturating_sub keeps a broken invariant from underflowing.
+        debug_assert!(
+            self.counts.contains_key(&TotalF64(v)),
+            "SampleMultiset::remove of an absent sample {v} -- add/remove are unbalanced"
+        );
+        if let Some(c) = self.counts.get_mut(&TotalF64(v)) {
+            *c -= 1;
+            if *c == 0 {
+                self.counts.remove(&TotalF64(v));
+            }
+            self.total = self.total.saturating_sub(1);
+        }
+    }
+
+    /// Nearest-rank percentile, matching [`percentile`] on the equivalent
+    /// sorted sample slice: rank = ceil(p * total), 1-indexed.
+    fn percentile(&self, p: f64) -> f64 {
+        if self.total == 0 {
+            return 0.0;
+        }
+        let rank = (p * self.total as f64).ceil().max(1.0) as u64;
+        let mut cumulative = 0u64;
+        for (val, cnt) in &self.counts {
+            cumulative += *cnt;
+            if cumulative >= rank {
+                return val.0;
+            }
+        }
+        // Unreachable when total > 0, but fall back to the largest sample.
+        self.counts.keys().next_back().map_or(0.0, |k| k.0)
+    }
+}
+
+/// Running accumulator for one (bucket, group) slot that supports removal.
+#[derive(Debug, Clone)]
+struct IncrementalAccumulator {
+    func: AggFn,
+    count: u64,
+    sum: f64,
+    /// `Some` only for percentile functions.
+    samples: Option<SampleMultiset>,
+}
+
+impl IncrementalAccumulator {
+    fn new(func: AggFn) -> Self {
+        Self {
+            func,
+            count: 0,
+            sum: 0.0,
+            samples: matches!(func, AggFn::P50 | AggFn::P95 | AggFn::P99)
+                .then(SampleMultiset::default),
+        }
+    }
+
+    fn add(&mut self, value: Option<f64>) {
+        self.count += 1;
+        if let Some(v) = value {
+            self.sum += v;
+            if let Some(s) = &mut self.samples {
+                s.insert(v);
+            }
+        }
+    }
+
+    fn remove(&mut self, value: Option<f64>) {
+        self.count = self.count.saturating_sub(1);
+        if let Some(v) = value {
+            self.sum -= v;
+            if let Some(s) = &mut self.samples {
+                s.remove(v);
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    fn finalize(&self, spec: &CompiledAggregation) -> f64 {
+        match self.func {
+            AggFn::Count => self.count as f64,
+            AggFn::Sum => self.sum,
+            AggFn::Avg => {
+                if self.count == 0 {
+                    0.0
+                } else {
+                    self.sum / self.count as f64
+                }
+            }
+            AggFn::P50 => self.samples.as_ref().map_or(0.0, |s| s.percentile(0.50)),
+            AggFn::P95 => self.samples.as_ref().map_or(0.0, |s| s.percentile(0.95)),
+            AggFn::P99 => self.samples.as_ref().map_or(0.0, |s| s.percentile(0.99)),
+            AggFn::Rate => {
+                let bucket_seconds = spec.bucket_ms as f64 / 1_000.0;
+                if bucket_seconds <= 0.0 {
+                    0.0
+                } else {
+                    self.count as f64 / bucket_seconds
+                }
+            }
+        }
+    }
+}
+
+/// One entry's recorded contribution to the running accumulators, kept so it
+/// can be subtracted exactly when the entry is pruned.
+#[derive(Debug, Clone)]
+struct EntryContribution {
+    bucket_start_ms: i64,
+    /// The (group_keys, value) pairs this entry actually added (after the
+    /// `needs_numeric` filter), in the same form fed to `IncrementalAccumulator`.
+    added: Vec<(Vec<String>, Option<f64>)>,
+}
+
+/// Incrementally-maintained aggregation for one viewer.
+///
+/// Invariant: `per_entry` is parallel to the live `ViewerState::entries`
+/// (oldest first) and `buckets` reflects exactly the contributions recorded in
+/// `per_entry`. Callers must mirror every `entries` mutation: push -> [`add_entry`],
+/// front-drain of `n` -> [`remove_oldest(n)`](Self::remove_oldest).
+#[derive(Debug, Clone)]
+pub struct AggregationState {
+    spec: CompiledAggregation,
+    per_entry: std::collections::VecDeque<EntryContribution>,
+    buckets: BTreeMap<(i64, Vec<String>), IncrementalAccumulator>,
+}
+
+impl AggregationState {
+    pub fn new(spec: CompiledAggregation) -> Self {
+        Self {
+            spec,
+            per_entry: std::collections::VecDeque::new(),
+            buckets: BTreeMap::new(),
+        }
+    }
+
+    /// Builds state by folding `entries` in order. Used when there is no
+    /// running state to maintain incrementally (initial load with pre-existing
+    /// entries, or after a spec change).
+    pub fn from_entries(spec: CompiledAggregation, entries: &[NormalizedEntry]) -> Self {
+        let mut state = Self::new(spec);
+        for entry in entries {
+            state.add_entry(entry);
+        }
+        state
+    }
+
+    /// Decodes the entry once, records its contribution, and folds it into the
+    /// running accumulators.
+    pub fn add_entry(&mut self, entry: &NormalizedEntry) {
+        let bucket_start_ms =
+            bucket_start(entry.observed_at.timestamp_millis(), self.spec.bucket_ms);
+        let needs_numeric = self.spec.func.requires_numeric();
+        let inputs = collect_aggregation_inputs(entry, &self.spec);
+
+        let mut added = Vec::with_capacity(inputs.len());
+        for (group_keys, value) in inputs {
+            if needs_numeric && value.is_none() {
+                continue;
+            }
+            self.buckets
+                .entry((bucket_start_ms, group_keys.clone()))
+                .or_insert_with(|| IncrementalAccumulator::new(self.spec.func))
+                .add(value);
+            added.push((group_keys, value));
+        }
+        self.per_entry.push_back(EntryContribution {
+            bucket_start_ms,
+            added,
+        });
+    }
+
+    /// Subtracts the contributions of the `count` oldest entries, removing any
+    /// bucket that becomes empty. Mirrors a front-drain of `ViewerState::entries`.
+    pub fn remove_oldest(&mut self, count: usize) {
+        for _ in 0..count {
+            let Some(contrib) = self.per_entry.pop_front() else {
+                break;
+            };
+            for (group_keys, value) in contrib.added {
+                let key = (contrib.bucket_start_ms, group_keys);
+                if let Some(slot) = self.buckets.get_mut(&key) {
+                    slot.remove(value);
+                    if slot.is_empty() {
+                        self.buckets.remove(&key);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Materializes the current buckets. `BTreeMap` iteration yields them sorted
+    /// by `(bucket_start_ms, group_keys)`, matching `aggregate_entries`.
+    pub fn finalize(&self) -> Vec<Bucket> {
+        self.buckets
+            .iter()
+            .map(|((bucket_start_ms, group_keys), acc)| Bucket {
+                bucket_start_ms: *bucket_start_ms,
+                group_keys: group_keys.clone(),
+                value: acc.finalize(&self.spec),
+            })
+            .collect()
+    }
 }
 
 /// Best-effort numeric value extractor for an entry.
@@ -1153,5 +1428,159 @@ mod tests {
                 "group_by": ["k8s.node.name", "host.name"]
             })
         );
+    }
+
+    // --- incremental aggregation ------------------------------------------
+    // The incremental path must produce byte-for-byte identical buckets to the
+    // full `aggregate_entries` recompute for the same set of live entries. All
+    // metric values here are integers (exact as f64) so sum/avg/percentile
+    // comparisons are exact despite incremental add/subtract.
+
+    /// Asserts that folding all `entries` then pruning the oldest `prune` of
+    /// them yields the same buckets as a full recompute over the survivors.
+    fn assert_incremental_matches_full(
+        spec: &CompiledAggregation,
+        entries: &[NormalizedEntry],
+        prune: usize,
+    ) {
+        let full = aggregate_entries(spec, &entries[prune..]);
+
+        let mut state = AggregationState::from_entries(spec.clone(), entries);
+        state.remove_oldest(prune);
+        let incremental = state.finalize();
+
+        assert_eq!(
+            incremental, full,
+            "incremental != full for fn={:?} prune={prune}",
+            spec.func
+        );
+    }
+
+    /// Entries spanning three buckets (bucket_ms=60_000), with the middle bucket
+    /// straddling the prune boundary so partial-bucket pruning is exercised.
+    fn cross_bucket_metric_entries() -> Vec<NormalizedEntry> {
+        vec![
+            entry(Signal::Metrics, 10_000, Some("a"), metric_payload(5)), // bucket 0
+            entry(Signal::Metrics, 20_000, Some("b"), metric_payload(15)), // bucket 0
+            entry(Signal::Metrics, 70_000, Some("a"), metric_payload(25)), // bucket 60_000
+            entry(Signal::Metrics, 80_000, Some("b"), metric_payload(35)), // bucket 60_000
+            entry(Signal::Metrics, 130_000, Some("a"), metric_payload(45)), // bucket 120_000
+        ]
+    }
+
+    fn spec(func: AggFn, group_by: Vec<GroupKey>) -> CompiledAggregation {
+        CompiledAggregation {
+            func,
+            bucket_ms: 60_000,
+            group_by,
+            metric_name: None,
+        }
+    }
+
+    #[test]
+    fn incremental_matches_full_all_funcs_no_prune() {
+        let entries = cross_bucket_metric_entries();
+        for func in [
+            AggFn::Count,
+            AggFn::Sum,
+            AggFn::Avg,
+            AggFn::P50,
+            AggFn::P95,
+            AggFn::P99,
+            AggFn::Rate,
+        ] {
+            assert_incremental_matches_full(&spec(func, vec![]), &entries, 0);
+        }
+    }
+
+    #[test]
+    fn incremental_matches_full_all_funcs_with_partial_bucket_prune() {
+        let entries = cross_bucket_metric_entries();
+        // prune=3 drops both bucket-0 entries and the first bucket-60_000 entry,
+        // leaving the second bucket-60_000 entry and the bucket-120_000 entry.
+        for func in [
+            AggFn::Count,
+            AggFn::Sum,
+            AggFn::Avg,
+            AggFn::P50,
+            AggFn::P95,
+            AggFn::P99,
+            AggFn::Rate,
+        ] {
+            assert_incremental_matches_full(&spec(func, vec![]), &entries, 3);
+        }
+    }
+
+    #[test]
+    fn incremental_matches_full_with_group_by_and_prune() {
+        let entries = vec![
+            entry(
+                Signal::Metrics,
+                10_000,
+                None,
+                metric_payload_with_resource_attrs(vec![("service.name", "svc-a")], 5),
+            ),
+            entry(
+                Signal::Metrics,
+                20_000,
+                None,
+                metric_payload_with_resource_attrs(vec![("service.name", "svc-b")], 15),
+            ),
+            entry(
+                Signal::Metrics,
+                70_000,
+                None,
+                metric_payload_with_resource_attrs(vec![("service.name", "svc-a")], 25),
+            ),
+            entry(
+                Signal::Metrics,
+                80_000,
+                None,
+                metric_payload_with_resource_attrs(vec![("service.name", "svc-a")], 35),
+            ),
+        ];
+        for prune in 0..=entries.len() {
+            assert_incremental_matches_full(
+                &spec(AggFn::Sum, vec![GroupKey::ServiceName]),
+                &entries,
+                prune,
+            );
+        }
+    }
+
+    #[test]
+    fn incremental_percentile_multiset_handles_duplicates_and_removal() {
+        // Many duplicate values within one bucket, then prune some off the front;
+        // the multiset must reproduce nearest-rank on the surviving samples.
+        let values = [3, 3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5];
+        let entries: Vec<_> = values
+            .iter()
+            .map(|&v| entry(Signal::Metrics, 60_000, None, metric_payload(v)))
+            .collect();
+        for func in [AggFn::P50, AggFn::P95, AggFn::P99] {
+            for prune in 0..=entries.len() {
+                assert_incremental_matches_full(&spec(func, vec![]), &entries, prune);
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_remove_all_empties_buckets() {
+        let entries = cross_bucket_metric_entries();
+        let mut state = AggregationState::from_entries(spec(AggFn::Sum, vec![]), &entries);
+        state.remove_oldest(entries.len());
+        assert!(
+            state.finalize().is_empty(),
+            "removing every entry should leave no buckets"
+        );
+    }
+
+    #[test]
+    fn incremental_remove_more_than_present_is_saturating() {
+        let entries = cross_bucket_metric_entries();
+        let mut state = AggregationState::from_entries(spec(AggFn::Count, vec![]), &entries);
+        // Asking to remove more than were added must not panic and must empty out.
+        state.remove_oldest(entries.len() + 10);
+        assert!(state.finalize().is_empty());
     }
 }

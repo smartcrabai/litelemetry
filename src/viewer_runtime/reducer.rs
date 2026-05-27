@@ -1,5 +1,5 @@
 use crate::domain::telemetry::NormalizedEntry;
-use crate::viewer_runtime::aggregator::aggregate_entries;
+use crate::viewer_runtime::aggregator::AggregationState;
 use crate::viewer_runtime::compiler::CompiledViewer;
 use crate::viewer_runtime::state::ViewerState;
 use chrono::{DateTime, Utc};
@@ -8,35 +8,63 @@ use chrono::{DateTime, Utc};
 /// - Ignores entries that do not match the viewer's signal_mask.
 /// - If they match, adds the entry to state.entries.
 ///
+/// For viewers with an aggregation block, the entry's contribution is also
+/// folded into `state.agg_state` here (decoding the payload exactly once), so
+/// the per-tick [`recompute_aggregation`] becomes a cheap finalize instead of a
+/// full re-decode + re-aggregate of every entry.
+///
 /// **Precondition**: The caller is responsible for passing entries in ascending time order (oldest first).
 /// prune_stale_buckets assumes entries are in ascending time order;
 /// if the order is disrupted, pruning will not work correctly.
 ///
-/// Note: this does **not** recompute `state.aggregated_buckets` -- callers
+/// Note: this does **not** materialize `state.aggregated_buckets` -- callers
 /// invoke [`recompute_aggregation`] once per refresh batch (after pruning) so
 /// that buckets reflect a consistent post-prune view of the entries.
 pub fn apply_entry(state: &mut ViewerState, viewer: &CompiledViewer, entry: NormalizedEntry) {
     if viewer.matches_signal(entry.signal) && viewer.matches_entry(&entry) {
+        if let Some(spec) = viewer.aggregation() {
+            state
+                .agg_state
+                .get_or_insert_with(|| AggregationState::new(spec.clone()))
+                .add_entry(&entry);
+        }
         state.entries.push(entry);
     }
 }
 
-/// Recomputes `state.aggregated_buckets` from the current `state.entries` if
-/// the viewer has an aggregation spec. Clears it otherwise so stale buckets are
-/// not served after the spec is removed.
+/// Materializes `state.aggregated_buckets` from the incremental `agg_state`.
+///
+/// When the viewer has an aggregation spec but no running state yet (no entries
+/// applied, or the spec was just reset by `update_viewer_definition`), the state
+/// is first rebuilt from `state.entries`. When the viewer has no aggregation
+/// spec, both `agg_state` and the buckets are cleared so stale buckets are not
+/// served after the spec is removed.
 pub fn recompute_aggregation(state: &mut ViewerState, viewer: &CompiledViewer) {
-    state.aggregated_buckets = match viewer.aggregation() {
-        Some(spec) => aggregate_entries(spec, &state.entries),
-        None => Vec::new(),
-    };
+    match viewer.aggregation() {
+        Some(spec) => {
+            let agg = state.agg_state.get_or_insert_with(|| {
+                AggregationState::from_entries(spec.clone(), &state.entries)
+            });
+            state.aggregated_buckets = agg.finalize();
+        }
+        None => {
+            state.agg_state = None;
+            state.aggregated_buckets = Vec::new();
+        }
+    }
 }
 
 /// Removes entries from state that are older than lookback_ms before now.
 /// - Returns the number of removed entries.
 /// - Entries satisfying `entry.observed_at <= now - lookback_ms` are removed (boundary included).
 /// - Assumes state.entries is in ascending time order (oldest first).
+/// - Subtracts the pruned entries' contributions from `agg_state` so the running
+///   accumulators stay consistent with the surviving entries.
 pub fn prune_stale_buckets(state: &mut ViewerState, lookback_ms: i64, now: DateTime<Utc>) -> usize {
     let pos = lookback_start_index(&state.entries, lookback_ms, now);
+    if let Some(agg) = &mut state.agg_state {
+        agg.remove_oldest(pos);
+    }
     state.entries.drain(..pos);
     pos
 }

@@ -311,8 +311,12 @@ impl ViewerRuntime {
         let (viewer, state) = &mut self.viewers[idx];
         viewer.update_definition_json(definition_json, layout_json);
         state.revision += 1;
-        // Recompute buckets so a newly-added or modified aggregation
-        // block is reflected in the next API response.
+        // The aggregation spec may have changed (bucket size, fn, group_by, even
+        // its accumulator type), so the running incremental state is stale. Drop
+        // it and let recompute_aggregation rebuild it from entries under the new
+        // spec, so a newly-added or modified aggregation block is reflected in
+        // the next API response.
+        state.agg_state = None;
         recompute_aggregation(state, viewer);
         true
     }
