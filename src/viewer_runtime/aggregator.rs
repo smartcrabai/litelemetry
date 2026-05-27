@@ -131,6 +131,32 @@ impl GroupKey {
         }
     }
 
+    /// Like [`extract`](Self::extract) but reads from an already-decoded metrics
+    /// payload so the caller can decode once and reuse it across all group keys.
+    /// `decoded` is `None` for non-metric or undecodable entries. `service_name`
+    /// comes from the entry (matching `extract`); every other key is looked up in
+    /// the payload's resource attributes -- so the result is identical to
+    /// `extract` for the same entry.
+    fn extract_from_decoded(self, decoded: Option<&Value>, entry: &NormalizedEntry) -> String {
+        if let GroupKey::ServiceName = self {
+            return entry
+                .service_name
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+        }
+        let key = match self {
+            GroupKey::ServiceName => unreachable!("handled above"),
+            GroupKey::K8sNodeName => "k8s.node.name",
+            GroupKey::K8sClusterName => "k8s.cluster.name",
+            GroupKey::K8sNamespace => "k8s.namespace.name",
+            GroupKey::K8sPodName => "k8s.pod.name",
+            GroupKey::HostName => "host.name",
+        };
+        decoded
+            .and_then(|v| resource_attribute_from_metrics_value(v, key))
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
     /// Extracts the group value from a specific `ResourceMetrics` block's
     /// `resource.attributes`, falling back to the entry-level value when the
     /// resource has no matching attribute.
@@ -289,12 +315,29 @@ fn collect_aggregation_inputs(
         || -> Vec<String> { spec.group_by.iter().map(|gk| gk.extract(entry)).collect() };
 
     let Some(filter) = spec.metric_name.as_deref() else {
-        let value = if needs_numeric {
-            extract_numeric_value(entry, None)
+        // No metric_name filter: the entry contributes exactly one input. Decode
+        // the metric payload at most once and reuse it for both the numeric value
+        // and any resource-derived group keys (service_name comes from the entry,
+        // not the payload). This replaces the previous code path that decoded once
+        // per numeric value plus once per non-service group_by key.
+        let needs_decode = entry.signal == Signal::Metrics
+            && (needs_numeric || spec.group_by.iter().any(|gk| *gk != GroupKey::ServiceName));
+        let decoded = if needs_decode {
+            payload_as_value(Signal::Metrics, &entry.payload)
         } else {
             None
         };
-        return vec![(entry_level_keys(), value)];
+        let group_keys: Vec<String> = spec
+            .group_by
+            .iter()
+            .map(|gk| gk.extract_from_decoded(decoded.as_ref(), entry))
+            .collect();
+        let value = if needs_numeric {
+            decoded.as_ref().and_then(numeric_value_from_metrics_value)
+        } else {
+            None
+        };
+        return vec![(group_keys, value)];
     };
 
     if entry.signal != Signal::Metrics {
@@ -429,11 +472,11 @@ fn percentile(samples: &mut [f64], p: f64) -> f64 {
 // accumulators, with no payload decoding. This turns per-tick decode cost from
 // O(all live entries) into O(entries ingested this tick).
 //
-// `add_entry` still delegates to `collect_aggregation_inputs`, which may decode
-// the payload more than once per entry (once for the numeric value and once per
-// resource-derived group_by key). Folding those into a single decode is a
-// further optimization left for later; the dominant per-tick cost is already
-// gone because decoding no longer scales with accumulated history.
+// `add_entry` delegates to `collect_aggregation_inputs`, which decodes an
+// entry's payload at most once (the numeric value and every resource-derived
+// group_by key share a single decode). Combined with the per-tick decode now
+// scaling with newly-ingested entries rather than accumulated history, this is
+// what keeps tick latency flat.
 //
 // The output matches `aggregate_entries` for the same set of live entries
 // (verified by the equivalence tests below), with two caveats that do not arise
@@ -687,28 +730,21 @@ impl AggregationState {
     }
 }
 
-/// Best-effort numeric value extractor for an entry.
-///
-/// Currently only inspects metric payloads, returning the first
-/// `asInt`/`asDouble` data point of the first metric. When `metric_name` is
-/// `Some`, skips metrics whose `name` field does not match. Returns None for
-/// traces / logs / unparseable metric payloads.
-fn extract_numeric_value(entry: &NormalizedEntry, metric_name: Option<&str>) -> Option<f64> {
-    if entry.signal != Signal::Metrics {
-        return None;
-    }
-    let value = payload_as_value(Signal::Metrics, &entry.payload)?;
+/// Best-effort numeric value over an already-decoded metrics payload: the first
+/// `asInt`/`asDouble` data point of the first metric, or `None` when there is no
+/// usable data point. The `metric_name`-filtered aggregation path extracts its
+/// own values via `first_data_point_value`, so this helper is only used by the
+/// unfiltered path and takes no name filter. Callers decode the payload once
+/// (see `collect_aggregation_inputs`) and reuse it across the value and group
+/// keys. Preserves the original early-return when the first `ResourceMetrics`
+/// block lacks `scopeMetrics`/`metrics`.
+fn numeric_value_from_metrics_value(value: &Value) -> Option<f64> {
     let resource_metrics = value.get("resourceMetrics")?.as_array()?;
     for rm in resource_metrics {
         let scope_metrics = rm.get("scopeMetrics").and_then(|v| v.as_array())?;
         for sm in scope_metrics {
             let metrics = sm.get("metrics").and_then(|v| v.as_array())?;
             for m in metrics {
-                if let Some(filter) = metric_name
-                    && m.get("name").and_then(|v| v.as_str()) != Some(filter)
-                {
-                    continue;
-                }
                 if let Some(v) = first_data_point_value(m) {
                     return Some(v);
                 }
@@ -752,6 +788,15 @@ fn extract_resource_attribute(entry: &NormalizedEntry, key: &str) -> Option<Stri
         return None;
     }
     let value = payload_as_value(Signal::Metrics, &entry.payload)?;
+    resource_attribute_from_metrics_value(&value, key)
+}
+
+/// Resource-attribute lookup over an already-decoded metrics payload. Split out
+/// from [`extract_resource_attribute`] so a single decode can be shared across
+/// the numeric value and every group_by key. Scans all `ResourceMetrics` blocks
+/// and returns the first block that carries the requested attribute, identical
+/// to the previous inline version.
+fn resource_attribute_from_metrics_value(value: &Value, key: &str) -> Option<String> {
     let resource_metrics = value.get("resourceMetrics")?.as_array()?;
     for rm in resource_metrics {
         let Some(attrs) = rm
@@ -1582,5 +1627,125 @@ mod tests {
         // Asking to remove more than were added must not panic and must empty out.
         state.remove_oldest(entries.len() + 10);
         assert!(state.finalize().is_empty());
+    }
+
+    // --- decode-once / multi-resource semantics ---------------------------
+    // `collect_aggregation_inputs` now decodes a payload at most once per entry
+    // and reuses it for the numeric value and every group_by key. These tests
+    // pin the exact traversal semantics of the no-`metric_name` path against
+    // multi-`ResourceMetrics` payloads, so the decode-once refactor cannot
+    // silently change which block a value or group key comes from.
+
+    /// Two `ResourceMetrics` blocks; the metric "test" sits in `sum.dataPoints`.
+    /// `attrs` sets each block's `resource.attributes`. A block with `value:
+    /// None` omits `scopeMetrics` entirely (used to exercise the numeric
+    /// early-return quirk).
+    fn two_block_metrics_payload(
+        block_a: (Vec<(&str, &str)>, Option<u64>),
+        block_b: (Vec<(&str, &str)>, Option<u64>),
+    ) -> Bytes {
+        let block = |attrs: Vec<(&str, &str)>, value: Option<u64>| -> Value {
+            let attributes: Vec<Value> = attrs
+                .into_iter()
+                .map(|(k, v)| json!({"key": k, "value": {"stringValue": v}}))
+                .collect();
+            let mut rm = json!({ "resource": { "attributes": attributes } });
+            if let Some(v) = value {
+                rm["scopeMetrics"] = json!([{
+                    "metrics": [{ "name": "test", "sum": { "dataPoints": [{ "asInt": v.to_string() }] } }]
+                }]);
+            }
+            rm
+        };
+        Bytes::from(
+            json!({ "resourceMetrics": [block(block_a.0, block_a.1), block(block_b.0, block_b.1)] })
+                .to_string(),
+        )
+    }
+
+    #[test]
+    fn non_filter_numeric_takes_first_block_value() {
+        // sum, no group_by, no metric_name: the single input's value is the
+        // first metric's first data point (block A = 10), not block B's 20.
+        let payload = two_block_metrics_payload(
+            (vec![("service.name", "svc-a")], Some(10)),
+            (vec![("service.name", "svc-b")], Some(20)),
+        );
+        let entries = vec![entry(Signal::Metrics, 60_000, Some("svc-a"), payload)];
+        let buckets = aggregate_entries(&spec(AggFn::Sum, vec![]), &entries);
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].value, 10.0);
+    }
+
+    #[test]
+    fn non_filter_numeric_preserves_first_block_early_return() {
+        // Pinned pre-existing quirk: if the FIRST ResourceMetrics block has no
+        // scopeMetrics, numeric extraction returns None even though block B
+        // carries a value -- so the entry contributes nothing to a sum.
+        let payload = two_block_metrics_payload(
+            (vec![("service.name", "svc-a")], None), // no scopeMetrics
+            (vec![("service.name", "svc-b")], Some(20)),
+        );
+        let entries = vec![entry(Signal::Metrics, 60_000, Some("svc-a"), payload)];
+        let buckets = aggregate_entries(&spec(AggFn::Sum, vec![]), &entries);
+        assert!(
+            buckets.is_empty(),
+            "first-block early-return must yield no value"
+        );
+    }
+
+    #[test]
+    fn non_filter_group_key_scans_all_blocks_for_attribute() {
+        // count, group_by [k8s.pod.name], no metric_name: the group key scans
+        // every block and uses the first one carrying the attribute (block B),
+        // even though block A comes first.
+        let payload = two_block_metrics_payload(
+            (vec![("service.name", "svc-a")], Some(10)),
+            (vec![("k8s.pod.name", "pod-b")], Some(20)),
+        );
+        let entries = vec![entry(Signal::Metrics, 60_000, Some("svc-a"), payload)];
+        let buckets = aggregate_entries(&spec(AggFn::Count, vec![GroupKey::K8sPodName]), &entries);
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].group_keys, vec!["pod-b".to_string()]);
+        assert_eq!(buckets[0].value, 1.0);
+    }
+
+    #[test]
+    fn non_filter_single_decode_serves_value_and_multiple_group_keys() {
+        // sum, group_by [service_name, k8s.pod.name]: service_name comes from the
+        // entry, k8s.pod.name from the (singly-decoded) payload, value from the
+        // payload -- all from one decode. Single resource block here.
+        let payload = metric_payload_with_resource_attrs(vec![("k8s.pod.name", "pod-1")], 42);
+        let entries = vec![entry(Signal::Metrics, 60_000, Some("svc-1"), payload)];
+        let buckets = aggregate_entries(
+            &spec(
+                AggFn::Sum,
+                vec![GroupKey::ServiceName, GroupKey::K8sPodName],
+            ),
+            &entries,
+        );
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(
+            buckets[0].group_keys,
+            vec!["svc-1".to_string(), "pod-1".to_string()]
+        );
+        assert_eq!(buckets[0].value, 42.0);
+    }
+
+    #[test]
+    fn non_filter_no_decode_needed_for_count_by_service_name() {
+        // count + group_by [service_name] needs neither the numeric value nor a
+        // payload-derived key, so service_name must still resolve from the entry
+        // (a non-metric payload here proves no decode is required).
+        let entries = vec![entry(
+            Signal::Traces,
+            60_000,
+            Some("svc-x"),
+            Bytes::from_static(b"not-otlp"),
+        )];
+        let buckets = aggregate_entries(&spec(AggFn::Count, vec![GroupKey::ServiceName]), &entries);
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].group_keys, vec!["svc-x".to_string()]);
+        assert_eq!(buckets[0].value, 1.0);
     }
 }
