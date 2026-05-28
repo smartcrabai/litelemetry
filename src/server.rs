@@ -1351,6 +1351,12 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         min-width: 0;
       }
 
+      /* Vanilla (non-Chart.js) timeseries canvas needs an explicit height to
+         render into; Chart.js panels size themselves to the container. */
+      .panel-timeseries-canvas {
+        height: 200px;
+      }
+
       .dashboard-panel-scroll {
         overflow: auto;
         max-height: 220px;
@@ -1380,6 +1386,10 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
       body.fullscreen .dashboard-panel-media,
       body.fullscreen .dashboard-panel-scroll {
         max-height: calc(100vh - 120px);
+      }
+
+      body.fullscreen .panel-timeseries-canvas {
+        height: calc(100vh - 120px);
       }
 
       .dashboard-grid {
@@ -4886,13 +4896,21 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         for (const chart of dashboardPanelCharts.values()) {
           try { chart.resize(); } catch (_) {}
         }
+        // Timeseries panels are vanilla canvases, not Chart.js instances, so
+        // they need an explicit re-render to pick up the new dimensions.
+        for (const reg of dashboardLazyPanels) {
+          if (!reg.fetched || !reg.panel.viewer) continue;
+          if (readViewerChartType(reg.panel.viewer) !== 'timeseries') continue;
+          const canvas = reg.panelEl.querySelector('[data-role="panel-timeseries"]');
+          if (canvas) renderTimeseriesCanvas(canvas, reg.panel.viewer.aggregated_buckets || []);
+        }
       }
 
       function applyFullscreenLayout(enabled) {
         document.body.classList.toggle('fullscreen', enabled);
         dashboardFullscreenButton.textContent = enabled ? 'X' : '[ ]';
         dashboardFullscreenButton.setAttribute('aria-label', enabled ? 'Exit fullscreen' : 'Enter fullscreen');
-        if (dashboardPanelCharts.size) {
+        if (dashboardPanelCharts.size || dashboardLazyPanels.length) {
           requestAnimationFrame(() => requestAnimationFrame(resizeDashboardPanelCharts));
         }
       }
@@ -6055,7 +6073,10 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         const isTraces = Array.isArray(v.signals) && v.signals.includes('traces');
         const supportsMetricCharts = viewerSupportsMetricCharts(v);
         let kind;
-        if (chartType === 'billboard' && supportsMetricCharts) {
+        if (chartType === 'timeseries') {
+          // Renders from aggregated_buckets, so the kind is independent of entries.
+          kind = 'timeseries';
+        } else if (chartType === 'billboard' && supportsMetricCharts) {
           kind = 'billboard';
         } else if (chartType !== 'table' && supportsMetricCharts && v.entries.length) {
           kind = isCircularChartType(chartType) ? `circular:${chartType}` : `chart:${chartType}`;
@@ -6191,7 +6212,15 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         const isTraces = viewer.signals.includes('traces');
         const supportsMetricCharts = viewerSupportsMetricCharts(viewer);
 
-        if (chartType === 'billboard' && supportsMetricCharts) {
+        if (chartType === 'timeseries') {
+          // Render the aggregation (group_by series) via the same canvas renderer
+          // the detail page uses, rather than plotting raw entries by metric name.
+          const canvas = document.createElement('canvas');
+          canvas.classList.add('dashboard-panel-media', 'panel-timeseries-canvas');
+          canvas.dataset.role = 'panel-timeseries';
+          body.appendChild(canvas);
+          renderTimeseriesCanvas(canvas, viewer.aggregated_buckets || []);
+        } else if (chartType === 'billboard' && supportsMetricCharts) {
           const host = document.createElement('div');
           host.classList.add('dashboard-panel-media');
           host.dataset.role = 'panel-billboard';
@@ -6487,6 +6516,12 @@ const VIEWER_PAGE: &str = r####"<!doctype html>
         const chartType = readViewerChartType(v);
         const isTraces = v.signals.includes('traces');
         const supportsMetricCharts = viewerSupportsMetricCharts(v);
+
+        if (chartType === 'timeseries') {
+          const canvas = existing.querySelector('[data-role="panel-timeseries"]');
+          if (canvas) renderTimeseriesCanvas(canvas, v.aggregated_buckets || []);
+          return;
+        }
 
         if (chartType === 'billboard' && supportsMetricCharts) {
           const host = existing.querySelector('[data-role="panel-billboard"]');
@@ -13357,6 +13392,27 @@ mod tests {
         assert!(
             html.contains("function renderPanelChart(chartType, entries, lookbackMs, canvas) {")
         );
+    }
+
+    #[tokio::test]
+    async fn test_root_dashboard_panel_renders_timeseries_from_aggregated_buckets() {
+        // Regression: dashboard `timeseries` panels must render from
+        // `aggregated_buckets` (like the detail page), not fall through to
+        // buildChartData(entries) which plotted the full raw metric stream and
+        // made every aggregation panel look identical.
+        let (_, html) = index_html().await;
+        // Full-rebuild path creates a dedicated timeseries canvas.
+        assert!(html.contains("canvas.dataset.role = 'panel-timeseries';"));
+        assert!(html.contains("renderTimeseriesCanvas(canvas, viewer.aggregated_buckets || []);"));
+        // In-place refresh path reuses it.
+        assert!(html.contains(
+            "const canvas = existing.querySelector('[data-role=\"panel-timeseries\"]');"
+        ));
+        assert!(html.contains("renderTimeseriesCanvas(canvas, v.aggregated_buckets || []);"));
+        // Fullscreen/resize re-renders the vanilla canvas (no Chart.js .resize()).
+        assert!(html.contains(
+            "if (canvas) renderTimeseriesCanvas(canvas, reg.panel.viewer.aggregated_buckets || []);"
+        ));
     }
 
     #[tokio::test]
