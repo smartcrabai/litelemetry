@@ -48,7 +48,7 @@ All routes are mounted under the same `LITELEMETRY_BASE_URL` and share the same 
 | Method | Path | Summary |
 | --- | --- | --- |
 | `GET` | `/api/traces?trace_id=...` | Fetch one trace with all spans expanded. |
-| `GET` | `/api/traces/search` | List recent traces, filtered by service / min duration. |
+| `GET` | `/api/traces/search` | List recent traces, filtered by service / min duration / span name / errors / attribute. |
 | `GET` | `/api/traces/{trace_id}/waterfall` | Get the span waterfall view of a single trace. |
 
 ## APM — see [apm.md](apm.md)
