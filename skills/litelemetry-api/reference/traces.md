@@ -73,10 +73,15 @@ List recent traces matching coarse filters. Use this to discover trace ids first
 
 ### Query params (`TraceSearchQuery`)
 
+Trace-level params (`service`, `min_duration_ms`, `only_errors`) are ANDed. Span-level params (`span_name`, `attribute`) must be satisfied by a *single* span within the trace — except that resource attributes are shared by every span under the same `ResourceSpans`, so an `attribute` match against a resource attribute effectively holds for all of that resource's spans.
+
 | Param | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `service` | string | no | Exact match on `service_name`. |
 | `min_duration_ms` | integer | no | Drop traces shorter than this. |
+| `span_name` | string | no | Case-insensitive substring match on a span's `name`. |
+| `only_errors` | bool | no | Truthy enables it (a bare `?only_errors` or `1`/`true`/`yes`/`on`); `false`/`0`/`no`/`off` disable it. Keeps only traces with an error span (status code 2). |
+| `attribute` | string | no | `key` (presence) or `key=value` (case-insensitive substring on the value). Scalar value types are supported (`stringValue`, `intValue`, `boolValue`, `doubleValue`), so `http.status_code=500` works. Checked against span attributes, then resource attributes. |
 
 ### Response 200 (`TraceSearchResponse`)
 
@@ -99,6 +104,9 @@ Sample: [examples/traces.search.json](../examples/traces.search.json).
 
 ```
 scripts/litelemetry.sh GET '/api/traces/search?service=checkout&min_duration_ms=500'
+
+# error traces from a db span carrying db.system=postgres
+scripts/litelemetry.sh GET '/api/traces/search?only_errors=true&span_name=db.query&attribute=db.system=postgres'
 ```
 
 ---

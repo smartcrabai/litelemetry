@@ -11881,6 +11881,16 @@ fn structured_trace_preview(payload: &Bytes) -> Option<String> {
 
 const TRACE_SEARCH_READ_LIMIT: usize = 100_000;
 
+/// Lenient truthiness for query-string boolean flags. A bare `?flag` (empty
+/// value) counts as enabled; explicit `false`/`0`/`no`/`off` (any case) count
+/// as disabled. Anything else is treated as enabled.
+fn is_truthy_flag(raw: &str) -> bool {
+    !matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "false" | "0" | "no" | "off"
+    )
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct TraceLookupQuery {
     trace_id: Option<String>,
@@ -11890,6 +11900,16 @@ struct TraceLookupQuery {
 struct TraceSearchQuery {
     service: Option<String>,
     min_duration_ms: Option<u64>,
+    /// Case-insensitive substring match against span names.
+    span_name: Option<String>,
+    /// When truthy, only traces with at least one error span are returned.
+    /// Parsed leniently (see [`is_truthy_flag`]) so `?only_errors=1` and a
+    /// bare `?only_errors` work, not just `true`/`false`.
+    only_errors: Option<String>,
+    /// Attribute predicate in `key` or `key=value` form. `key` matches any
+    /// span carrying that attribute; `key=value` additionally requires the
+    /// string value to contain `value` (case-insensitive).
+    attribute: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -11931,14 +11951,31 @@ async fn search_traces_handler(
     State(state): State<AppState>,
     Query(params): Query<TraceSearchQuery>,
 ) -> Result<Json<TraceSearchResponse>, StatusCode> {
-    let filter = crate::apm::trace_search::TraceSearchFilter {
-        service: params
-            .service
+    let trim_opt = |value: Option<String>| {
+        value
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .map(str::to_string),
+            .map(str::to_string)
+    };
+
+    let attribute = trim_opt(params.attribute).map(|raw| {
+        let (key, value) = match raw.split_once('=') {
+            Some((key, value)) => (key.trim().to_string(), {
+                let value = value.trim();
+                (!value.is_empty()).then(|| value.to_string())
+            }),
+            None => (raw, None),
+        };
+        crate::apm::trace_search::AttributeFilter { key, value }
+    });
+
+    let filter = crate::apm::trace_search::TraceSearchFilter {
+        service: trim_opt(params.service),
         min_duration_ms: params.min_duration_ms,
+        span_name: trim_opt(params.span_name),
+        only_errors: params.only_errors.as_deref().is_some_and(is_truthy_flag),
+        attribute: attribute.filter(|a| !a.key.is_empty()),
     };
 
     let entries = read_all_trace_entries(&state).await?;
@@ -12496,6 +12533,22 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::domain::api_key::hash_api_key;
+
+    #[test]
+    fn is_truthy_flag_treats_presence_and_common_truthy_values_as_enabled() {
+        // bare `?only_errors` arrives as an empty string
+        assert!(is_truthy_flag(""));
+        assert!(is_truthy_flag("1"));
+        assert!(is_truthy_flag("true"));
+        assert!(is_truthy_flag("TRUE"));
+        assert!(is_truthy_flag("yes"));
+        assert!(is_truthy_flag("on"));
+
+        assert!(!is_truthy_flag("false"));
+        assert!(!is_truthy_flag("0"));
+        assert!(!is_truthy_flag("no"));
+        assert!(!is_truthy_flag("OFF"));
+    }
     use crate::storage::api_key_store::MemoryApiKeyStore;
     use crate::storage::memory::MemoryStreamStore;
     use crate::storage::memory::MemoryViewerStore;

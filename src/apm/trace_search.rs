@@ -23,6 +23,11 @@ use crate::ingest::otlp_http::attribute_string_value;
 use crate::ingest::otlp_pb::payload_as_value;
 
 /// Filter for [`search_traces`].
+///
+/// Trace-level predicates (`service`, `min_duration_ms`, `only_errors`) are
+/// evaluated against the aggregated [`TraceListItem`]. Span-level predicates
+/// (`span_name`, `attribute`) match a trace when *at least one* of its spans
+/// satisfies all of them together.
 #[derive(Debug, Clone, Default)]
 pub struct TraceSearchFilter {
     /// If set, only traces that contain at least one span whose
@@ -31,6 +36,26 @@ pub struct TraceSearchFilter {
     /// If set, only traces whose total duration (max end - min start) is
     /// `>= min_duration_ms` are returned.
     pub min_duration_ms: Option<u64>,
+    /// If set, only traces that contain at least one span whose `name`
+    /// contains this substring (case-insensitive) are returned.
+    pub span_name: Option<String>,
+    /// If `true`, only traces with at least one error span (status code 2,
+    /// i.e. `STATUS_CODE_ERROR`) are returned.
+    pub only_errors: bool,
+    /// If set, only traces that contain at least one span carrying this
+    /// attribute (looked up in span attributes, then resource attributes) are
+    /// returned.
+    pub attribute: Option<AttributeFilter>,
+}
+
+/// Span/resource attribute predicate used by [`TraceSearchFilter`].
+#[derive(Debug, Clone)]
+pub struct AttributeFilter {
+    /// Exact attribute key to match (e.g. `http.method`).
+    pub key: String,
+    /// If set, the attribute's string value must contain this substring
+    /// (case-insensitive). If `None`, the key only needs to be present.
+    pub value: Option<String>,
 }
 
 /// Lightweight description of a trace, used by the search list view.
@@ -95,6 +120,7 @@ pub fn search_traces(
 
     let mut traces: Vec<TraceListItem> = spans_by_trace
         .into_iter()
+        .filter(|(_, spans)| trace_spans_match(spans, filter))
         .map(|(trace_id, spans)| summarize_trace(trace_id, &spans))
         .filter(|trace| trace_matches_filter(trace, filter))
         .collect();
@@ -138,7 +164,79 @@ fn trace_matches_filter(trace: &TraceListItem, filter: &TraceSearchFilter) -> bo
     {
         return false;
     }
+    if filter.only_errors && !trace.has_error {
+        return false;
+    }
     true
+}
+
+/// Returns `true` when the trace satisfies the span-level predicates
+/// (`span_name`, `attribute`). A trace matches when at least one span
+/// satisfies *all* active span-level predicates. Returns `true` when no
+/// span-level predicate is set.
+fn trace_spans_match(spans: &[TraceDetailSpan], filter: &TraceSearchFilter) -> bool {
+    if filter.span_name.is_none() && filter.attribute.is_none() {
+        return true;
+    }
+    spans.iter().any(|span| span_matches(span, filter))
+}
+
+fn span_matches(span: &TraceDetailSpan, filter: &TraceSearchFilter) -> bool {
+    if let Some(name) = filter.span_name.as_deref()
+        && !span.name.to_lowercase().contains(&name.to_lowercase())
+    {
+        return false;
+    }
+    if let Some(attr) = filter.attribute.as_ref()
+        && !attribute_matches(&span.span_attributes, attr)
+        && !attribute_matches(&span.resource_attributes, attr)
+    {
+        return false;
+    }
+    true
+}
+
+fn attribute_matches(attributes: &[Value], filter: &AttributeFilter) -> bool {
+    match filter.value.as_deref() {
+        Some(want) => attribute_scalar_as_string(attributes, &filter.key)
+            .is_some_and(|value| value.to_lowercase().contains(&want.to_lowercase())),
+        None => attributes
+            .iter()
+            .any(|kv| kv.get("key").and_then(Value::as_str) == Some(filter.key.as_str())),
+    }
+}
+
+/// Returns the scalar value of the attribute `key` rendered as a string,
+/// covering the OTLP scalar `AnyValue` variants (`stringValue`, `intValue`,
+/// `boolValue`, `doubleValue`). Unlike [`attribute_string_value`], this lets
+/// `attribute=key=value` filters match numeric/boolean attributes (e.g.
+/// `http.status_code=500`). Non-scalar variants (array/kvlist/bytes) yield
+/// `None`.
+fn attribute_scalar_as_string(attributes: &[Value], key: &str) -> Option<String> {
+    let value = attributes
+        .iter()
+        .find(|kv| kv.get("key").and_then(Value::as_str) == Some(key))?
+        .get("value")?;
+
+    if let Some(s) = value.get("stringValue").and_then(Value::as_str) {
+        return Some(s.to_string());
+    }
+    if let Some(b) = value.get("boolValue").and_then(Value::as_bool) {
+        return Some(b.to_string());
+    }
+    if let Some(int_value) = value.get("intValue") {
+        // OTLP/JSON encodes int64 as a quoted string, but tolerate a raw number too.
+        if let Some(s) = int_value.as_str() {
+            return Some(s.to_string());
+        }
+        if let Some(n) = int_value.as_i64() {
+            return Some(n.to_string());
+        }
+    }
+    if let Some(d) = value.get("doubleValue").and_then(Value::as_f64) {
+        return Some(d.to_string());
+    }
+    None
 }
 
 fn collect_spans(
@@ -391,7 +489,7 @@ mod tests {
 
         let filter = TraceSearchFilter {
             service: Some("checkout".to_string()),
-            min_duration_ms: None,
+            ..Default::default()
         };
         let traces = search_traces(&entries, &filter);
         assert_eq!(traces.len(), 1);
@@ -420,12 +518,236 @@ mod tests {
         ];
 
         let filter = TraceSearchFilter {
-            service: None,
             min_duration_ms: Some(100),
+            ..Default::default()
         };
         let traces = search_traces(&entries, &filter);
         assert_eq!(traces.len(), 1);
         assert_eq!(traces[0].trace_id, "t2");
+    }
+
+    #[test]
+    fn search_traces_filter_by_span_name_substring() {
+        let entries = vec![
+            trace_entry(span_payload(
+                "frontend",
+                "t1",
+                json!([{ "traceId": "t1", "spanId": "s1", "name": "GET /users" }]),
+            )),
+            trace_entry(span_payload(
+                "frontend",
+                "t2",
+                json!([{ "traceId": "t2", "spanId": "s2", "name": "db.query SELECT" }]),
+            )),
+        ];
+
+        let filter = TraceSearchFilter {
+            // case-insensitive substring
+            span_name: Some("db.QUERY".to_string()),
+            ..Default::default()
+        };
+        let traces = search_traces(&entries, &filter);
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0].trace_id, "t2");
+    }
+
+    #[test]
+    fn search_traces_filter_only_errors() {
+        let entries = vec![
+            trace_entry(span_payload(
+                "frontend",
+                "t1",
+                json!([{ "traceId": "t1", "spanId": "s1", "name": "ok" }]),
+            )),
+            trace_entry(span_payload(
+                "frontend",
+                "t2",
+                json!([{ "traceId": "t2", "spanId": "s2", "name": "boom", "status": {"code": 2} }]),
+            )),
+        ];
+
+        let filter = TraceSearchFilter {
+            only_errors: true,
+            ..Default::default()
+        };
+        let traces = search_traces(&entries, &filter);
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0].trace_id, "t2");
+    }
+
+    #[test]
+    fn search_traces_filter_by_attribute_key_and_value() {
+        let entries = vec![
+            trace_entry(span_payload(
+                "frontend",
+                "t1",
+                json!([{
+                    "traceId": "t1", "spanId": "s1", "name": "a",
+                    "attributes": [{"key": "http.method", "value": {"stringValue": "GET"}}]
+                }]),
+            )),
+            trace_entry(span_payload(
+                "frontend",
+                "t2",
+                json!([{
+                    "traceId": "t2", "spanId": "s2", "name": "b",
+                    "attributes": [{"key": "http.method", "value": {"stringValue": "POST"}}]
+                }]),
+            )),
+        ];
+
+        // key=value: case-insensitive substring on the value
+        let by_value = search_traces(
+            &entries,
+            &TraceSearchFilter {
+                attribute: Some(AttributeFilter {
+                    key: "http.method".to_string(),
+                    value: Some("post".to_string()),
+                }),
+                ..Default::default()
+            },
+        );
+        assert_eq!(by_value.len(), 1);
+        assert_eq!(by_value[0].trace_id, "t2");
+
+        // key-only: presence match -- both traces carry http.method
+        let by_key = search_traces(
+            &entries,
+            &TraceSearchFilter {
+                attribute: Some(AttributeFilter {
+                    key: "http.method".to_string(),
+                    value: None,
+                }),
+                ..Default::default()
+            },
+        );
+        assert_eq!(by_key.len(), 2);
+    }
+
+    #[test]
+    fn search_traces_filter_by_numeric_and_bool_attribute() {
+        let entries = vec![
+            trace_entry(span_payload(
+                "frontend",
+                "t1",
+                json!([{
+                    "traceId": "t1", "spanId": "s1", "name": "a",
+                    "attributes": [
+                        {"key": "http.status_code", "value": {"intValue": "500"}},
+                        {"key": "cache.hit", "value": {"boolValue": false}}
+                    ]
+                }]),
+            )),
+            trace_entry(span_payload(
+                "frontend",
+                "t2",
+                json!([{
+                    "traceId": "t2", "spanId": "s2", "name": "b",
+                    "attributes": [
+                        {"key": "http.status_code", "value": {"intValue": "200"}},
+                        {"key": "cache.hit", "value": {"boolValue": true}}
+                    ]
+                }]),
+            )),
+        ];
+
+        // intValue (encoded as a quoted string in OTLP/JSON)
+        let by_status = search_traces(
+            &entries,
+            &TraceSearchFilter {
+                attribute: Some(AttributeFilter {
+                    key: "http.status_code".to_string(),
+                    value: Some("500".to_string()),
+                }),
+                ..Default::default()
+            },
+        );
+        assert_eq!(by_status.len(), 1);
+        assert_eq!(by_status[0].trace_id, "t1");
+
+        // boolValue
+        let by_bool = search_traces(
+            &entries,
+            &TraceSearchFilter {
+                attribute: Some(AttributeFilter {
+                    key: "cache.hit".to_string(),
+                    value: Some("true".to_string()),
+                }),
+                ..Default::default()
+            },
+        );
+        assert_eq!(by_bool.len(), 1);
+        assert_eq!(by_bool[0].trace_id, "t2");
+    }
+
+    #[test]
+    fn search_traces_matches_resource_attribute() {
+        let entries = vec![trace_entry(span_payload(
+            "frontend",
+            "t1",
+            json!([{ "traceId": "t1", "spanId": "s1", "name": "a" }]),
+        ))];
+
+        // host.name lives on the resource, not the span
+        let traces = search_traces(
+            &entries,
+            &TraceSearchFilter {
+                attribute: Some(AttributeFilter {
+                    key: "host.name".to_string(),
+                    value: Some("host-a".to_string()),
+                }),
+                ..Default::default()
+            },
+        );
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0].trace_id, "t1");
+    }
+
+    #[test]
+    fn search_traces_span_filters_require_same_span() {
+        // span_name + attribute must be satisfied by the *same* span.
+        let entries = vec![trace_entry(span_payload(
+            "frontend",
+            "t1",
+            json!([
+                {
+                    "traceId": "t1", "spanId": "s1", "name": "db.query",
+                    "attributes": [{"key": "db.system", "value": {"stringValue": "postgres"}}]
+                },
+                {
+                    "traceId": "t1", "spanId": "s2", "name": "http.request",
+                    "attributes": [{"key": "http.method", "value": {"stringValue": "GET"}}]
+                }
+            ]),
+        ))];
+
+        // "db.query" span does NOT carry http.method -> no match
+        let mismatch = search_traces(
+            &entries,
+            &TraceSearchFilter {
+                span_name: Some("db.query".to_string()),
+                attribute: Some(AttributeFilter {
+                    key: "http.method".to_string(),
+                    value: None,
+                }),
+                ..Default::default()
+            },
+        );
+        assert!(mismatch.is_empty());
+
+        // "db.query" span with db.system -> match
+        let hit = search_traces(
+            &entries,
+            &TraceSearchFilter {
+                span_name: Some("db.query".to_string()),
+                attribute: Some(AttributeFilter {
+                    key: "db.system".to_string(),
+                    value: Some("postgres".to_string()),
+                }),
+                ..Default::default()
+            },
+        );
+        assert_eq!(hit.len(), 1);
     }
 
     #[test]
